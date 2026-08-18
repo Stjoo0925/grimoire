@@ -10,7 +10,7 @@
 
 전체 기획은 [PLANNING.md](./PLANNING.md) 참고.
 
-> 현재 상태: **스캐폴드 단계**. 인증 뼈대와 3층 폴더 구조만 있고 수집·그래프·도서관 로직은 아직 미구현 스텁입니다.
+> 현재 상태: **① 수집기 구현 완료**. GitHub OAuth 로그인 → 레포·커밋·README·잔디 수집 → `data/{login}.json` 소장 + 요약 화면까지 동작합니다. ② 지식그래프와 ③ 도서관 UI는 아직 스텁입니다.
 
 ## 3층 아키텍처
 
@@ -29,7 +29,7 @@
 
 | 계층 | 위치 | 내용 |
 |---|---|---|
-| ① 수집기 | `src/lib/collector/` | `types.ts` (Repo/Commit/ContributionDay), `github.ts` (페처 스텁) |
+| ① 수집기 | `src/lib/collector/` | `types.ts` (Repo/Commit/ContributionDay/CollectionSnapshot), `github.ts` (REST+GraphQL 페처), `storage.ts` (`data/{login}.json` 소장) |
 | ② 지식그래프 | `src/lib/graph/` | `types.ts` (GraphNode/GraphEdge, 엣지 `uses`·`about`·`relatedTo`·`learned`), `builder.ts` (빌더 스텁) |
 | ③ 도서관 UI | `src/components/library/` | `Bookshelf.tsx`, `Book.tsx` (자리표시) |
 | 인증 | `src/auth.ts`, `src/app/api/auth/[...nextauth]/route.ts` | Auth.js v5 + GitHub OAuth |
@@ -86,6 +86,12 @@ npm run dev
 ```
 
 http://localhost:3000 에서 "GitHub로 로그인" 버튼으로 OAuth 흐름을 확인할 수 있습니다.
+
+### 5. 수집
+
+로그인하면 **수집하기** 버튼이 나타납니다. 누르면 서버에서 한 번에 전체 수집(레포 → 언어·README·커밋 → 잔디)을 돌리고 결과를 `data/{login}.json`에 저장한 뒤 요약(책 수·총 커밋·수집 기간·언어 종수·잔디 총 기여·마지막 수집 시각)을 보여줍니다. 레포 수에 따라 수 분이 걸릴 수 있습니다.
+
+잔여 rate limit이 50회 아래로 떨어지면 수집을 중단하고 스냅샷을 `partial`로 표시합니다(모아둔 데이터는 그대로 저장). `data/`는 `.gitignore` 대상입니다.
 
 ### 그 외 명령
 

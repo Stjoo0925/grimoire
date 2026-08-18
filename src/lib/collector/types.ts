@@ -20,7 +20,7 @@ export interface Repo {
   stars: number;
   createdAt: string;
   pushedAt: string;
-  /** 서문 — 원문 마크다운 */
+  /** 서문 — 원문 마크다운 (최대 약 10KB까지만 소장) */
   readme: string | null;
   htmlUrl: string;
 }
@@ -32,9 +32,6 @@ export interface Commit {
   message: string;
   authoredAt: string;
   authorLogin: string | null;
-  additions?: number;
-  deletions?: number;
-  changedFiles?: number;
 }
 
 /** 잔디 한 칸 = 수련 일지 하루 */
@@ -46,6 +43,24 @@ export interface ContributionDay {
   level: 0 | 1 | 2 | 3 | 4;
 }
 
+/** 수집 결과 요약 — 서재 입구에 걸리는 명패 */
+export interface CollectionStats {
+  /** 책(레포) 수 */
+  repoCount: number;
+  /** 비공개 서고에 꽂힐 책 수 */
+  privateRepoCount: number;
+  /** 총 커밋(페이지) 수 */
+  commitCount: number;
+  /** 서가 분류 수 = 등장한 언어 종수 */
+  languageCount: number;
+  /** 잔디 총 기여 수 */
+  contributionCount: number;
+  /** 수집 기간 — 첫 커밋 (ISO, 커밋이 없으면 null) */
+  firstCommitAt: string | null;
+  /** 수집 기간 — 마지막 커밋 (ISO, 커밋이 없으면 null) */
+  lastCommitAt: string | null;
+}
+
 /** 한 사용자의 수집 결과 전체 (로컬 "소장" 단위) */
 export interface CollectionSnapshot {
   login: string;
@@ -53,4 +68,15 @@ export interface CollectionSnapshot {
   repos: Repo[];
   commits: Commit[];
   contributions: ContributionDay[];
+  stats: CollectionStats;
+  /** rate limit 등으로 중간에 멈춘 불완전한 수집인지 */
+  partial: boolean;
+  /** partial일 때 그 사유 */
+  partialReason?: string;
+}
+
+/** 수집 서버 액션의 결과 (UI 상태용) */
+export interface CollectResult {
+  ok: boolean;
+  message: string | null;
 }

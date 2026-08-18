@@ -14,12 +14,15 @@ declare module "next-auth" {
   interface Session {
     /** GitHub API 호출에 사용할 사용자 액세스 토큰 (서버 세션 한정) */
     accessToken?: string;
+    /** GitHub 로그인 핸들 (표시 이름이 아닌 실제 계정명) */
+    login?: string;
   }
 }
 
 declare module "next-auth/jwt" {
   interface JWT {
     accessToken?: string;
+    login?: string;
   }
 }
 
@@ -34,15 +37,21 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     }),
   ],
   callbacks: {
-    async jwt({ token, account }) {
-      // 최초 로그인 시에만 account가 존재한다.
+    async jwt({ token, account, profile }) {
+      // 최초 로그인 시에만 account/profile이 존재한다.
       if (account?.access_token) {
         token.accessToken = account.access_token;
+      }
+      // 수집기는 표시 이름이 아니라 GitHub 로그인 핸들을 써야 한다.
+      const githubLogin = (profile as { login?: unknown } | undefined)?.login;
+      if (typeof githubLogin === "string") {
+        token.login = githubLogin;
       }
       return token;
     },
     async session({ session, token }) {
       session.accessToken = token.accessToken;
+      session.login = token.login;
       return session;
     },
   },

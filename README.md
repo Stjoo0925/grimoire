@@ -73,7 +73,7 @@ AUTH_GITHUB_SECRET=       # OAuth App의 Client Secret
 
 GRAPH_EXTRACTOR=auto      # none | ollama | claude | auto (아래 "지식그래프" 참고)
 OLLAMA_HOST=http://localhost:11434
-OLLAMA_MODEL=qwen2.5:7b-instruct
+OLLAMA_MODEL=qwen2.5:7b-instruct   # 초기 기본값. 화면의 ⚙ 모델 설정에서 고르면 그쪽이 우선합니다
 ```
 
 `AUTH_SECRET`은 다음 명령으로 생성할 수 있습니다.
@@ -123,7 +123,7 @@ http://localhost:3000 에서 "GitHub로 로그인" 버튼으로 OAuth 흐름을 
 | `GRAPH_EXTRACTOR` | 동작 | 데이터 전송 |
 |---|---|---|
 | `none` | 정적 분석만. **오류가 아니라 정식 티어** — 온톨로지의 상당 부분이 이것만으로 성립 | 없음 |
-| `ollama` | 로컬 Ollama(`OLLAMA_MODEL`, 기본 `qwen2.5:7b-instruct`)로 Concept·Problem·Learned 추출 | 이 컴퓨터 안에서만 |
+| `ollama` | 로컬 Ollama(아래 "모델 고르기", 기본 `qwen2.5:7b-instruct`)로 Concept·Problem·Learned 추출 | 이 컴퓨터 안에서만 |
 | `claude` | Anthropic API 사용. **커밋 다이제스트와 README 발췌가 외부로 전송됨** | ⚠ Anthropic API |
 | `auto`(기본) | Ollama가 떠 있으면 `ollama`, 아니면 `none` | 없음 / 로컬 |
 
@@ -135,6 +135,31 @@ http://localhost:3000 에서 "GitHub로 로그인" 버튼으로 OAuth 흐름을 
 
 옛 스냅샷(토픽·매니페스트 없이 수집)도 그대로 그래프가 만들어집니다 — 노드가 적어질 뿐이며,
 화면이 "다시 수집하기"를 권합니다.
+
+### 모델 고르기 (화면에서)
+
+서재 화면 오른쪽 위 **⚙ 모델 설정** 패널에서 사서 답변과 그래프 추출에 쓸 로컬 모델을 고릅니다.
+`.env.local`을 고칠 필요가 없습니다.
+
+- 고른 값은 `data/settings.json`에 저장되며 **`OLLAMA_MODEL` 환경변수보다 우선합니다.**
+  해석 순서는 어디서나 동일합니다: `data/settings.json` → `OLLAMA_MODEL` → 기본값(`qwen2.5:7b-instruct`).
+- 패널은 Ollama 연결 상태, 지금 쓰는 모델, `ollama list`에 해당하는 설치된 모델 목록을 보여 줍니다.
+- 바꾸면 **다음 사서 질문**과 **다음 그래프 생성**부터 적용됩니다. 이미 만들어 둔 그래프는 그대로입니다.
+- Ollama가 꺼져 있으면 선택 UI가 잠기고 `docker compose --profile llm up -d` 안내가 뜹니다.
+- 설치되지 않은 권장 모델은 패널의 **내려받기** 버튼으로 받을 수 있습니다. `ollama pull`이 끝날 때까지
+  응답을 붙잡으므로(회선에 따라 수 분~수십 분) 그동안 "모델을 내려받는 중" 상태가 유지됩니다.
+  받고 나면 자동으로 그 모델이 선택됩니다.
+
+권장 모델과 하드웨어 기준:
+
+| 모델 | 내려받는 크기 | 권장 하드웨어 |
+|---|---|---|
+| `qwen2.5:7b-instruct` (기본) | 약 4.7GB | VRAM 8GB급 — RTX 3060 Ti / 4060, 노트북 3060(6GB)도 이쪽 |
+| `qwen2.5:14b-instruct` (고품질) | 약 9GB | **VRAM 12GB 이상** — RTX 3060 데스크톱 12GB / 3090 / 4070 이상 |
+
+- RTX 3060 **데스크톱 12GB**는 14B가 약 10.5GB로 올라가 통째로 들어갑니다.
+  반면 3060 Ti(8GB)·노트북 3060(6GB)은 14B가 VRAM을 넘겨 CPU로 밀려나며 크게 느려지므로 7B를 유지하세요.
+- GPU가 없어도 동작하지만 CPU 추론은 느립니다 — 사서 응답 대기 상한은 90초, 그래프 추출은 180초입니다.
 
 ## MCP 서버 — 세컨드 브레인 (Claude Desktop / Cursor / 원격)
 
@@ -308,6 +333,8 @@ claude mcp add --transport http grimoire https://grimoire.example.com/mcp \
 - `ollama` 컨테이너는 **기동 시 `OLLAMA_MODEL`을 자동으로 내려받습니다**(볼륨에 이미 있으면 즉시 통과).
   수동으로 하려면 `docker exec grimoire-ollama ollama pull qwen2.5:7b-instruct`.
   첫 실행은 모델 다운로드로 수 GB·수 분이 걸립니다.
+  compose의 `OLLAMA_MODEL`은 **이 자동 내려받기에만** 쓰입니다 — 앱이 실제로 부를 모델은
+  화면의 ⚙ 모델 설정(`data/settings.json`)이 결정합니다.
 - NVIDIA GPU 가속은 **선택사항**입니다 — `docker-compose.gpu.yml` 오버레이를 `-f`로 얹으면 켜집니다.
   매번 치기 싫으면 `.env`에 `COMPOSE_FILE=docker-compose.yml;docker-compose.gpu.yml`(Windows, Linux는 `:` 구분).
   GPU 없는 머신은 오버레이 없이 그대로 CPU 동작 (Windows GPU는 Docker Desktop + WSL2 + NVIDIA 드라이버 필요).

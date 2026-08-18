@@ -22,6 +22,16 @@ import {
   type LibrarianAnswer,
 } from "@/lib/library/librarian";
 import { askOllama } from "@/lib/library/ollama";
+import {
+  isValidModelName,
+  loadSettings,
+  parseTagsResponse,
+  resolveOllamaHost,
+  resolveOllamaModel,
+  saveSettings,
+  type ModelActionResult,
+  type ModelOptionsResult,
+} from "@/lib/settings";
 
 /** useActionState 시그니처 — 이전 상태와 폼 데이터는 쓰지 않는다. */
 export async function collectAction(
@@ -196,6 +206,146 @@ export async function askLibrarianAction(
     projectIds: matchProjectMentions(result.text, context),
     message: null,
   };
+}
+
+/* ── 로컬 LLM 모델 설정 ───────────────────────────────────────── */
+
+/** 설치 목록 조회는 화면을 붙잡지 않는다 — 닿지 않으면 곧바로 "꺼짐"으로 본다. */
+const TAGS_TIMEOUT_MS = 1_500;
+/**
+ * `ollama pull`은 stream:false면 다운로드가 끝날 때까지 응답이 오지 않는다.
+ * 14B(약 9GB)는 회선에 따라 수십 분이 걸리므로 상한을 크게 잡고,
+ * 화면은 그동안 "내려받는 중" pending 상태를 계속 보여 준다.
+ */
+const PULL_TIMEOUT_MS = 30 * 60_000;
+
+/**
+ * 설치된 로컬 모델 목록 + 지금 쓰이는 모델 + Ollama 연결 여부.
+ * 외부로 나가는 요청은 없다 — 부르는 곳은 로컬 Ollama뿐이다 (PLANNING.md §7).
+ */
+export async function getModelOptionsAction(): Promise<ModelOptionsResult> {
+  const t = await getTranslations("settings");
+  const host = resolveOllamaHost();
+
+  const session = await auth();
+  if (!session?.login) {
+    return {
+      reachable: false,
+      host,
+      current: resolveOllamaModel(null),
+      fromSettings: false,
+      models: [],
+      message: t("sessionExpired"),
+    };
+  }
+
+  const settings = await loadSettings();
+  const current = resolveOllamaModel(settings);
+  const fromSettings = isValidModelName(settings.ollamaModel);
+
+  try {
+    const res = await fetch(`${host}/api/tags`, {
+      signal: AbortSignal.timeout(TAGS_TIMEOUT_MS),
+    });
+    if (!res.ok) throw new Error(`Ollama ${res.status}`);
+    const models = parseTagsResponse(await res.json());
+    return {
+      reachable: true,
+      host,
+      current,
+      fromSettings,
+      models,
+      message: models.length === 0 ? t("installedEmpty") : null,
+    };
+  } catch {
+    return {
+      reachable: false,
+      host,
+      current,
+      fromSettings,
+      models: [],
+      message: t("offline"),
+    };
+  }
+}
+
+/** 쓸 모델을 골라 `data/settings.json`에 적는다. 다음 질문·다음 그래프 생성부터 적용. */
+export async function setModelAction(model: string): Promise<ModelActionResult> {
+  const t = await getTranslations("settings");
+
+  const session = await auth();
+  if (!session?.login) {
+    return { ok: false, current: null, message: t("sessionExpired") };
+  }
+
+  const trimmed = model.trim();
+  if (!isValidModelName(trimmed)) {
+    return { ok: false, current: null, message: t("invalidModel") };
+  }
+
+  try {
+    const saved = await saveSettings({ ollamaModel: trimmed });
+    revalidatePath("/", "layout");
+    return {
+      ok: true,
+      current: resolveOllamaModel(saved),
+      message: t("saved", { model: trimmed }),
+    };
+  } catch (error) {
+    console.error("[settings] 모델 저장 실패", error);
+    return { ok: false, current: null, message: t("saveFailed") };
+  }
+}
+
+/**
+ * 로컬 Ollama에 모델을 내려받는다 (`POST /api/pull`, stream:false).
+ *
+ * Ollama가 다운로드를 끝낼 때까지 응답을 붙잡고 있으므로 수 분~수십 분이 걸린다.
+ * 모델 태그는 안전 패턴을 통과한 값만 넘긴다.
+ */
+export async function pullModelAction(model: string): Promise<ModelActionResult> {
+  const t = await getTranslations("settings");
+
+  const session = await auth();
+  if (!session?.login) {
+    return { ok: false, current: null, message: t("sessionExpired") };
+  }
+
+  const trimmed = model.trim();
+  if (!isValidModelName(trimmed)) {
+    return { ok: false, current: null, message: t("invalidModel") };
+  }
+
+  const host = resolveOllamaHost();
+  try {
+    const res = await fetch(`${host}/api/pull`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: trimmed, stream: false }),
+      signal: AbortSignal.timeout(PULL_TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      return {
+        ok: false,
+        current: null,
+        message: t("pullFailed", { model: trimmed }),
+      };
+    }
+    const body = (await res.json()) as { status?: string; error?: string };
+    if (body.error) {
+      return {
+        ok: false,
+        current: null,
+        message: t("pullFailed", { model: trimmed }),
+      };
+    }
+  } catch (error) {
+    console.error("[settings] 모델 내려받기 실패", error);
+    return { ok: false, current: null, message: t("offline") };
+  }
+
+  // 받아 놨으면 바로 그 모델을 쓰게 한다.
+  return setModelAction(trimmed);
 }
 
 export async function signOutAction(): Promise<void> {

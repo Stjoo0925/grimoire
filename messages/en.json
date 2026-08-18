@@ -157,6 +157,43 @@
       }
     }
   },
+  "settings": {
+    "open": "Model settings",
+    "title": "Choose the librarian's voice",
+    "subtitle": "Pick the local model used for librarian answers and graph extraction. This choice takes precedence over OLLAMA_MODEL in .env.local.",
+    "close": "Close",
+    "refresh": "Check again",
+    "loading": "Checking the local lantern…",
+    "statusLabel": "Local LLM",
+    "statusOnline": "Connected ({host})",
+    "statusOffline": "Not running ({host})",
+    "offline": "Could not reach the local LLM (Ollama). Please check that it is running.",
+    "offlineHelp": "The local LLM is not running. Light the lantern with the command below, then check again.",
+    "offlineCommand": "docker compose --profile llm up -d",
+    "currentLabel": "Current model",
+    "currentFromSettings": "chosen here",
+    "currentFromEnv": "from env / default",
+    "recommended": "Recommended models",
+    "installed": "Installed models",
+    "installedEmpty": "No models installed yet. Download one of the recommended models below.",
+    "notInstalled": "not installed",
+    "inUse": "in use",
+    "select": "Use this model",
+    "saved": "{model} will answer from now on. It applies to the next question and the next graph build.",
+    "saveFailed": "Could not save the setting.",
+    "invalidModel": "That model name is not valid.",
+    "sessionExpired": "Your session has expired. Please sign in again.",
+    "download": "Download",
+    "sizeWarning": "Downloads about {size}.",
+    "pulling": "Downloading the model — this takes several minutes",
+    "pullFailed": "Could not download {model}. Check your disk space and network.",
+    "applyNote": "Changing the model leaves the existing graph untouched. Rebuild the graph to re-weave it with the new model.",
+    "privacy": "This only selects a local model on this machine. No external API is called.",
+    "presets": {
+      "qwen7b": "Default · around 8GB VRAM (RTX 3060 Ti/4060)",
+      "qwen14b": "Higher quality · 12GB VRAM or more (RTX 3060 12GB/3090/4070+)"
+    }
+  },
   "language": {
     "label": "Language",
     "ko": "한국어",

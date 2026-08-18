@@ -14,6 +14,7 @@ import { BookDetail } from "./BookDetail";
 import { Bookshelf } from "./Bookshelf";
 import { ContributionHeatmap } from "./ContributionHeatmap";
 import { LibrarianChat } from "./LibrarianChat";
+import { ModelSettings } from "./ModelSettings";
 import type { Heatmap } from "@/lib/library/heatmap";
 import { groupBooks, partitionPrivate, type ShelfMode } from "@/lib/library/shelves";
 import type { BookView } from "@/lib/library/view";
@@ -91,28 +92,35 @@ export function LibraryView({ books, heatmap, hasGraph }: LibraryViewProps) {
           </p>
         </div>
 
-        <div
-          role="group"
-          aria-label={t("shelfBy.label")}
-          className="flex overflow-hidden rounded-md border border-amber-200/20"
-        >
-          {MODES.map((candidate) => (
-            <button
-              key={candidate}
-              type="button"
-              onClick={() => setMode(candidate)}
-              aria-pressed={mode === candidate}
-              className={`px-3 py-1.5 text-[11px] tracking-[0.15em] transition ${
-                mode === candidate
-                  ? "bg-amber-200/15 text-amber-100"
-                  : "text-stone-500 hover:text-amber-200/70"
-              }`}
-            >
-              {t(`shelfBy.${candidate}`)}
-            </button>
-          ))}
+        <div className="flex flex-wrap items-center gap-2">
+          <div
+            role="group"
+            aria-label={t("shelfBy.label")}
+            className="flex overflow-hidden rounded-md border border-amber-200/20"
+          >
+            {MODES.map((candidate) => (
+              <button
+                key={candidate}
+                type="button"
+                onClick={() => setMode(candidate)}
+                aria-pressed={mode === candidate}
+                className={`px-3 py-1.5 text-[11px] tracking-[0.15em] transition ${
+                  mode === candidate
+                    ? "bg-amber-200/15 text-amber-100"
+                    : "text-stone-500 hover:text-amber-200/70"
+                }`}
+              >
+                {t(`shelfBy.${candidate}`)}
+              </button>
+            ))}
+          </div>
         </div>
       </header>
+
+      {/* 열면 전체 폭 패널, 닫혀 있으면 오른쪽 끝의 톱니 버튼 */}
+      <div className="flex flex-col items-end">
+        <ModelSettings />
+      </div>
 
       <ContributionHeatmap heatmap={heatmap} />
 

@@ -10,6 +10,7 @@
  *   claude → 사용자가 명시적으로 적어 넣은 경우에만. 커밋 다이제스트/README가
  *            Anthropic API로 전송된다.
  */
+import { getOllamaModel } from "../../settings";
 import type { ExtractorMode, ExtractorName } from "../types";
 import { ClaudeExtractor } from "./claude";
 import { isOllamaReachable, OllamaExtractor } from "./ollama";
@@ -44,6 +45,11 @@ const NONE = (reason: string): ExtractorSelection => ({
 export interface SelectOptions {
   /** Ollama 가용성 검사 (테스트에서 주입) */
   probeOllama?: (host: string) => Promise<boolean>;
+  /**
+   * 쓸 모델 결정 (테스트/CLI에서 주입).
+   * 기본값은 공용 해석기 — data/settings.json → OLLAMA_MODEL → 기본값.
+   */
+  resolveModel?: () => Promise<string>;
 }
 
 export async function selectExtractor(
@@ -53,6 +59,7 @@ export async function selectExtractor(
   const mode = readMode(env);
   const host = env.OLLAMA_HOST || "http://localhost:11434";
   const probe = options.probeOllama ?? ((h: string) => isOllamaReachable(h));
+  const resolveModel = options.resolveModel ?? (() => getOllamaModel(env));
 
   if (mode === "none") {
     return NONE("GRAPH_EXTRACTOR=none — 정적 분석만으로 그래프를 만들었습니다.");
@@ -78,10 +85,11 @@ export async function selectExtractor(
 
   if (mode === "ollama") {
     if (await probe(host)) {
+      const model = await resolveModel();
       return {
         name: "ollama",
-        extractor: new OllamaExtractor(host, env.OLLAMA_MODEL),
-        reason: `로컬 Ollama(${host})로 추출했습니다.`,
+        extractor: new OllamaExtractor(host, model),
+        reason: `로컬 Ollama(${host}, ${model})로 추출했습니다.`,
       };
     }
     return NONE(
@@ -91,10 +99,11 @@ export async function selectExtractor(
 
   // mode === "auto": 로컬이 가능하면 로컬, 아니면 정적. 외부 API는 후보가 아니다.
   if (await probe(host)) {
+    const model = await resolveModel();
     return {
       name: "ollama",
-      extractor: new OllamaExtractor(host, env.OLLAMA_MODEL),
-      reason: `auto — 로컬 Ollama(${host})를 찾아 개념/문제 추출까지 수행했습니다.`,
+      extractor: new OllamaExtractor(host, model),
+      reason: `auto — 로컬 Ollama(${host}, ${model})를 찾아 개념/문제 추출까지 수행했습니다.`,
     };
   }
   return NONE(

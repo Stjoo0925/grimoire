@@ -157,6 +157,43 @@
       }
     }
   },
+  "settings": {
+    "open": "모델 설정",
+    "title": "사서의 목소리 고르기",
+    "subtitle": "사서 답변과 그래프 추출에 쓸 로컬 모델을 고릅니다. 이 선택은 .env.local의 OLLAMA_MODEL보다 우선합니다.",
+    "close": "닫기",
+    "refresh": "다시 확인",
+    "loading": "로컬 등불을 살피는 중…",
+    "statusLabel": "로컬 LLM",
+    "statusOnline": "연결됨 ({host})",
+    "statusOffline": "꺼져 있음 ({host})",
+    "offline": "로컬 LLM(Ollama)에 닿지 못했습니다. 켜져 있는지 확인해 주세요.",
+    "offlineHelp": "로컬 LLM이 꺼져 있습니다. 아래 명령으로 등불을 켠 뒤 다시 확인해 주세요.",
+    "offlineCommand": "docker compose --profile llm up -d",
+    "currentLabel": "지금 쓰는 모델",
+    "currentFromSettings": "화면에서 고른 값",
+    "currentFromEnv": "환경변수/기본값",
+    "recommended": "권장 모델",
+    "installed": "설치된 모델",
+    "installedEmpty": "설치된 모델이 없습니다. 아래 권장 모델을 내려받아 주세요.",
+    "notInstalled": "미설치",
+    "inUse": "사용 중",
+    "select": "이 모델 쓰기",
+    "saved": "이제 {model}로 답합니다. 다음 질문과 다음 그래프 생성부터 적용됩니다.",
+    "saveFailed": "설정을 저장하지 못했습니다.",
+    "invalidModel": "모델 이름이 올바르지 않습니다.",
+    "sessionExpired": "세션이 만료되었습니다. 다시 로그인해 주세요.",
+    "download": "내려받기",
+    "sizeWarning": "약 {size} 내려받습니다.",
+    "pulling": "모델을 내려받는 중 — 수 분 걸립니다",
+    "pullFailed": "{model}을(를) 내려받지 못했습니다. 디스크 여유와 네트워크를 확인해 주세요.",
+    "applyNote": "모델을 바꿔도 이미 만든 그래프는 그대로입니다. 새 모델로 다시 엮으려면 그래프를 다시 생성하세요.",
+    "privacy": "여기서 고르는 것은 이 컴퓨터의 로컬 모델뿐입니다. 외부 API는 부르지 않습니다.",
+    "presets": {
+      "qwen7b": "기본 · VRAM 8GB급 (RTX 3060 Ti/4060)",
+      "qwen14b": "고품질 · VRAM 12GB 이상 (RTX 3060 12GB/3090/4070+)"
+    }
+  },
   "language": {
     "label": "언어",
     "ko": "한국어",

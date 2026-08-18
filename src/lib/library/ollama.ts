@@ -5,10 +5,7 @@
  * 사서 응답은 JSON이 아니라 사람의 문장이므로 format:"json"을 걸지 않고,
  * 토큰도 적게 뽑는다(빠른 대화). 닿지 않으면 null — 호출부가 degraded 모드로 간다.
  */
-import {
-  DEFAULT_OLLAMA_HOST,
-  DEFAULT_OLLAMA_MODEL,
-} from "../graph/extractors/ollama";
+import { getOllamaModel, resolveOllamaHost } from "../settings";
 
 /** 사서 답변 최대 토큰 (짧고 빠르게) */
 const MAX_TOKENS = 400;
@@ -28,11 +25,15 @@ interface OllamaChatResponse {
 }
 
 export function ollamaHost(): string {
-  return (process.env.OLLAMA_HOST || DEFAULT_OLLAMA_HOST).replace(/\/$/, "");
+  return resolveOllamaHost();
 }
 
-export function ollamaModel(): string {
-  return process.env.OLLAMA_MODEL || DEFAULT_OLLAMA_MODEL;
+/**
+ * 사서가 쓸 모델. 화면에서 고른 값(data/settings.json)이 최우선이고
+ * 그다음이 OLLAMA_MODEL env, 마지막이 기본값이다 (lib/settings.ts).
+ */
+export function ollamaModel(): Promise<string> {
+  return getOllamaModel();
 }
 
 /** 로컬 Ollama에 한 번 물어본다. 닿지 않거나 실패하면 ok:false */
@@ -41,11 +42,12 @@ export async function askOllama(
   userPrompt: string,
 ): Promise<LibrarianChatResult> {
   try {
+    const model = await ollamaModel();
     const res = await fetch(`${ollamaHost()}/api/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: ollamaModel(),
+        model,
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt },

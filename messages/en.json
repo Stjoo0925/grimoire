@@ -1,0 +1,91 @@
+{
+  "metadata": {
+    "title": "Grimoire",
+    "description": "Your grimoire, written one commit at a time"
+  },
+  "landing": {
+    "title": "GRIMOIRE",
+    "tagline": "Your grimoire, written one commit at a time",
+    "signIn": "Sign in with GitHub",
+    "signInHint": "Each repo becomes a grimoire, each commit a page. Sign in to open your library."
+  },
+  "home": {
+    "librarian": "Librarian",
+    "signOut": "Sign out",
+    "emptyLibrary": "Your library is still empty. Collect to shelve your repos as grimoires."
+  },
+  "collect": {
+    "pending": "Searching the stacks…",
+    "recollect": "Collect again",
+    "collect": "Collect",
+    "hint": "Collection runs all at once — repos, commits, READMEs, and contributions. It may take a moment.",
+    "sessionExpired": "Your session has expired. Please sign in again.",
+    "partialDefault": "Only part of the collection finished. Please try again shortly.",
+    "success": "Shelved {count} grimoires in your library.",
+    "failure": "Collection failed: {message}",
+    "failureGeneric": "Collection failed."
+  },
+  "snapshot": {
+    "title": "Library Index",
+    "lastCollected": "Last collected — {datetime}",
+    "repoCount": "Books (repos)",
+    "repoCountUnit": "{count}",
+    "commitCount": "Total commits",
+    "commitCountUnit": "{count}",
+    "languageCount": "Shelves (languages)",
+    "languageCountUnit": "{count}",
+    "contributionCount": "Total contributions",
+    "contributionCountUnit": "{count}",
+    "privateRepoCount": "Private books",
+    "privateRepoCountUnit": "{count}",
+    "period": "Collection span",
+    "periodRange": "{from} – {to}",
+    "periodUnknown": "—",
+    "partial": "Incomplete collection — {reason}",
+    "partialReasonDefault": "Stopped partway due to the GitHub API rate limit."
+  },
+  "graph": {
+    "build": "Build the graph",
+    "rebuild": "Rebuild the graph",
+    "pending": "Weaving memories…",
+    "hint": "The graph is built from your stored snapshot only — GitHub is not called again.",
+    "needSnapshot": "Collect first, then the graph can be woven.",
+    "sessionExpired": "Your session has expired. Please sign in again.",
+    "noSnapshot": "No stored snapshot found. Run a collection first.",
+    "success": "Wove {nodes} entries and {edges} threads.",
+    "failure": "Graph build failed: {message}",
+    "failureGeneric": "Graph build failed.",
+    "title": "Threads of Memory",
+    "builtAt": "Last built — {datetime}",
+    "projects": "Grimoires (projects)",
+    "projectsUnit": "{count}",
+    "tech": "Technologies",
+    "techUnit": "{count}",
+    "concepts": "Concepts",
+    "conceptsUnit": "{count}",
+    "problems": "Problems solved",
+    "problemsUnit": "{count}",
+    "periods": "Periods",
+    "periodsUnit": "{count}",
+    "edges": "Edges",
+    "edgesUnit": "{count}",
+    "edgeBreakdown": "USES {uses} · ABOUT {about} · LEARNED {learned} · DEVELOPED {developed} · RELATED_TO {related} · SOLVED {solved} · DEPENDS_ON {dependsOn}",
+    "extractor": {
+      "none": "STATIC ONLY",
+      "ollama": "LOCAL OLLAMA",
+      "claude": "CLAUDE API"
+    },
+    "noneHint": "This graph was woven from static analysis alone. Run a local Ollama and set GRAPH_EXTRACTOR=ollama (or auto) to also extract concepts and solved problems — your data never leaves this machine.",
+    "staleSnapshotHint": "Run \"Collect again\" to enrich tech-stack and topic extraction.",
+    "partial": "Partially woven — {reason}",
+    "partialDefault": "Extraction failed for some repositories."
+  },
+  "library": {
+    "emptyShelf": "No grimoires shelved yet."
+  },
+  "language": {
+    "label": "Language",
+    "ko": "한국어",
+    "en": "English"
+  }
+}

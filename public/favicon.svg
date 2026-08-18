@@ -1,0 +1,49 @@
+<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="favBg" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#4c1d95"/>
+      <stop offset="70%" stop-color="#1e1035"/>
+      <stop offset="100%" stop-color="#0a0518"/>
+    </radialGradient>
+    <linearGradient id="favGold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fef08a"/>
+      <stop offset="50%" stop-color="#eab308"/>
+      <stop offset="100%" stop-color="#a16207"/>
+    </linearGradient>
+    <linearGradient id="favPurple" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f0abfc"/>
+      <stop offset="100%" stop-color="#818cf8"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 파비콘 둥근 배경 -->
+  <rect width="64" height="64" rx="14" fill="url(#favBg)"/>
+  <rect x="1" y="1" width="62" height="62" rx="13" stroke="url(#favGold)" stroke-width="1.5" stroke-opacity="0.6"/>
+
+  <!-- 마법서 본체 -->
+  <g transform="translate(13, 10)">
+    <!-- 책 표지 -->
+    <rect x="0" y="0" width="38" height="44" rx="4" fill="#241242" stroke="url(#favGold)" stroke-width="1.8"/>
+    
+    <!-- 책등(Spine) -->
+    <path d="M0 4C0 1.79 1.79 0 4 0H7V44H4C1.79 44 0 42.21 0 40V4Z" fill="#130a24" stroke="url(#favGold)" stroke-width="1"/>
+
+    <!-- 중앙 지식그래프 룬 노드 -->
+    <!-- 연결선 -->
+    <line x1="22" y1="12" x2="14" y2="22" stroke="url(#favPurple)" stroke-width="1.2"/>
+    <line x1="22" y1="12" x2="30" y2="22" stroke="url(#favPurple)" stroke-width="1.2"/>
+    <line x1="14" y1="22" x2="22" y2="32" stroke="url(#favPurple)" stroke-width="1.2"/>
+    <line x1="30" y1="22" x2="22" y2="32" stroke="url(#favPurple)" stroke-width="1.2"/>
+    <line x1="14" y1="22" x2="30" y2="22" stroke="url(#favPurple)" stroke-width="1.2"/>
+
+    <!-- 발광 노드들 -->
+    <circle cx="22" cy="22" r="3.5" fill="#fef08a" stroke="#ca8a04" stroke-width="1"/>
+    <circle cx="22" cy="12" r="2.2" fill="#38bdf8"/>
+    <circle cx="22" cy="32" r="2.2" fill="#38bdf8"/>
+    <circle cx="14" cy="22" r="2.2" fill="#f0abfc"/>
+    <circle cx="30" cy="22" r="2.2" fill="#f0abfc"/>
+
+    <!-- 금색 잠금 걸쇠 -->
+    <rect x="35" y="19" width="3.5" height="6" rx="1" fill="url(#favGold)"/>
+  </g>
+</svg>

@@ -4,13 +4,28 @@
  * 로그인: 사서 정보 + 수집 트리거 + 소장된 스냅샷 요약.
  */
 import Image from "next/image";
+import { getTranslations, setRequestLocale } from "next-intl/server";
 
 import { signIn, auth } from "@/auth";
 import { signOutAction } from "@/app/actions";
 import { CollectForm } from "@/components/collector/CollectForm";
 import { SnapshotSummary } from "@/components/collector/SnapshotSummary";
+import { GraphForm } from "@/components/graph/GraphForm";
+import { GraphSummary } from "@/components/graph/GraphSummary";
+import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { fetchViewer } from "@/lib/collector/github";
 import { loadSnapshot } from "@/lib/collector/storage";
+import type { CollectionSnapshot } from "@/lib/collector/types";
+import { loadGraph } from "@/lib/graph/storage";
+
+/**
+ * topics/manifests 없이 수집된 구버전 스냅샷인가.
+ * (그래프는 그대로 만들어지되 노드가 적어진다 — 재수집을 권한다)
+ */
+function isStaleSnapshot(snapshot: CollectionSnapshot): boolean {
+  if ((snapshot.schemaVersion ?? 1) >= 2) return false;
+  return !snapshot.repos.some((repo) => repo.topics || repo.manifests);
+}
 
 /** 세션에 login이 없는(구버전 세션) 경우에만 GitHub에 한 번 물어본다. */
 async function resolveLogin(
@@ -26,38 +41,50 @@ async function resolveLogin(
   }
 }
 
-export default async function Home() {
-  const session = await auth();
+export default async function Home({
+  params,
+}: {
+  params: Promise<{ locale: string }>;
+}) {
+  const { locale } = await params;
+  setRequestLocale(locale);
+
+  const [session, tLanding, tHome] = await Promise.all([
+    auth(),
+    getTranslations("landing"),
+    getTranslations("home"),
+  ]);
 
   if (!session?.user) {
     return (
-      <main className="flex min-h-screen flex-col items-center justify-center gap-8 bg-stone-950 px-6 text-center">
+      <main className="relative flex min-h-screen flex-col items-center justify-center gap-8 bg-stone-950 px-6 text-center">
+        <div className="absolute top-6 right-6">
+          <LanguageSwitcher />
+        </div>
+
         <div className="space-y-3">
           <h1 className="text-5xl font-semibold tracking-[0.2em] text-amber-100">
-            GRIMOIRE
+            {tLanding("title")}
           </h1>
-          <p className="text-sm text-stone-400">
-            커밋이 쌓여 완성되는 나만의 마법서
-          </p>
+          <p className="text-sm text-stone-400">{tLanding("tagline")}</p>
         </div>
 
         <form
           action={async () => {
             "use server";
-            await signIn("github", { redirectTo: "/" });
+            await signIn("github", { redirectTo: `/${locale}` });
           }}
         >
           <button
             type="submit"
             className="rounded-md border border-amber-200/30 bg-stone-900 px-6 py-3 text-sm text-amber-100 transition hover:border-amber-200/60 hover:bg-stone-800"
           >
-            GitHub로 로그인
+            {tLanding("signIn")}
           </button>
         </form>
 
         <p className="max-w-md text-xs leading-relaxed text-stone-600">
-          레포는 마법서 한 권, 커밋은 그 페이지가 됩니다. 로그인하면 당신의
-          서재를 불러옵니다.
+          {tLanding("signInHint")}
         </p>
       </main>
     );
@@ -65,16 +92,19 @@ export default async function Home() {
 
   const login = await resolveLogin(session.login, session.accessToken);
   const snapshot = login ? await loadSnapshot(login) : null;
+  const graph = login ? await loadGraph(login) : null;
 
   return (
-    <main className="flex min-h-screen flex-col items-center gap-10 bg-stone-950 px-6 py-16">
+    <main className="relative flex min-h-screen flex-col items-center gap-10 bg-stone-950 px-6 py-16">
+      <div className="absolute top-6 right-6">
+        <LanguageSwitcher />
+      </div>
+
       <div className="space-y-3 text-center">
         <h1 className="text-4xl font-semibold tracking-[0.2em] text-amber-100">
-          GRIMOIRE
+          {tLanding("title")}
         </h1>
-        <p className="text-sm text-stone-400">
-          커밋이 쌓여 완성되는 나만의 마법서
-        </p>
+        <p className="text-sm text-stone-400">{tLanding("tagline")}</p>
       </div>
 
       <div className="flex items-center gap-4 rounded-full border border-amber-200/15 bg-stone-900/40 px-4 py-2">
@@ -89,14 +119,14 @@ export default async function Home() {
           />
         ) : null}
         <span className="text-sm text-amber-100">
-          {login ?? session.user.name ?? "사서"}
+          {login ?? session.user.name ?? tHome("librarian")}
         </span>
         <form action={signOutAction}>
           <button
             type="submit"
             className="text-xs text-stone-500 transition hover:text-amber-200/70"
           >
-            로그아웃
+            {tHome("signOut")}
           </button>
         </form>
       </div>
@@ -107,9 +137,18 @@ export default async function Home() {
         <SnapshotSummary snapshot={snapshot} />
       ) : (
         <p className="max-w-md text-center text-xs leading-relaxed text-stone-600">
-          아직 서고가 비어 있습니다. 수집하면 당신의 레포가 마법서로 꽂힙니다.
+          {tHome("emptyLibrary")}
         </p>
       )}
+
+      <GraphForm hasSnapshot={snapshot !== null} hasGraph={graph !== null} />
+
+      {graph ? (
+        <GraphSummary
+          graph={graph}
+          staleSnapshot={snapshot ? isStaleSnapshot(snapshot) : false}
+        />
+      ) : null}
     </main>
   );
 }

@@ -4,6 +4,8 @@
  */
 "use client";
 
+import { useTranslations } from "next-intl";
+
 import { Book, type BookProps } from "./Book";
 
 export interface BookshelfProps {
@@ -13,6 +15,7 @@ export interface BookshelfProps {
 }
 
 export function Bookshelf({ label, books = [] }: BookshelfProps) {
+  const t = useTranslations("library");
   return (
     <section className="rounded-md border border-amber-900/30 bg-stone-900/60 p-4">
       <h2 className="mb-3 text-xs uppercase tracking-widest text-amber-200/70">
@@ -20,7 +23,7 @@ export function Bookshelf({ label, books = [] }: BookshelfProps) {
       </h2>
       <div className="flex min-h-[120px] items-end gap-1 border-b-4 border-amber-950/70 pb-1">
         {books.length === 0 ? (
-          <p className="pb-4 text-xs text-stone-500">아직 꽂힌 마법서가 없습니다.</p>
+          <p className="pb-4 text-xs text-stone-500">{t("emptyShelf")}</p>
         ) : (
           books.map((book) => <Book key={book.title} {...book} />)
         )}

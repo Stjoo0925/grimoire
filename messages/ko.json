@@ -1,0 +1,91 @@
+{
+  "metadata": {
+    "title": "Grimoire",
+    "description": "커밋이 쌓여 완성되는 나만의 마법서"
+  },
+  "landing": {
+    "title": "GRIMOIRE",
+    "tagline": "커밋이 쌓여 완성되는 나만의 마법서",
+    "signIn": "GitHub로 로그인",
+    "signInHint": "레포는 마법서 한 권, 커밋은 그 페이지가 됩니다. 로그인하면 당신의 서재를 불러옵니다."
+  },
+  "home": {
+    "librarian": "사서",
+    "signOut": "로그아웃",
+    "emptyLibrary": "아직 서고가 비어 있습니다. 수집하면 당신의 레포가 마법서로 꽂힙니다."
+  },
+  "collect": {
+    "pending": "서고를 뒤지는 중…",
+    "recollect": "다시 수집하기",
+    "collect": "수집하기",
+    "hint": "수집은 한 번에 전부 — 레포·커밋·README·잔디를 훑습니다. 다소 걸립니다.",
+    "sessionExpired": "세션이 만료되었습니다. 다시 로그인해 주세요.",
+    "partialDefault": "일부만 수집되었습니다. 잠시 후 다시 시도해 주세요.",
+    "success": "{count}권의 마법서를 서고에 들였습니다.",
+    "failure": "수집에 실패했습니다: {message}",
+    "failureGeneric": "수집에 실패했습니다."
+  },
+  "snapshot": {
+    "title": "서고 목록",
+    "lastCollected": "마지막 수집 — {datetime}",
+    "repoCount": "책(레포)",
+    "repoCountUnit": "{count}권",
+    "commitCount": "총 커밋",
+    "commitCountUnit": "{count}쪽",
+    "languageCount": "서가(언어)",
+    "languageCountUnit": "{count}종",
+    "contributionCount": "잔디 총 기여",
+    "contributionCountUnit": "{count}회",
+    "privateRepoCount": "비공개 서고",
+    "privateRepoCountUnit": "{count}권",
+    "period": "수집 기간",
+    "periodRange": "{from} ~ {to}",
+    "periodUnknown": "—",
+    "partial": "불완전한 수집입니다 — {reason}",
+    "partialReasonDefault": "GitHub API 한도로 중간에 멈췄습니다."
+  },
+  "graph": {
+    "build": "그래프 생성하기",
+    "rebuild": "그래프 다시 엮기",
+    "pending": "기억을 엮는 중…",
+    "hint": "소장된 스냅샷만 읽어 지식그래프를 만듭니다. GitHub를 다시 부르지 않습니다.",
+    "needSnapshot": "먼저 수집을 마쳐야 그래프를 엮을 수 있습니다.",
+    "sessionExpired": "세션이 만료되었습니다. 다시 로그인해 주세요.",
+    "noSnapshot": "소장된 스냅샷이 없습니다. 먼저 수집하기를 실행해 주세요.",
+    "success": "{nodes}개의 표제와 {edges}개의 실을 엮었습니다.",
+    "failure": "그래프 생성에 실패했습니다: {message}",
+    "failureGeneric": "그래프 생성에 실패했습니다.",
+    "title": "기억의 실타래",
+    "builtAt": "마지막 생성 — {datetime}",
+    "projects": "마법서(프로젝트)",
+    "projectsUnit": "{count}권",
+    "tech": "기술",
+    "techUnit": "{count}종",
+    "concepts": "개념",
+    "conceptsUnit": "{count}개",
+    "problems": "해결한 문제",
+    "problemsUnit": "{count}개",
+    "periods": "시기",
+    "periodsUnit": "{count}개",
+    "edges": "연결",
+    "edgesUnit": "{count}줄",
+    "edgeBreakdown": "USES {uses} · ABOUT {about} · LEARNED {learned} · DEVELOPED {developed} · RELATED_TO {related} · SOLVED {solved} · DEPENDS_ON {dependsOn}",
+    "extractor": {
+      "none": "정적 분석",
+      "ollama": "로컬 OLLAMA",
+      "claude": "CLAUDE API"
+    },
+    "noneHint": "정적 분석만으로 엮은 그래프입니다. 로컬 Ollama를 띄우고 GRAPH_EXTRACTOR=ollama(또는 auto)로 두면 개념·해결한 문제까지 추출됩니다. 데이터는 이 컴퓨터를 벗어나지 않습니다.",
+    "staleSnapshotHint": "다시 수집하기를 실행하면 기술 스택·토픽 추출이 풍부해집니다.",
+    "partial": "일부만 엮였습니다 — {reason}",
+    "partialDefault": "일부 레포의 추출이 실패했습니다."
+  },
+  "library": {
+    "emptyShelf": "아직 꽂힌 마법서가 없습니다."
+  },
+  "language": {
+    "label": "언어",
+    "ko": "한국어",
+    "en": "English"
+  }
+}

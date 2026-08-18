@@ -45,11 +45,18 @@
 
 ### ② 지식그래프 — 커밋이 메모리
 
-- AI(Claude)가 커밋 메시지·README를 읽고 추출:
-  - **노드**: 프로젝트(책) · 기술 · 개념(도메인) · 시기
-  - **엣지**: `uses` / `about` / `relatedTo` / `learned`(최초 등장 시점)
-- 저장: 초기엔 **JSON 그래프 + 임베딩**, 규모 커지면 그래프 DB 검토
-- 이 그래프가 "AI 사서의 기억" — 질의응답의 근거
+> 상세 설계는 [KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md) 참조. 아래는 채택 방침.
+
+- **온톨로지**: 노드 `Project` · `Tech` · `Concept` · `Problem` · `Period` / 엣지 `USES` · `ABOUT` · `SOLVED` · `LEARNED` · `DEVELOPED` · `RELATED_TO` · `DEPENDS_ON`
+- **추출 파이프라인** (KNOWLEDGE_GRAPH.md 4장):
+  1. 정적 분석 (의존성 매니페스트 파싱 → Tech, 비용 0)
+  2. 커밋 필터링·그룹화 (LLM 컨텍스트 최소화)
+  3. LLM 구조화 추출 (Concept / Problem / Learned)
+  4. 엔티티 정규화 (canonical ID 일원화)
+- **LLM은 스위치 가능하게 추상화**: 로컬 Ollama(무료·프라이빗) ↔ Claude API(고품질) — env로 선택
+- **저장은 단계적**: 1차 JSON 그래프 + 임베딩 파일 → 2차 Neo4j + Qdrant (Docker)
+- 이 그래프가 "AI 사서의 기억" — GraphRAG 질의응답의 근거
+- 확장: **MCP 서버**로 노출해 Claude Desktop/Cursor에서 세컨드 브레인 직접 쿼리 (2차)
 
 ### ③ 인터랙티브 도서관 — 2D 게임적 경험
 
@@ -70,21 +77,60 @@ GitHub OAuth 로그인
                               └─RAG─> AI 사서 응답
 ```
 
-## 5. MVP 범위 (1차)
+## 5. 배포·사용 형태 (하나의 코어, 세 진입점)
 
-1. GitHub OAuth 로그인 → 본인 전체 레포·커밋 수집·저장
-2. Claude로 레포당 개념 태그 + 관계 추출 → JSON 그래프
-3. 2D 도서관 뷰: 책장 + 책 클릭 → 상세 + 관련 책 하이라이트
-4. AI 사서 채팅 1개 (그래프 기반 질의응답)
+```
+                ┌──────────────────────────────┐
+                │       Grimoire Core           │
+                │  src/lib/{collector,graph}    │
+                │  + query (GraphRAG 검색)       │
+                └──────┬───────┬───────┬───────┘
+                       │       │       │
+  ① Next.js 웹앱   ② MCP 서버(stdio)   ③ CLI(헤드리스)
+  (2D 서재+사서)   (Claude Desktop/     (수집·빌드만)
+                    Cursor 쿼리)
+                       │
+                    ./data  ← 단일 데이터 계약
+          (스냅샷·그래프 JSON → 2차: Neo4j/Qdrant)
+```
 
-### 미루는 것 (2차 이후)
+- **원칙 1**: `./data`가 유일한 진실 — 웹앱이 만든 그래프를 MCP가 그대로 읽음
+- **원칙 2**: 저장소 추상화 — JSON → Neo4j/Qdrant 전환 시 진입점 무변경
+- **원칙 3**: MCP는 stdio 프로세스 (`node dist/mcp.js`) — 도커 없이도 동작
 
-- 3D 공간
-- 멀티유저 / 타인 서재 방문
-- 업적 시스템
-- GitHub 외 저장소(GitLab 등) 연동
+### Docker: compose 프로파일 조립식
 
-## 6. 결정 사항 로그
+| profile | 서비스 | 비고 |
+|---|---|---|
+| `app` | Next.js 웹 | |
+| `llm` | Ollama | `OLLAMA_MODEL`로 qwen/deepseek distill 선택 |
+| `db` | Neo4j + Qdrant | 2차(그래프 DB 전환) 때 |
+
+시나리오: 웹만(`npm run dev`) / 풀 로컬(`--profile app --profile llm`) / MCP만(그래프 빌드 후 Claude Desktop 등록) / 전부(같은 `./data` 공유).
+
+## 6. 로드맵
+
+1. **1차 (완료·진행 중)**: OAuth 수집기 ✅ → 지식그래프 층 (JSON, 추출기 스위치) 🔄
+2. **2차: MCP 서버** — `query_grimoire_graph` 등 도구 3종, Claude Desktop/Cursor 연동. 그래프 생기는 즉시 세컨드 브레인 실현
+3. **3차: Docker 패키징** — compose 프로파일, web 컨테이너화, Ollama 동봉
+4. **4차: 2D 서재 UI** — 책장·책·발광 하이라이트·AI 사서 채팅
+5. **5차: Neo4j/Qdrant 전환 + GraphRAG 고도화** (임베딩 시맨틱 검색, 2-hop 서브그래프)
+
+### 미루는 것
+
+- 3D 공간 / 멀티유저 / 업적 시스템 / GitHub 외 저장소 연동
+- 일반 유저용 호스팅 서비스화 (서버 측 API 추출 티어 — DeepSeek API 후보)
+
+## 7. 프라이버시 원칙 (불변)
+
+> **내 데이터(커밋·README·private 레포)는 외부 LLM API로 전송하지 않는다.**
+
+- 추출기 기본값은 `none`(정적) / `ollama`(로컬). 외부 API 추출기(claude/deepseek)는 코드로 존재하되 **명시적 opt-in 전엔 호출 불가** — auto 모드가 API 키 존재만으로 외부를 선택하는 것 금지
+- 임베딩은 로컬 nomic-embed-text, AI 사서 응답 합성도 로컬 Ollama
+- **MCP 주의사항**: 외부 LLM 클라이언트(Claude Desktop 등)에 연결하면 질의된 서브그래프만큼은 해당 LLM에 노출됨 — 문서에 명시하고, 완전 폐쇄가 필요하면 로컬 LLM 클라이언트에 연결
+- 외부 API 티어(DeepSeek 등)는 향후 "타 유저 서비스화" 시나리오 전용, 본인 데이터엔 미적용
+
+## 8. 결정 사항 로그
 
 | 결정 | 선택 | 이유 |
 |---|---|---|
@@ -93,3 +139,11 @@ GitHub OAuth 로그인
 | 데이터 처리 | 수집 후 저장 | 다년치 이력 보존, 속도 |
 | 그래프 저장 | JSON + 임베딩 → 추후 그래프 DB | MVP 경량화 |
 | 프로젝트명 | **Grimoire** | 커밋이 쌓여 완성되는 나만의 마법서 |
+| 그래프 설계 | KNOWLEDGE_GRAPH.md 채택 (온톨로지·파이프라인·MCP) | 상세 설계서 기반 |
+| LLM 추출기 | Ollama/Claude 스위치 가능 인터페이스 | 무료·프라이빗 vs 고품질 절충 |
+| 그래프 저장 1차 | JSON (Neo4j/Qdrant는 2차) | MVP 부품 최소화 |
+| 사용 형태 | 웹앱 · MCP 서버 · CLI 3진입점, `./data` 공유 | 세컨드 브레인 가치 극대화 |
+| MCP 우선순위 | 2차로 앞당김 (2D UI보다 먼저) | 적은 코드로 즉시 가치 실현 |
+| 로컬 LLM 모델 | 기본 qwen2.5:7b, `OLLAMA_MODEL`로 교체 가능 | R1 distill은 추출 작업에 비효율 |
+| 프라이버시 | 외부 LLM API 전송 금지 (로컬 기본, API는 opt-in) | §7 불변 원칙 |
+| LLM-free 모드 | `GRAPH_EXTRACTOR=none` 정식 티어 | 정적 분석만으로 온톨로지 ~70% 성립 |

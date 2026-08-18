@@ -1,0 +1,18 @@
+{
+  // 유닛 테스트 전용 — src/lib과 tests를 CommonJS로 트랜스파일해 node --test로 돌린다.
+  // (Next 런타임과 무관한 순수 로직만 대상으로 한다)
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": ".test-out",
+    "rootDir": ".",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "target": "ES2022",
+    "incremental": false,
+    "jsx": "react-jsx",
+    "types": ["node"]
+  },
+  "include": ["src/lib/**/*.ts", "tests/**/*.ts"],
+  "exclude": ["node_modules"]
+}

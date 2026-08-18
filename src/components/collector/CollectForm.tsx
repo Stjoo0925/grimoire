@@ -6,11 +6,13 @@
  */
 import { useActionState } from "react";
 import { useFormStatus } from "react-dom";
+import { useTranslations } from "next-intl";
 
 import { collectAction } from "@/app/actions";
 import type { CollectResult } from "@/lib/collector/types";
 
 function SubmitButton({ hasSnapshot }: { hasSnapshot: boolean }) {
+  const t = useTranslations("collect");
   const { pending } = useFormStatus();
   return (
     <button
@@ -18,16 +20,13 @@ function SubmitButton({ hasSnapshot }: { hasSnapshot: boolean }) {
       disabled={pending}
       className="rounded-md border border-amber-200/30 bg-stone-900 px-6 py-3 text-sm text-amber-100 transition hover:border-amber-200/60 hover:bg-stone-800 disabled:cursor-not-allowed disabled:opacity-50"
     >
-      {pending
-        ? "서고를 뒤지는 중…"
-        : hasSnapshot
-          ? "다시 수집하기"
-          : "수집하기"}
+      {pending ? t("pending") : hasSnapshot ? t("recollect") : t("collect")}
     </button>
   );
 }
 
 export function CollectForm({ hasSnapshot }: { hasSnapshot: boolean }) {
+  const t = useTranslations("collect");
   const [state, formAction] = useActionState<CollectResult | null, FormData>(
     collectAction,
     null,
@@ -45,9 +44,7 @@ export function CollectForm({ hasSnapshot }: { hasSnapshot: boolean }) {
           {state.message}
         </p>
       ) : (
-        <p className="text-xs text-stone-600">
-          수집은 한 번에 전부 — 레포·커밋·README·잔디를 훑습니다. 다소 걸립니다.
-        </p>
+        <p className="text-xs text-stone-600">{t("hint")}</p>
       )}
     </form>
   );

@@ -23,6 +23,17 @@ export interface Repo {
   /** 서문 — 원문 마크다운 (최대 약 10KB까지만 소장) */
   readme: string | null;
   htmlUrl: string;
+  /**
+   * 사람이 직접 붙인 레포 토픽 라벨.
+   * 지식그래프에서 Concept 노드의 1차 재료가 된다 (LLM 없이도 성립).
+   * schemaVersion 1 스냅샷에는 없다.
+   */
+  topics?: string[];
+  /**
+   * 의존성 매니페스트 원문 (경로 → 내용, 파일당 약 20KB까지).
+   * 정적 분석으로 Tech 노드를 뽑는 재료. schemaVersion 1 스냅샷에는 없다.
+   */
+  manifests?: Record<string, string>;
 }
 
 /** 커밋 = 마법서의 한 페이지 */
@@ -61,8 +72,19 @@ export interface CollectionStats {
   lastCommitAt: string | null;
 }
 
+/**
+ * 스냅샷 스키마 버전.
+ * 1 — 최초(레포·커밋·잔디)
+ * 2 — Repo.topics / Repo.manifests 추가 (지식그래프 정적 분석 재료)
+ *
+ * 필드가 없는 옛 스냅샷은 1로 취급하며, 그래프 빌드는 그대로 동작한다(노드가 적어질 뿐).
+ */
+export const SNAPSHOT_SCHEMA_VERSION = 2;
+
 /** 한 사용자의 수집 결과 전체 (로컬 "소장" 단위) */
 export interface CollectionSnapshot {
+  /** 없으면 1(구버전 스냅샷)로 취급한다 */
+  schemaVersion?: number;
   login: string;
   collectedAt: string;
   repos: Repo[];

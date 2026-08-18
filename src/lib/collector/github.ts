@@ -7,11 +7,12 @@
  * - Events API는 90일/300개 제한 때문에 사용하지 않는다.
  * - 커밋 상세(stats)는 커밋당 1콜이라 rate limit을 태워먹으므로 수집하지 않는다.
  */
-import type {
-  CollectionSnapshot,
-  Commit,
-  ContributionDay,
-  Repo,
+import {
+  SNAPSHOT_SCHEMA_VERSION,
+  type CollectionSnapshot,
+  type Commit,
+  type ContributionDay,
+  type Repo,
 } from "./types";
 
 const API = "https://api.github.com";
@@ -21,6 +22,16 @@ const GRAPHQL = "https://api.github.com/graphql";
 const RATE_LIMIT_FLOOR = 50;
 /** README는 레포당 이만큼(약 10KB)만 소장한다. */
 const README_MAX_BYTES = 10 * 1024;
+/** 의존성 매니페스트는 파일당 이만큼(약 20KB)만 소장한다. */
+const MANIFEST_MAX_BYTES = 20 * 1024;
+/** 정적 분석(Tech 노드) 재료가 되는 매니페스트 후보 경로 */
+const MANIFEST_PATHS = [
+  "package.json",
+  "requirements.txt",
+  "pyproject.toml",
+  "go.mod",
+  "Cargo.toml",
+] as const;
 /** 레포 단위 병렬도 */
 const REPO_CONCURRENCY = 5;
 
@@ -182,6 +193,8 @@ interface RestRepo {
   created_at: string;
   pushed_at: string | null;
   html_url: string;
+  /** 최신 REST 응답에는 기본 포함된다. 구버전 프록시를 대비해 optional. */
+  topics?: string[];
 }
 
 function toRepo(raw: RestRepo): Repo {
@@ -199,6 +212,8 @@ function toRepo(raw: RestRepo): Repo {
     pushedAt: raw.pushed_at ?? raw.created_at,
     readme: null,
     htmlUrl: raw.html_url,
+    topics: raw.topics ?? [],
+    manifests: {},
   };
 }
 
@@ -310,6 +325,44 @@ export async function fetchReadme(
   return new TextDecoder("utf-8")
     .decode(buf.subarray(0, README_MAX_BYTES))
     .replace(/�+$/, "");
+}
+
+/**
+ * 레포 루트의 의존성 매니페스트들 (없으면 그 파일만 건너뜀).
+ * 지식그래프 1단계(결정론적 정적 분석)의 재료 — KNOWLEDGE_GRAPH.md §4.1
+ */
+export async function fetchManifests(
+  ctx: CollectorContext,
+  repoFullName: string,
+): Promise<Record<string, string>> {
+  const manifests: Record<string, string> = {};
+  for (const file of MANIFEST_PATHS) {
+    if (exhausted(ctx)) break;
+    const res = await tryRest(
+      ctx,
+      `${API}/repos/${repoFullName}/contents/${file}`,
+      [404, 403, 451],
+    );
+    // 404 = 그 매니페스트를 안 쓰는 레포 — 정상적인 경우다.
+    if (!res || !res.ok) continue;
+
+    const body = (await res.json()) as {
+      content?: string;
+      encoding?: string;
+      type?: string;
+      size?: number;
+    };
+    // 같은 이름의 디렉터리면 배열이 오거나 type이 file이 아니다.
+    if (body.type !== "file" || !body.content) continue;
+    if (body.encoding !== "base64") continue;
+
+    const buf = Buffer.from(body.content, "base64");
+    const text = new TextDecoder("utf-8")
+      .decode(buf.subarray(0, MANIFEST_MAX_BYTES))
+      .replace(/�+$/, "");
+    if (text.trim().length > 0) manifests[file] = text;
+  }
+  return manifests;
 }
 
 const CONTRIBUTIONS_QUERY = `
@@ -478,6 +531,7 @@ export async function collectAll(
     try {
       repo.languages = await fetchLanguages(scoped, repo.fullName);
       repo.readme = await fetchReadme(scoped, repo.fullName);
+      repo.manifests = await fetchManifests(scoped, repo.fullName);
       commits.push(...(await fetchCommits(scoped, repo.fullName)));
     } catch (error) {
       // 레포 한 권이 실패해도 서고 전체 수집은 계속한다.
@@ -503,6 +557,7 @@ export async function collectAll(
   }
 
   return {
+    schemaVersion: SNAPSHOT_SCHEMA_VERSION,
     login,
     collectedAt: new Date().toISOString(),
     repos,

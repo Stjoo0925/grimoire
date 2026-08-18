@@ -6,11 +6,14 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "tsc -p tsconfig.test.json && node --test \".test-out/tests/*.test.js\""
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.117.1",
     "next": "15.5.23",
     "next-auth": "^5.0.0-beta.32",
+    "next-intl": "^4.13.7",
     "react": "19.1.0",
     "react-dom": "19.1.0"
   },

@@ -1,15 +1,19 @@
 "use server";
 
 /**
- * 서버 액션 — 수집(collect) 트리거와 로그아웃.
+ * 서버 액션 — 수집(collect)·그래프 생성 트리거와 로그아웃.
  * 토큰은 서버 세션에서만 읽어 GitHub API 호출에 쓰고, 클라이언트로 넘기지 않는다.
  */
 import { revalidatePath } from "next/cache";
+import { getLocale, getTranslations } from "next-intl/server";
 
 import { auth, signOut } from "@/auth";
 import { collectAll } from "@/lib/collector/github";
-import { saveSnapshot } from "@/lib/collector/storage";
+import { loadSnapshot, saveSnapshot } from "@/lib/collector/storage";
 import type { CollectResult } from "@/lib/collector/types";
+import { buildGraph } from "@/lib/graph/builder";
+import { saveGraph } from "@/lib/graph/storage";
+import { summarizeGraph, type GraphBuildResult } from "@/lib/graph/types";
 
 /** useActionState 시그니처 — 이전 상태와 폼 데이터는 쓰지 않는다. */
 export async function collectAction(
@@ -19,10 +23,12 @@ export async function collectAction(
   void _prev;
   void _formData;
 
+  const t = await getTranslations("collect");
+
   const session = await auth();
   const token = session?.accessToken;
   if (!token) {
-    return { ok: false, message: "세션이 만료되었습니다. 다시 로그인해 주세요." };
+    return { ok: false, message: t("sessionExpired") };
   }
 
   try {
@@ -37,9 +43,8 @@ export async function collectAction(
     return {
       ok: true,
       message: snapshot.partial
-        ? (snapshot.partialReason ??
-          "일부만 수집되었습니다. 잠시 후 다시 시도해 주세요.")
-        : `${snapshot.stats.repoCount}권의 마법서를 서고에 들였습니다.`,
+        ? (snapshot.partialReason ?? t("partialDefault"))
+        : t("success", { count: snapshot.stats.repoCount }),
     };
   } catch (error) {
     console.error("[collector] 수집 실패", error);
@@ -47,12 +52,63 @@ export async function collectAction(
       ok: false,
       message:
         error instanceof Error
-          ? `수집에 실패했습니다: ${error.message}`
-          : "수집에 실패했습니다.",
+          ? t("failure", { message: error.message })
+          : t("failureGeneric"),
+    };
+  }
+}
+
+/**
+ * 소장된 스냅샷 → 지식그래프.
+ * GitHub API는 건드리지 않는다 (읽는 것은 `data/{login}.json` 뿐).
+ * 추출기는 GRAPH_EXTRACTOR env로 결정되며, "none"이어도 정상 결과다.
+ */
+export async function buildGraphAction(
+  _prev: GraphBuildResult | null,
+  _formData: FormData,
+): Promise<GraphBuildResult> {
+  void _prev;
+  void _formData;
+
+  const t = await getTranslations("graph");
+
+  const session = await auth();
+  const login = session?.login;
+  if (!login) {
+    return { ok: false, message: t("sessionExpired") };
+  }
+
+  try {
+    const snapshot = await loadSnapshot(login);
+    if (!snapshot) {
+      return { ok: false, message: t("noSnapshot") };
+    }
+
+    const { graph, reason } = await buildGraph(snapshot);
+    await saveGraph(graph);
+    revalidatePath("/", "layout");
+
+    const summary = summarizeGraph(graph);
+    return {
+      ok: true,
+      message: `${t("success", {
+        nodes: summary.nodeTotal,
+        edges: summary.edgeTotal,
+      })} ${reason}`,
+    };
+  } catch (error) {
+    console.error("[graph] 그래프 생성 실패", error);
+    return {
+      ok: false,
+      message:
+        error instanceof Error
+          ? t("failure", { message: error.message })
+          : t("failureGeneric"),
     };
   }
 }
 
 export async function signOutAction(): Promise<void> {
-  await signOut({ redirectTo: "/" });
+  const locale = await getLocale();
+  await signOut({ redirectTo: `/${locale}` });
 }

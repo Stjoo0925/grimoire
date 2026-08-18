@@ -17,6 +17,8 @@ const eslintConfig = [
       ".next/**",
       "out/**",
       "build/**",
+      // 유닛 테스트 트랜스파일 산출물 (npm run test)
+      ".test-out/**",
       "next-env.d.ts",
     ],
   },

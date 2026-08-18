@@ -18,6 +18,7 @@ import CharacterCard from "./CharacterCard";
 import { ContributionHeatmap } from "./ContributionHeatmap";
 import { LibrarianChat } from "./LibrarianChat";
 import { ModelSettings } from "./ModelSettings";
+import { NPCLibrarian } from "./NPCLibrarian";
 import type { GameProfile } from "@/lib/library/game";
 import type { Heatmap } from "@/lib/library/heatmap";
 import { groupBooks, partitionPrivate, type ShelfMode } from "@/lib/library/shelves";
@@ -45,6 +46,8 @@ export function LibraryView({
   const [mode, setMode] = useState<ShelfMode>("language");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [librarianGlow, setLibrarianGlow] = useState<string[]>([]);
+  /** NPC가 지금 만지고 있는 책 — 잠깐 반짝인다 */
+  const [npcBookId, setNpcBookId] = useState<string | null>(null);
 
   const { open, restricted } = useMemo(() => partitionPrivate(books), [books]);
   const openShelves = useMemo(() => groupBooks(open, mode), [open, mode]);
@@ -59,11 +62,29 @@ export function LibraryView({
   );
   const selected = selectedId ? (byId.get(selectedId) ?? null) : null;
 
-  /** 선택된 책이 있으면 그 책의 연관 책이, 없으면 사서가 언급한 책이 빛난다 */
+  /** 선택된 책이 있으면 그 책의 연관 책이, 없으면 사서가 언급한 책이 빛난다.
+   *  NPC가 만지는 중인 책은 어느 상태에서든 함께 반짝인다. */
   const glowIds = useMemo(() => {
-    if (selected) return new Set(selected.relatedIds);
-    return new Set(librarianGlow);
-  }, [selected, librarianGlow]);
+    const ids = selected
+      ? new Set(selected.relatedIds)
+      : new Set(librarianGlow);
+    if (npcBookId) ids.add(npcBookId);
+    return ids;
+  }, [selected, librarianGlow, npcBookId]);
+
+  /** NPC 일과표 재료 + 채팅 언급 시 사서가 걸어갈 목표 */
+  const npcBooks = useMemo(
+    () =>
+      books.map((book) => ({
+        id: book.id,
+        name: book.name,
+        lastCommitAt: book.lastCommitAt,
+        recentCommits: book.recentCommits,
+        commitCount: book.commitCount,
+      })),
+    [books],
+  );
+  const npcFocusId = librarianGlow.length > 0 ? librarianGlow[0] : null;
 
   const relatedBooks = useMemo(
     () =>
@@ -151,24 +172,33 @@ export function LibraryView({
         </p>
       ) : null}
 
-      <div className="space-y-4">
-        <h3 className="text-[11px] tracking-[0.25em] text-stone-500">
-          {t("openStacks")}
-        </h3>
-        {renderShelves(openShelves)}
-      </div>
-
-      {restricted.length > 0 ? (
-        <div className="space-y-4 rounded-lg border border-violet-300/20 bg-violet-950/10 p-4">
-          <div className="space-y-1">
-            <h3 className="text-[11px] tracking-[0.25em] text-violet-200/80">
-              🔒 {t("restrictedStacks")}
-            </h3>
-            <p className="text-[10px] text-violet-200/50">{t("restrictedHint")}</p>
-          </div>
-          {renderShelves(restrictedShelves)}
+      {/* 서가 구역 — 사서 NPC가 이 안을 걸어다닌다 */}
+      <div className="relative">
+        <div className="space-y-4">
+          <h3 className="text-[11px] tracking-[0.25em] text-stone-500">
+            {t("openStacks")}
+          </h3>
+          {renderShelves(openShelves)}
         </div>
-      ) : null}
+
+        {restricted.length > 0 ? (
+          <div className="mt-6 space-y-4 rounded-lg border border-violet-300/20 bg-violet-950/10 p-4">
+            <div className="space-y-1">
+              <h3 className="text-[11px] tracking-[0.25em] text-violet-200/80">
+                🔒 {t("restrictedStacks")}
+              </h3>
+              <p className="text-[10px] text-violet-200/50">{t("restrictedHint")}</p>
+            </div>
+            {renderShelves(restrictedShelves)}
+          </div>
+        ) : null}
+
+        <NPCLibrarian
+          books={npcBooks}
+          focusBookId={npcFocusId}
+          onActing={setNpcBookId}
+        />
+      </div>
 
       {selected ? (
         <BookDetail

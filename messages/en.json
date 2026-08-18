@@ -93,6 +93,13 @@
     "privateBadge": "Private",
     "forkBadge": "Fork",
     "needGraph": "No threads of memory yet. Weave the graph to bring connections and glow to life.",
+    "npc": {
+      "shelve": "Shelving new pages into “{book}”…",
+      "shelveNote": "New pages for “{book}” — \"{note}\"",
+      "dust": "Dusting off “{book}”.",
+      "browse": "Leafing through “{book}”…",
+      "point": "The book you seek is here — “{book}”"
+    },
     "game": {
       "cardLabel": "Adventurer status",
       "level": "Level",

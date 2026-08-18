@@ -413,6 +413,346 @@ body {
   animation: grimoire-candle-dot 1.1s ease-in-out infinite;
 }
 
+/* ============================================================
+ * 사서 NPC — 서가 사이를 걸어다니며 일하는 작은 사서.
+ * 이동은 .npc의 transform 전이 하나로 끝난다(레이아웃 안 건드림).
+ * 방향은 --npc-facing(1/-1)으로 몸통만 좌우 반전한다.
+ * ============================================================ */
+.npc {
+  transition-property: transform;
+  transition-timing-function: cubic-bezier(0.45, 0.05, 0.55, 0.95);
+  will-change: transform;
+}
+
+.npc-body {
+  position: absolute;
+  inset: 0;
+  transform: scaleX(var(--npc-facing, 1));
+}
+
+/* 두건 */
+.npc-hood {
+  position: absolute;
+  top: 2px;
+  left: 50%;
+  width: 22px;
+  height: 16px;
+  transform: translateX(-50%);
+  border-radius: 11px 11px 7px 7px;
+  background: linear-gradient(180deg, #7c3aed 0%, #4c1d95 85%);
+  box-shadow: inset 0 -3px 4px rgba(0, 0, 0, 0.45);
+}
+
+/* 두건 속 얼굴 */
+.npc-face {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 8px;
+  transform: translateX(-50%);
+  border-radius: 6px;
+  background: #1c1917;
+}
+
+.npc-eye {
+  width: 2px;
+  height: 3px;
+  border-radius: 1px;
+  background: #fde68a;
+  animation: npc-blink 4.6s steps(1) infinite;
+}
+
+@keyframes npc-blink {
+  0%,
+  92%,
+  100% {
+    opacity: 1;
+  }
+  94%,
+  96% {
+    opacity: 0;
+  }
+}
+
+/* 로브 */
+.npc-robe {
+  position: absolute;
+  top: 15px;
+  left: 50%;
+  width: 26px;
+  height: 36px;
+  transform: translateX(-50%);
+  clip-path: polygon(28% 0, 72% 0, 100% 100%, 0 100%);
+  background: linear-gradient(180deg, #6d28d9 0%, #3b0764 78%, #2e1065 100%);
+  box-shadow: inset -4px 0 6px rgba(0, 0, 0, 0.4);
+}
+
+/* 팔 — 연출 때 들어올린다 */
+.npc-arm {
+  position: absolute;
+  top: 22px;
+  left: 66%;
+  width: 5px;
+  height: 14px;
+  border-radius: 3px;
+  background: #5b21b6;
+  transform-origin: top center;
+  transform: rotate(-8deg);
+  transition: transform 240ms ease-out;
+}
+
+/* 손에 든 소품 — 연출 종류에 따라 모양이 바뀐다 */
+.npc-prop {
+  position: absolute;
+  top: 20px;
+  left: 74%;
+  width: 8px;
+  height: 11px;
+  border-radius: 1px;
+  opacity: 0;
+  transition: opacity 180ms ease-out;
+}
+
+/* 초 — 어두운 서가를 밝히는 사서의 상비품 */
+.npc-candle {
+  position: absolute;
+  top: 26px;
+  left: 8%;
+  width: 3px;
+  height: 9px;
+  border-radius: 1px;
+  background: #fef3c7;
+}
+
+.npc-flame {
+  position: absolute;
+  top: -5px;
+  left: 50%;
+  width: 4px;
+  height: 5px;
+  transform: translateX(-50%);
+  border-radius: 50% 50% 40% 40%;
+  background: radial-gradient(circle at 50% 70%, #fde68a, #f59e0b 75%);
+  animation: npc-flame 900ms ease-in-out infinite alternate;
+}
+
+@keyframes npc-flame {
+  from {
+    transform: translateX(-50%) scale(0.9) rotate(-4deg);
+    opacity: 0.85;
+  }
+  to {
+    transform: translateX(-50%) scale(1.1) rotate(5deg);
+    opacity: 1;
+  }
+}
+
+/* 걷기 — 몸이 위아래로 통통, 로브가 살짝 씰룩 */
+@keyframes npc-walk-bob {
+  0%,
+  100% {
+    transform: scaleX(var(--npc-facing, 1)) translateY(0);
+  }
+  50% {
+    transform: scaleX(var(--npc-facing, 1)) translateY(-3px);
+  }
+}
+
+.npc-walking .npc-body {
+  animation: npc-walk-bob 360ms ease-in-out infinite;
+}
+
+/* ── 연출: 꽂기(shelve) — 팔을 들어 책을 서가로 밀어 넣는다 ── */
+.npc-act-shelve .npc-arm {
+  transform: rotate(-120deg);
+}
+
+.npc-act-shelve .npc-prop {
+  opacity: 1;
+  background: linear-gradient(90deg, #b45309, #f59e0b);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.35);
+  animation: npc-shelve-book 2.4s ease-in-out both;
+}
+
+@keyframes npc-shelve-book {
+  0% {
+    transform: translate(0, 0);
+    opacity: 1;
+  }
+  55% {
+    transform: translate(2px, -26px);
+    opacity: 1;
+  }
+  75% {
+    transform: translate(4px, -30px) scale(0.8);
+    opacity: 1;
+  }
+  100% {
+    transform: translate(5px, -32px) scale(0.55);
+    opacity: 0;
+  }
+}
+
+/* ── 연출: 먼지 털기(dust) — 팔이 빠르게 흔들리고 퍼프가 피어난다 ── */
+@keyframes npc-dust-arm {
+  0%,
+  100% {
+    transform: rotate(-60deg);
+  }
+  50% {
+    transform: rotate(-100deg);
+  }
+}
+
+.npc-act-dust .npc-arm {
+  animation: npc-dust-arm 340ms ease-in-out infinite;
+}
+
+.npc-act-dust .npc-prop {
+  opacity: 1;
+  top: 12px;
+  left: 78%;
+  width: 3px;
+  height: 10px;
+  background: #a8a29e;
+  border-radius: 2px;
+}
+
+.npc-puff {
+  position: absolute;
+  top: 8px;
+  left: 80%;
+  width: 5px;
+  height: 5px;
+  border-radius: 9999px;
+  background: rgba(214, 211, 209, 0.5);
+  opacity: 0;
+}
+
+.npc-act-dust ~ .npc-puff,
+.npc-act-dust .npc-puff {
+  opacity: 0;
+}
+
+.npc-act-dust + .npc-puff-1,
+.npc-act-dust ~ .npc-puff-1 {
+  animation: npc-puff 1.4s ease-out infinite;
+}
+
+.npc-act-dust ~ .npc-puff-2 {
+  animation: npc-puff 1.4s 0.5s ease-out infinite;
+}
+
+@keyframes npc-puff {
+  0% {
+    opacity: 0;
+    transform: translate(0, 0) scale(0.6);
+  }
+  25% {
+    opacity: 0.75;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(7px, -14px) scale(1.5);
+  }
+}
+
+/* ── 연출: 훑어보기(browse) — 펼친 책을 들고 고개를 까딱인다 ── */
+.npc-act-browse .npc-arm {
+  transform: rotate(-95deg);
+}
+
+.npc-act-browse .npc-prop {
+  opacity: 1;
+  top: 16px;
+  left: 62%;
+  width: 12px;
+  height: 8px;
+  background: linear-gradient(90deg, #fef3c7 48%, #78716c 50%, #fef3c7 52%);
+  border-radius: 1px 1px 3px 3px;
+}
+
+@keyframes npc-read-nod {
+  0%,
+  100% {
+    transform: scaleX(var(--npc-facing, 1)) rotate(0deg);
+  }
+  50% {
+    transform: scaleX(var(--npc-facing, 1)) rotate(2.5deg);
+  }
+}
+
+.npc-act-browse .npc-body {
+  animation: npc-read-nod 1.6s ease-in-out infinite;
+}
+
+/* ── 연출: 가리키기(point) — 채팅이 언급한 책 앞에서 반짝 ── */
+.npc-act-point .npc-arm {
+  transform: rotate(-150deg);
+}
+
+.npc-spark {
+  position: absolute;
+  top: -6px;
+  left: 50%;
+  width: 10px;
+  height: 10px;
+  transform: translateX(-50%);
+  opacity: 0;
+  background: radial-gradient(circle, #fde68a 20%, rgba(253, 230, 138, 0) 70%);
+}
+
+.npc-act-point ~ .npc-spark {
+  animation: npc-spark 700ms ease-in-out infinite alternate;
+}
+
+@keyframes npc-spark {
+  from {
+    opacity: 0.4;
+    transform: translateX(-50%) scale(0.8);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) scale(1.3);
+  }
+}
+
+/* 말풍선 — NPC 머리 위, 반전과 무관하게 정방향 텍스트 */
+.npc-bubble {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 10px;
+  max-width: 190px;
+  width: max-content;
+  padding: 5px 8px;
+  border: 1px solid rgba(251, 191, 36, 0.25);
+  border-radius: 8px;
+  background: rgba(28, 25, 23, 0.95);
+  color: #e7e5e4;
+  font-size: 10px;
+  line-height: 1.45;
+  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.5);
+  animation: grimoire-veil-in 200ms ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .npc {
+    transition: none;
+  }
+  .npc-walking .npc-body,
+  .npc-act-dust .npc-arm,
+  .npc-act-browse .npc-body,
+  .npc-flame,
+  .npc-eye {
+    animation: none;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .candle-dot {
     animation: none;

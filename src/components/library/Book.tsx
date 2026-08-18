@@ -30,6 +30,7 @@ export function Book({ book, selected = false, glowing = false, onSelect }: Book
   return (
     <button
       type="button"
+      data-book-id={book.id}
       onClick={() => onSelect?.(book.id)}
       aria-pressed={selected}
       title={`${book.fullName} · ${t("commitCount", { count: book.commitCount })}`}

@@ -18,3 +18,38 @@ body {
   color: var(--foreground);
   font-family: var(--font-geist-sans), system-ui, sans-serif;
 }
+
+/*
+ * ③ 서재 — 발광 하이라이트.
+ * 지식그래프상 이어진 책, 그리고 AI 사서가 언급한 책이 금빛으로 은은히 숨쉰다.
+ */
+@keyframes grimoire-glow {
+  0%,
+  100% {
+    box-shadow:
+      0 0 6px rgba(251, 191, 36, 0.25),
+      0 0 14px rgba(251, 191, 36, 0.12);
+    filter: brightness(1.05);
+  }
+  50% {
+    box-shadow:
+      0 0 12px rgba(251, 191, 36, 0.55),
+      0 0 26px rgba(251, 191, 36, 0.28);
+    filter: brightness(1.28);
+  }
+}
+
+.grimoire-glow {
+  animation: grimoire-glow 2.4s ease-in-out infinite;
+  z-index: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .grimoire-glow {
+    animation: none;
+    box-shadow:
+      0 0 10px rgba(251, 191, 36, 0.45),
+      0 0 22px rgba(251, 191, 36, 0.2);
+    filter: brightness(1.2);
+  }
+}

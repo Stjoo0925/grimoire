@@ -81,7 +81,81 @@
     "partialDefault": "Extraction failed for some repositories."
   },
   "library": {
-    "emptyShelf": "No grimoires shelved yet."
+    "title": "The Library",
+    "subtitle": "{books} grimoires across {shelves} shelves. Pull a spine to open it.",
+    "emptyShelf": "No grimoires shelved yet.",
+    "unknownLanguage": "Unknown school",
+    "openStacks": "Open stacks",
+    "restrictedStacks": "Private stacks",
+    "restrictedHint": "Only you may read this section.",
+    "bookCount": "{count} books",
+    "commitCount": "{count} pages",
+    "privateBadge": "Private",
+    "forkBadge": "Fork",
+    "needGraph": "No threads of memory yet. Weave the graph to bring connections and glow to life.",
+    "shelfBy": {
+      "label": "Shelving",
+      "language": "By language",
+      "year": "By year"
+    },
+    "book": {
+      "close": "Close the book",
+      "open": "Open on GitHub",
+      "noDescription": "No preface was written.",
+      "primaryLanguage": "School",
+      "stars": "Stars",
+      "commits": "Pages",
+      "created": "Shelved",
+      "lastPushed": "Last written {date}",
+      "history": "Writing history",
+      "historyEmpty": "No commits recorded.",
+      "quarterCount": "{quarter} · {count} pages",
+      "connections": "Threads of memory",
+      "connectionsEmpty": "No threads woven to this book yet.",
+      "tech": "Technologies used",
+      "concepts": "Concepts covered",
+      "problems": "Problems solved",
+      "periods": "Written during",
+      "related": "Glowing alongside",
+      "source": {
+        "static": "static",
+        "llm": "AI",
+        "topics": "topic",
+        "mcp": "manual"
+      }
+    },
+    "heatmap": {
+      "title": "Practice journal",
+      "total": "{count} contributions this year",
+      "cell": "{date} · {count}",
+      "less": "Less",
+      "more": "More"
+    },
+    "chat": {
+      "title": "AI Librarian",
+      "open": "Call the librarian",
+      "close": "Close",
+      "clear": "Clear chat",
+      "send": "Ask",
+      "pending": "The librarian is scanning the shelves…",
+      "placeholder": "Which book deals with realtime features?",
+      "intro": "What are you looking for? Ask by technology, concept, or project name and I will find it on the shelves.",
+      "privacy": "Questions and answers are handled only by the local LLM on this machine. Nothing leaves it.",
+      "found": "What the librarian found",
+      "glowNotice": "{count} books are glowing on the shelves.",
+      "emptyQuestion": "Please write what you are looking for.",
+      "sessionExpired": "Your session has expired. Please sign in again.",
+      "noGraph": "No threads of memory yet. Weave the graph first.",
+      "noMatch": "Nothing was found under that name. Try a technology, project, or concept (e.g. react, realtime).",
+      "degraded": "The local LLM (Ollama) could not be reached, so here are the raw findings without a summary. Run `ollama serve` and the librarian will answer in prose.",
+      "kind": {
+        "project": "book",
+        "tech": "tech",
+        "concept": "concept",
+        "problem": "problem",
+        "period": "period"
+      }
+    }
   },
   "language": {
     "label": "Language",

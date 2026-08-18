@@ -13,10 +13,13 @@ import { SnapshotSummary } from "@/components/collector/SnapshotSummary";
 import { GraphForm } from "@/components/graph/GraphForm";
 import { GraphSummary } from "@/components/graph/GraphSummary";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
+import { LibraryView } from "@/components/library/LibraryView";
 import { fetchViewer } from "@/lib/collector/github";
 import { loadSnapshot } from "@/lib/collector/storage";
 import type { CollectionSnapshot } from "@/lib/collector/types";
 import { loadGraph } from "@/lib/graph/storage";
+import { buildHeatmap } from "@/lib/library/heatmap";
+import { buildLibrary } from "@/lib/library/view";
 
 /**
  * topics/manifests 없이 수집된 구버전 스냅샷인가.
@@ -25,6 +28,13 @@ import { loadGraph } from "@/lib/graph/storage";
 function isStaleSnapshot(snapshot: CollectionSnapshot): boolean {
   if ((snapshot.schemaVersion ?? 1) >= 2) return false;
   return !snapshot.repos.some((repo) => repo.topics || repo.manifests);
+}
+
+/** 잔디 격자의 기준일 — 서버 타임존과 무관하게 서울 기준 오늘(YYYY-MM-DD) */
+function todayInSeoul(): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Seoul" }).format(
+    new Date(),
+  );
 }
 
 /** 세션에 login이 없는(구버전 세션) 경우에만 GitHub에 한 번 물어본다. */
@@ -131,24 +141,34 @@ export default async function Home({
         </form>
       </div>
 
-      <CollectForm hasSnapshot={snapshot !== null} />
-
+      {/* ③ 인터랙티브 도서관 — 수집을 마쳤다면 서재가 곧 첫 화면이다 */}
       {snapshot ? (
-        <SnapshotSummary snapshot={snapshot} />
+        <LibraryView
+          books={buildLibrary(snapshot, graph).books}
+          heatmap={buildHeatmap(snapshot.contributions, todayInSeoul())}
+          hasGraph={graph !== null}
+        />
       ) : (
         <p className="max-w-md text-center text-xs leading-relaxed text-stone-600">
           {tHome("emptyLibrary")}
         </p>
       )}
 
-      <GraphForm hasSnapshot={snapshot !== null} hasGraph={graph !== null} />
+      {/* 서고 관리 — 수집·그래프 트리거와 명패는 서재 아래에 그대로 둔다 */}
+      <div className="flex w-full max-w-2xl flex-col items-center gap-10 border-t border-amber-200/10 pt-10">
+        <CollectForm hasSnapshot={snapshot !== null} />
 
-      {graph ? (
-        <GraphSummary
-          graph={graph}
-          staleSnapshot={snapshot ? isStaleSnapshot(snapshot) : false}
-        />
-      ) : null}
+        {snapshot ? <SnapshotSummary snapshot={snapshot} /> : null}
+
+        <GraphForm hasSnapshot={snapshot !== null} hasGraph={graph !== null} />
+
+        {graph ? (
+          <GraphSummary
+            graph={graph}
+            staleSnapshot={snapshot ? isStaleSnapshot(snapshot) : false}
+          />
+        ) : null}
+      </div>
     </main>
   );
 }

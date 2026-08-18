@@ -14,6 +14,14 @@ import type { CollectResult } from "@/lib/collector/types";
 import { buildGraph } from "@/lib/graph/builder";
 import { loadGraph, saveGraph } from "@/lib/graph/storage";
 import { summarizeGraph, type GraphBuildResult } from "@/lib/graph/types";
+import {
+  buildLibrarianContext,
+  buildLibrarianPrompt,
+  matchProjectMentions,
+  LIBRARIAN_SYSTEM_PROMPT,
+  type LibrarianAnswer,
+} from "@/lib/library/librarian";
+import { askOllama } from "@/lib/library/ollama";
 
 /** useActionState 시그니처 — 이전 상태와 폼 데이터는 쓰지 않는다. */
 export async function collectAction(
@@ -108,6 +116,86 @@ export async function buildGraphAction(
           : t("failureGeneric"),
     };
   }
+}
+
+/** 사서 질문 1회 길이 상한 (프롬프트 폭주 방지) */
+const LIBRARIAN_QUESTION_MAX = 500;
+
+/**
+ * ③ AI 사서 — 질문 하나에 답한다.
+ *
+ * 그래프 키워드 검색 → 압축 컨텍스트 → 로컬 Ollama 합성.
+ * Ollama가 없으면 검색 결과를 그대로 돌려주는 degraded 모드로 내려간다.
+ * 외부 LLM API는 어떤 경우에도 부르지 않는다 (PLANNING.md §7).
+ */
+export async function askLibrarianAction(
+  question: string,
+): Promise<LibrarianAnswer> {
+  const [t, locale] = await Promise.all([
+    getTranslations("library"),
+    getLocale(),
+  ]);
+  const trimmed = question.trim().slice(0, LIBRARIAN_QUESTION_MAX);
+
+  const empty = (message: string): LibrarianAnswer => ({
+    ok: false,
+    question: trimmed,
+    answer: null,
+    degraded: false,
+    items: [],
+    projectIds: [],
+    message,
+  });
+
+  if (!trimmed) return empty(t("chat.emptyQuestion"));
+
+  const session = await auth();
+  const login = session?.login;
+  if (!login) return empty(t("chat.sessionExpired"));
+
+  const graph = await loadGraph(login);
+  if (!graph) return empty(t("chat.noGraph"));
+
+  const context = buildLibrarianContext(graph, trimmed);
+  if (context.items.length === 0) {
+    return {
+      ok: true,
+      question: trimmed,
+      answer: null,
+      degraded: false,
+      items: [],
+      projectIds: [],
+      message: t("chat.noMatch"),
+    };
+  }
+
+  const result = await askOllama(
+    LIBRARIAN_SYSTEM_PROMPT,
+    buildLibrarianPrompt(trimmed, context, locale),
+  );
+
+  if (!result.ok || !result.text) {
+    console.warn("[librarian] 로컬 Ollama 사용 불가 —", result.reason);
+    return {
+      ok: true,
+      question: trimmed,
+      answer: null,
+      degraded: true,
+      items: context.items,
+      projectIds: context.projectIds,
+      message: t("chat.degraded"),
+    };
+  }
+
+  return {
+    ok: true,
+    question: trimmed,
+    answer: result.text,
+    degraded: false,
+    items: context.items,
+    projectIds: matchProjectMentions(result.text, context),
+    message: null,
+  };
 }
 
 export async function signOutAction(): Promise<void> {

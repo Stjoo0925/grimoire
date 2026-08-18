@@ -81,7 +81,81 @@
     "partialDefault": "일부 레포의 추출이 실패했습니다."
   },
   "library": {
-    "emptyShelf": "아직 꽂힌 마법서가 없습니다."
+    "title": "마법 서재",
+    "subtitle": "{books}권의 마법서가 {shelves}개의 서가에 꽂혀 있습니다. 책등을 누르면 펼쳐집니다.",
+    "emptyShelf": "아직 꽂힌 마법서가 없습니다.",
+    "unknownLanguage": "계열 미상",
+    "openStacks": "열람 서고",
+    "restrictedStacks": "비공개 서고",
+    "restrictedHint": "본인만 열람할 수 있는 구역입니다.",
+    "bookCount": "{count}권",
+    "commitCount": "{count}쪽",
+    "privateBadge": "비공개",
+    "forkBadge": "사본",
+    "needGraph": "아직 기억의 실타래가 없습니다. 그래프를 엮으면 책끼리의 연결과 발광이 살아납니다.",
+    "shelfBy": {
+      "label": "서가 배치",
+      "language": "언어별 서가",
+      "year": "연도별 층"
+    },
+    "book": {
+      "close": "책 덮기",
+      "open": "GitHub에서 펼쳐 보기",
+      "noDescription": "서문이 적혀 있지 않습니다.",
+      "primaryLanguage": "주 계열",
+      "stars": "별",
+      "commits": "페이지",
+      "created": "입고일",
+      "lastPushed": "마지막 집필 {date}",
+      "history": "집필 연혁",
+      "historyEmpty": "기록된 커밋이 없습니다.",
+      "quarterCount": "{quarter} · {count}쪽",
+      "connections": "기억의 실",
+      "connectionsEmpty": "아직 이 책에 엮인 실이 없습니다.",
+      "tech": "쓰인 기술",
+      "concepts": "다룬 개념",
+      "problems": "해결한 문제",
+      "periods": "집필 시기",
+      "related": "함께 빛나는 책",
+      "source": {
+        "static": "정적",
+        "llm": "AI",
+        "topics": "토픽",
+        "mcp": "수기"
+      }
+    },
+    "heatmap": {
+      "title": "수련 일지",
+      "total": "최근 1년 {count}회",
+      "cell": "{date} · {count}회",
+      "less": "옅음",
+      "more": "짙음"
+    },
+    "chat": {
+      "title": "AI 사서",
+      "open": "사서 부르기",
+      "close": "닫기",
+      "clear": "대화 지우기",
+      "send": "묻기",
+      "pending": "사서가 서가를 살피는 중…",
+      "placeholder": "실시간 기능을 다룬 책은 어디 있나요?",
+      "intro": "무엇을 찾으시나요? 기술·개념·프로젝트 이름으로 물으시면 서가에서 찾아 드립니다.",
+      "privacy": "질문과 답변은 이 컴퓨터의 로컬 LLM에서만 처리됩니다. 외부로 나가지 않습니다.",
+      "found": "사서가 찾은 항목",
+      "glowNotice": "{count}권이 서가에서 빛나고 있습니다.",
+      "emptyQuestion": "무엇을 찾을지 적어 주세요.",
+      "sessionExpired": "세션이 만료되었습니다. 다시 로그인해 주세요.",
+      "noGraph": "아직 기억의 실타래가 없습니다. 그래프를 먼저 엮어 주세요.",
+      "noMatch": "그 이름으로는 아무것도 찾지 못했습니다. 기술명·프로젝트명·개념(예: react, 실시간)으로 다시 물어봐 주세요.",
+      "degraded": "로컬 LLM(Ollama)에 닿지 못해 요약 없이 찾은 항목만 보여 드립니다. ollama serve를 띄우면 사서가 문장으로 답합니다.",
+      "kind": {
+        "project": "책",
+        "tech": "기술",
+        "concept": "개념",
+        "problem": "문제",
+        "period": "시기"
+      }
+    }
   },
   "language": {
     "label": "언어",

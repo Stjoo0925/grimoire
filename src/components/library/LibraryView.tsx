@@ -10,6 +10,7 @@ import { useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
 
 import AchievementShelf from "./AchievementShelf";
+import AmbientScene from "./AmbientScene";
 import { Book } from "./Book";
 import { BookDetail } from "./BookDetail";
 import { Bookshelf } from "./Bookshelf";
@@ -90,7 +91,8 @@ export function LibraryView({
     ));
 
   return (
-    <div className="w-full max-w-5xl space-y-6">
+    <div className="relative w-full max-w-5xl space-y-6">
+      <AmbientScene />
       <header className="flex flex-wrap items-end justify-between gap-4">
         <div className="space-y-1">
           <h2 className="text-sm tracking-[0.3em] text-amber-100/80">

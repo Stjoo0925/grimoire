@@ -23,7 +23,11 @@ export function Bookshelf({ shelf, children }: BookshelfProps) {
   const isLanguage = !/^\d{4}$/.test(shelf.key);
 
   return (
-    <section className="rounded-md border border-amber-900/25 bg-stone-900/40 px-4 pt-3 pb-1">
+    <section className="game-frame relative px-4 pt-3 pb-1">
+      {/* 서가 양옆 기둥 */}
+      <div aria-hidden className="shelf-post absolute inset-y-2 left-0 w-1.5 rounded-l" />
+      <div aria-hidden className="shelf-post absolute inset-y-2 right-0 w-1.5 rounded-r" />
+
       <header className="mb-2 flex items-baseline justify-between gap-3">
         <h3 className="flex items-center gap-2 text-xs tracking-[0.2em] text-amber-200/75">
           {isLanguage ? (
@@ -54,11 +58,8 @@ export function Bookshelf({ shelf, children }: BookshelfProps) {
             children
           )}
         </div>
-        {/* 선반 판 */}
-        <div
-          aria-hidden
-          className="h-2 rounded-sm bg-gradient-to-b from-amber-950/80 to-stone-950 shadow-[0_2px_6px_rgba(0,0,0,0.6)]"
-        />
+        {/* 나무 선반 판 */}
+        <div aria-hidden className="shelf-plank h-2.5 rounded-sm" />
       </div>
     </section>
   );

@@ -11,6 +11,7 @@ import { useTranslations } from "next-intl";
 
 import { spineMetrics } from "@/lib/library/shelves";
 import type { BookView } from "@/lib/library/view";
+import { RARITY_COLOR, rarityOf, tiltOf } from "./rarity";
 
 export interface BookProps {
   book: BookView;
@@ -23,6 +24,8 @@ export interface BookProps {
 export function Book({ book, selected = false, glowing = false, onSelect }: BookProps) {
   const t = useTranslations("library");
   const { height, width } = spineMetrics(book.commitCount);
+  const rarity = rarityOf(book.commitCount);
+  const tilt = tiltOf(book.id);
 
   return (
     <button
@@ -31,23 +34,36 @@ export function Book({ book, selected = false, glowing = false, onSelect }: Book
       aria-pressed={selected}
       title={`${book.fullName} · ${t("commitCount", { count: book.commitCount })}`}
       className={[
-        "group relative flex shrink-0 items-end justify-center rounded-t-[3px] border border-black/50",
-        "transition-[transform,box-shadow,filter] duration-200 ease-out",
-        "hover:-translate-y-2 hover:brightness-125 focus:outline-none",
-        "focus-visible:-translate-y-2 focus-visible:ring-2 focus-visible:ring-amber-200/80",
-        selected ? "-translate-y-3 brightness-125 ring-2 ring-amber-200/90" : "",
+        "book-spine group relative flex shrink-0 items-end justify-center rounded-t-[3px] border border-black/50",
+        "focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-200/80",
+        selected ? "ring-2 ring-amber-200/90" : "",
         glowing && !selected ? "grimoire-glow" : "",
       ]
         .filter(Boolean)
         .join(" ")}
-      style={{
-        height,
-        width,
-        backgroundColor: book.spineColor,
-        backgroundImage:
-          "linear-gradient(90deg, rgba(0,0,0,0.45) 0%, rgba(255,255,255,0.10) 22%, rgba(0,0,0,0.10) 60%, rgba(0,0,0,0.55) 100%)",
-      }}
+      style={
+        {
+          height,
+          width,
+          backgroundColor: book.spineColor,
+          backgroundImage:
+            "linear-gradient(90deg, rgba(0,0,0,0.45) 0%, rgba(255,255,255,0.10) 22%, rgba(0,0,0,0.10) 60%, rgba(0,0,0,0.55) 100%)",
+          "--tilt": `${tilt}deg`,
+        } as React.CSSProperties
+      }
     >
+      {/* 등급 보석 — 두꺼운 책일수록 귀한 판본 */}
+      {rarity !== "common" ? (
+        <span
+          aria-hidden
+          className="pointer-events-none absolute bottom-2 left-1/2 h-[5px] w-[5px] -translate-x-1/2 rounded-full"
+          style={{
+            backgroundColor: RARITY_COLOR[rarity],
+            boxShadow: `0 0 5px ${RARITY_COLOR[rarity]}`,
+          }}
+        />
+      ) : null}
+
       {/* 위·아래 금박 띠 */}
       <span
         aria-hidden

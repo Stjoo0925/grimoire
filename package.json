@@ -7,10 +7,13 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "tsc -p tsconfig.test.json && node --test \".test-out/tests/*.test.js\""
+    "test": "tsc -p tsconfig.test.json && node --test \".test-out/tests/*.test.js\"",
+    "mcp:build": "tsc -p tsconfig.mcp.json",
+    "mcp": "npm run mcp:build && node dist-mcp/mcp/server.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.117.1",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "next": "15.5.23",
     "next-auth": "^5.0.0-beta.32",
     "next-intl": "^4.13.7",

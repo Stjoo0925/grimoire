@@ -21,6 +21,8 @@
 
 # production
 /build
+# MCP 서버 트랜스파일 산출물 (npm run mcp:build)
+/dist-mcp
 
 # misc
 .DS_Store

@@ -19,6 +19,8 @@ const eslintConfig = [
       "build/**",
       // 유닛 테스트 트랜스파일 산출물 (npm run test)
       ".test-out/**",
+      // MCP 서버 트랜스파일 산출물 (npm run mcp:build)
+      "dist-mcp/**",
       "next-env.d.ts",
     ],
   },

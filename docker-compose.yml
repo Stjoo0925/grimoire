@@ -32,6 +32,31 @@ services:
       # 수집 스냅샷(data/{login}.json)과 그래프(data/graph/{login}.json)를 호스트와 공유
       - ./data:/app/data
 
+  # ── profile: mcp ── MCP 서버 (원격 연결용 Streamable HTTP) ────────────
+  # 로컬에서 Claude Desktop/Cursor에 붙일 때는 이 컨테이너가 필요 없다 —
+  # stdio 모드로 `node dist-mcp/mcp/server.js` 또는 `docker run -i` 를 쓰면 된다(README).
+  # ⚠ 여기서 뜨는 것은 원격 노출 모드다. MCP_AUTH_TOKEN 없이는 기동을 거부한다.
+  #    TLS는 앞단(리버스 프록시/터널)이 담당한다.
+  mcp:
+    profiles: ["mcp"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: mcp
+    image: grimoire-mcp:local
+    container_name: grimoire-mcp
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    environment:
+      - MCP_TRANSPORT=http
+      - MCP_PORT=${MCP_PORT:-8765}
+      - MCP_AUTH_TOKEN=${MCP_AUTH_TOKEN:-}
+      - GRIMOIRE_LOGIN=${GRIMOIRE_LOGIN:-}
+    volumes:
+      # 웹앱과 같은 ./data 를 읽는다 (PLANNING.md §5 원칙 1)
+      - ./data:/app/data
+
   # ── profile: llm ── 로컬 LLM (프라이버시 기본값, PLANNING.md §7) ───────
   ollama:
     profiles: ["llm"]

@@ -147,3 +147,5 @@ GitHub OAuth 로그인
 | 로컬 LLM 모델 | 기본 qwen2.5:7b, `OLLAMA_MODEL`로 교체 가능 | R1 distill은 추출 작업에 비효율 |
 | 프라이버시 | 외부 LLM API 전송 금지 (로컬 기본, API는 opt-in) | §7 불변 원칙 |
 | LLM-free 모드 | `GRAPH_EXTRACTOR=none` 정식 티어 | 정적 분석만으로 온톨로지 ~70% 성립 |
+| 최종 배포 형태 | **올인 컨테이너** — 웹·MCP·데이터 전부 도커 내부 | 데이터는 named volume, MCP는 `docker run -i`. 호스트 바인드 마운트·`npm run dev`는 개발 편의용 과도기 |
+| 원격 MCP | 개인 서버 배포, `MCP_TRANSPORT=http` + Bearer 토큰 필수 | 어디서든 세컨드 브레인 접속. TLS는 Caddy/Cloudflare Tunnel, 무인증 노출 금지 |

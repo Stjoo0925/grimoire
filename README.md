@@ -10,7 +10,7 @@
 
 전체 기획은 [PLANNING.md](./PLANNING.md) 참고.
 
-> 현재 상태: **① 수집기 + ② 지식그래프 구현 완료**. GitHub OAuth 로그인 → 레포·커밋·README·토픽·의존성 매니페스트 수집 → `data/{login}.json` 소장 → 지식그래프 생성(`data/graph/{login}.json`)까지 동작합니다. 그래프는 LLM 없이도(정적 분석만으로) 만들어집니다. ③ 도서관 UI는 아직 스텁입니다.
+> 현재 상태: **① 수집기 + ② 지식그래프 + MCP 서버 구현 완료**. GitHub OAuth 로그인 → 레포·커밋·README·토픽·의존성 매니페스트 수집 → `data/{login}.json` 소장 → 지식그래프 생성(`data/graph/{login}.json`) → **MCP 서버로 Claude Desktop/Cursor에 노출**까지 동작합니다. 그래프는 LLM 없이도(정적 분석만으로) 만들어집니다. ③ 도서관 UI는 아직 스텁입니다.
 
 ## 3층 아키텍처
 
@@ -31,6 +31,7 @@
 |---|---|---|
 | ① 수집기 | `src/lib/collector/` | `types.ts` (Repo/Commit/ContributionDay/CollectionSnapshot), `github.ts` (REST+GraphQL 페처), `storage.ts` (`data/{login}.json` 소장) |
 | ② 지식그래프 | `src/lib/graph/` | `types.ts` (온톨로지: Project/Tech/Concept/Problem/Period, 엣지 USES·ABOUT·SOLVED·LEARNED·DEVELOPED·RELATED_TO·DEPENDS_ON), `manifests.ts`·`commits.ts`·`canonical.ts`·`deterministic.ts` (결정론적 파이프라인), `extractors/` (ollama·claude 스위치), `merge.ts`, `builder.ts`, `storage.ts` (`data/graph/{login}.json`) |
+| ② MCP 서버 | `src/mcp/` | `server.ts` (stdio/HTTP 배선), `tools.ts` (도구 3종), `search.ts`·`project.ts`·`learning.ts` (순수 로직), `paths.ts`·`context.ts`·`storage.ts` (`./data` 접근), `transport.ts`·`http.ts` (전송·인증) |
 | ③ 도서관 UI | `src/components/library/` | `Bookshelf.tsx`, `Book.tsx` (자리표시) |
 | 인증 | `src/auth.ts`, `src/app/api/auth/[...nextauth]/route.ts` | Auth.js v5 + GitHub OAuth |
 
@@ -135,6 +136,160 @@ http://localhost:3000 에서 "GitHub로 로그인" 버튼으로 OAuth 흐름을 
 옛 스냅샷(토픽·매니페스트 없이 수집)도 그대로 그래프가 만들어집니다 — 노드가 적어질 뿐이며,
 화면이 "다시 수집하기"를 권합니다.
 
+## MCP 서버 — 세컨드 브레인 (Claude Desktop / Cursor / 원격)
+
+구운 지식그래프를 **MCP(Model Context Protocol) 서버**로 열어, 외부 AI 클라이언트가 내 커밋 이력을
+직접 조회하게 합니다 (PLANNING.md §5 ②, KNOWLEDGE_GRAPH.md §8). 웹앱과 **같은 `./data`** 를 읽으므로
+따로 수집할 필요가 없고, Next.js/React 코드는 전혀 로드하지 않는 독립 프로세스입니다.
+
+### 도구 3종
+
+| 도구 | 인자 | 하는 일 |
+|---|---|---|
+| `query_grimoire_graph` | `query`, `limit`(기본 8·최대 25), `hops`(1~2·기본 1) | 키워드를 정규화(`React.js` → `tech-react`)해 노드를 찾고 점수순(정확 > 접두 > 부분, 연결 차수로 소폭 가산) 시드에서 1~2홉 서브그래프를 돌려줍니다. Problem은 `solutionSummary`를 항상 포함 |
+| `get_project_history` | `project` (부분 일치 가능) | 그 책의 메타(주 언어·공개 여부·날짜) + 사용 기술(USES 출처 포함) + 개념 + 해결한 문제 + 개발 시기 + 커밋 통계(총 수·첫/마지막 커밋·최근 메시지 20개). 스냅샷이 없으면 그래프만으로 답하고 사유를 밝힘 |
+| `record_new_learning` | `name`, `kind`(`tech`\|`concept`), `note?`, `relatedProject?` | 새로 배운 것을 그래프에 기록. 이미 있으면 `already known`으로 알리고 메모만 갱신. 프로젝트에 `USES`/`ABOUT`, 현재 분기 `Period`에서 `LEARNED`를 잇고 임시 파일 + rename으로 원자적 저장 |
+
+`record_new_learning`이 만든 노드/엣지는 `meta.source = "mcp"`로 표시되며, 웹앱에서 **그래프를 다시 구워도 보존**됩니다(빌더가 MERGE).
+
+### 프라이버시 ⚠
+
+> **이 서버를 외부 LLM 클라이언트(Claude Desktop 등)에 연결하면, 질의된 서브그래프만큼은 그 LLM에 노출됩니다** (PLANNING.md §7).
+> private 레포 이름·커밋 메시지도 응답에 포함될 수 있습니다. 완전 폐쇄가 필요하면 로컬 LLM 클라이언트에 연결하세요.
+> 서버 자체는 어떤 외부 API도 호출하지 않습니다 — 읽고 쓰는 것은 `./data` 뿐입니다.
+
+### 빌드와 실행 (호스트)
+
+```bash
+npm run mcp:build   # tsconfig.mcp.json → dist-mcp/mcp/server.js (CommonJS)
+npm run mcp         # 빌드 후 stdio로 실행 (보통은 클라이언트가 알아서 띄웁니다)
+```
+
+**어떤 그래프를 여는가**: `GRIMOIRE_LOGIN`이 있으면 그 사용자, 없고 `data/graph/`에 파일이 하나뿐이면 그것,
+여러 개면 후보를 나열하며 오류로 알려줍니다. 데이터 디렉터리는 `GRIMOIRE_DATA_DIR` → 실행 위치의 `./data`
+→ `dist-mcp` 옆의 `data` 순으로 찾습니다(호스트 경로를 코드에 박지 않습니다).
+
+#### Claude Desktop (`claude_desktop_config.json`)
+
+Windows는 `%APPDATA%\Claude\claude_desktop_config.json`, macOS는 `~/Library/Application Support/Claude/claude_desktop_config.json`.
+
+```json
+{
+  "mcpServers": {
+    "grimoire": {
+      "command": "node",
+      "args": ["D:\\Grimoire\\dist-mcp\\mcp\\server.js"],
+      "env": {
+        "GRIMOIRE_LOGIN": "Stjoo0925",
+        "GRIMOIRE_DATA_DIR": "D:\\Grimoire\\data"
+      }
+    }
+  }
+}
+```
+
+#### Cursor (`~/.cursor/mcp.json`, 프로젝트별은 `.cursor/mcp.json`)
+
+```json
+{
+  "mcpServers": {
+    "grimoire": {
+      "command": "node",
+      "args": ["D:\\Grimoire\\dist-mcp\\mcp\\server.js"],
+      "env": { "GRIMOIRE_LOGIN": "Stjoo0925" }
+    }
+  }
+}
+```
+
+#### Claude Code
+
+```bash
+claude mcp add grimoire --env GRIMOIRE_LOGIN=Stjoo0925 -- node D:\Grimoire\dist-mcp\mcp\server.js
+```
+
+### 컨테이너로 실행 (stdio)
+
+```bash
+docker build --target mcp -t grimoire-mcp:local .
+```
+
+```json
+{
+  "mcpServers": {
+    "grimoire": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "-v", "D:\\Grimoire\\data:/app/data",
+        "-e", "GRIMOIRE_LOGIN=Stjoo0925",
+        "grimoire-mcp:local"
+      ]
+    }
+  }
+}
+```
+
+- stdio는 `docker run -i`의 표준입출력으로 그대로 흐릅니다(추가 설정 불필요).
+- 이미지의 작업 디렉터리는 `/app`이고 서버는 **cwd 기준으로 `./data`** 를 찾으므로,
+  볼륨을 `/app/data`에 마운트하면 됩니다. 다른 곳에 붙이려면 `-e GRIMOIRE_DATA_DIR=/app/app-data`처럼 지정하세요.
+- 나중에 데이터를 named volume으로 옮겨도 서버 코드는 그대로입니다.
+
+### 원격(개인 서버) — Streamable HTTP
+
+```bash
+# .env 에 MCP_AUTH_TOKEN(긴 무작위 문자열)과 GRIMOIRE_LOGIN을 채운 뒤
+docker compose --profile mcp up -d --build     # 8765 포트, /mcp 경로
+```
+
+- `MCP_TRANSPORT=http`이고 `MCP_AUTH_TOKEN`이 비어 있으면 **서버가 기동을 거부합니다** — 토큰 없는 원격 노출 금지(PLANNING.md §7).
+- 모든 요청은 `Authorization: Bearer <토큰>`이 필요하며, 없으면 401입니다. (`/health`만 인증 없이 200)
+- **TLS는 범위 밖입니다** — 앞단의 리버스 프록시나 터널이 담당합니다. 포트를 그대로 인터넷에 열지 마세요.
+
+Cloudflare Tunnel (권장 — 열어 둘 포트가 없습니다):
+
+```bash
+cloudflared tunnel --url http://localhost:8765
+# 또는 고정 도메인: cloudflared tunnel route dns <tunnel> grimoire.example.com
+```
+
+Caddy 리버스 프록시 (`Caddyfile`, 자동 HTTPS):
+
+```
+grimoire.example.com {
+    reverse_proxy localhost:8765
+}
+```
+
+클라이언트 등록:
+
+```bash
+# Claude Code
+claude mcp add --transport http grimoire https://grimoire.example.com/mcp \
+  --header "Authorization: Bearer <토큰>"
+```
+
+- **claude.ai / Claude Desktop**: 설정 → 커넥터 → "커스텀 커넥터 추가"에 `https://grimoire.example.com/mcp`를 넣고
+  Authorization 헤더에 `Bearer <토큰>`을 지정합니다.
+- **Cursor**: `~/.cursor/mcp.json`에
+
+  ```json
+  {
+    "mcpServers": {
+      "grimoire": {
+        "url": "https://grimoire.example.com/mcp",
+        "headers": { "Authorization": "Bearer <토큰>" }
+      }
+    }
+  }
+  ```
+
+### 알려진 한계
+
+- 검색은 **키워드 기반**입니다. 임베딩 시맨틱 검색·2홉 Cypher(KNOWLEDGE_GRAPH.md §5)는 5차(Neo4j/Qdrant)에서 붙습니다.
+- 온톨로지상 `LEARNED`는 `Period → Tech`지만, MCP로 기록한 **Concept에도** 시점 기록을 위해 `LEARNED`를 붙입니다.
+- HTTP 모드는 무상태(stateless)입니다 — 서버→클라이언트 스트리밍(GET SSE)과 세션 삭제(DELETE)는 지원하지 않고 `POST /mcp`만 받습니다.
+
 ## Docker
 
 `docker-compose.yml`은 프로파일 조립식입니다(PLANNING.md §5). 어떤 조합이든 `./data`를 공유하므로
@@ -145,6 +300,7 @@ http://localhost:3000 에서 "GitHub로 로그인" 버튼으로 OAuth 흐름을 
 | 웹만 (도커 없이) | `npm run dev` | 호스트 Next.js. 추출기는 `auto` → 로컬 Ollama 있으면 사용 |
 | 웹 컨테이너만 | `docker compose --profile app up -d --build` | `web` (3000) |
 | 풀 로컬 | `docker compose --profile app --profile llm up -d --build` | `web` + `ollama` (11434) |
+| MCP 원격 노출 | `docker compose --profile mcp up -d --build` | `mcp` (8765, Bearer 토큰 필수 — 위 MCP 절 참고) |
 | DB까지 전부 | `docker compose --profile app --profile llm --profile db up -d --build` | + `neo4j`(7474/7687), `qdrant`(6333/6334) |
 | **GPU 가속 (선택)** | 위 명령에 `-f docker-compose.yml -f docker-compose.gpu.yml` 추가 | `ollama`가 NVIDIA GPU 사용 |
 
@@ -171,14 +327,16 @@ OAuth App의 콜백 URL도 같이 바꾸세요.
 ```bash
 npm run build   # 프로덕션 빌드 (standalone 출력 — Docker 이미지가 이걸 씁니다)
 npm start       # 빌드 결과 실행
-npm run lint    # ESLint
-npm run test    # 지식그래프 결정론적 파이프라인 유닛 테스트 (네트워크 없음)
+npm run lint      # ESLint
+npm run test      # 지식그래프·MCP 순수 로직 유닛 테스트 (네트워크 없음)
+npm run mcp:build # MCP 서버 트랜스파일 → dist-mcp/
+npm run mcp       # MCP 서버 실행 (stdio)
 ```
 
 ## 로드맵 (MVP)
 
 1. GitHub OAuth 로그인 → 본인 전체 레포·커밋 수집·저장 ✅
 2. 지식그래프: 정적 분석 + (선택) 로컬 LLM 추출 → JSON 그래프 ✅
-3. MCP 서버로 그래프 노출 (Claude Desktop/Cursor)
+3. MCP 서버로 그래프 노출 (Claude Desktop/Cursor, stdio + 원격 HTTP) ✅
 4. 2D 도서관 뷰: 책장 + 책 클릭 → 상세 + 관련 책 하이라이트
 5. AI 사서 채팅 (GraphRAG 질의응답)

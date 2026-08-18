@@ -32,6 +32,20 @@ export type TechCategory =
 
 export type NodeKind = "project" | "tech" | "concept" | "problem" | "period";
 
+/**
+ * 파이프라인 밖에서 붙는 부가 정보.
+ * `source: "mcp"`인 노드는 MCP `record_new_learning`으로 손수 적어 넣은 것이며,
+ * 그래프를 다시 구울 때 보존된다(builder.ts `preserveManual`).
+ */
+export interface NodeMeta {
+  source?: "mcp";
+  /** 기록 당시 남긴 메모 */
+  note?: string;
+  /** 기록 시각 (ISO) */
+  recordedAt?: string;
+  [key: string]: unknown;
+}
+
 interface NodeBase {
   id: string;
   kind: NodeKind;
@@ -41,6 +55,8 @@ interface NodeBase {
   sources?: string[];
   /** 시맨틱 검색용 임베딩 (2차: Qdrant로 이관) */
   embedding?: number[];
+  /** 파이프라인 외부(MCP 등)에서 붙인 메모 */
+  meta?: NodeMeta;
 }
 
 /** 레포지토리 = 마법서 한 권 */
@@ -111,8 +127,8 @@ export type EdgeKind =
   /** Tech → Tech */
   | "DEPENDS_ON";
 
-/** USES 엣지의 근거가 어디서 왔는지 */
-export type UsesSource = "static" | "llm" | "topics";
+/** USES 엣지의 근거가 어디서 왔는지 ("mcp"는 MCP로 손수 기록한 것) */
+export type UsesSource = "static" | "llm" | "topics" | "mcp";
 
 interface EdgeBase {
   id: string;

@@ -12,7 +12,7 @@ import { collectAll } from "@/lib/collector/github";
 import { loadSnapshot, saveSnapshot } from "@/lib/collector/storage";
 import type { CollectResult } from "@/lib/collector/types";
 import { buildGraph } from "@/lib/graph/builder";
-import { saveGraph } from "@/lib/graph/storage";
+import { loadGraph, saveGraph } from "@/lib/graph/storage";
 import { summarizeGraph, type GraphBuildResult } from "@/lib/graph/types";
 
 /** useActionState 시그니처 — 이전 상태와 폼 데이터는 쓰지 않는다. */
@@ -84,7 +84,9 @@ export async function buildGraphAction(
       return { ok: false, message: t("noSnapshot") };
     }
 
-    const { graph, reason } = await buildGraph(snapshot);
+    // MCP(record_new_learning)로 손수 적어 넣은 노드는 재빌드에서도 살린다.
+    const previous = await loadGraph(login);
+    const { graph, reason } = await buildGraph(snapshot, { preserve: previous });
     await saveGraph(graph);
     revalidatePath("/", "layout");
 

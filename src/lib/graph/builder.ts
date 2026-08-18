@@ -13,6 +13,7 @@ import { selectExtractor, type Env, type SelectOptions } from "./extractors/sele
 import type { Extractor, ExtractionInput } from "./extractors/types";
 import { mergeExtraction } from "./merge";
 import { techId, type KnowledgeGraph } from "./types";
+import type { GraphAccumulator } from "./accumulator";
 
 /** LLM 추출 동시 실행 수 (로컬 7B 모델을 깔아뭉개지 않을 정도) */
 const EXTRACT_CONCURRENCY = 3;
@@ -25,6 +26,11 @@ export interface BuildOptions {
   extractor?: Extractor | null;
   /** 추출기 선택 동작 조정 (Ollama 가용성 검사 주입 등) */
   select?: SelectOptions;
+  /**
+   * 직전 그래프. MCP `record_new_learning`으로 손수 넣은 노드/엣지
+   * (meta.source === "mcp")를 새 그래프에 다시 실어 준다 — 재빌드로 지워지지 않게.
+   */
+  preserve?: KnowledgeGraph | null;
 }
 
 export interface BuildOutcome {
@@ -98,6 +104,9 @@ export async function buildGraph(
     linkRelatedConcepts(accumulator, conceptsByRepo);
   }
 
+  // 손으로 적어 넣은 지식은 파이프라인 결과 위에 다시 얹는다(MERGE).
+  if (options.preserve) preserveManual(accumulator, options.preserve);
+
   const graph = accumulator.build({
     login: snapshot.login,
     extractorUsed: selection.name,
@@ -147,6 +156,24 @@ async function pooled<T>(
       }
     }),
   );
+}
+
+/**
+ * MCP로 기록한 노드/엣지를 새 그래프에 다시 병합한다.
+ *
+ * 이름이 겹치면 누산기가 알아서 합치므로(정적 분석 값 우선 + 출처 합집합) 중복이 생기지 않고,
+ * 양 끝 노드가 사라진 엣지(삭제된 레포 등)는 조용히 버려진다.
+ */
+export function preserveManual(
+  accumulator: GraphAccumulator,
+  previous: KnowledgeGraph,
+): void {
+  for (const node of previous.nodes) {
+    if (node.meta?.source === "mcp") accumulator.addNode(node);
+  }
+  for (const edge of previous.edges) {
+    if (edge.sources?.includes("mcp")) accumulator.addEdge(edge);
+  }
 }
 
 /** 특정 노드와 이어진 이웃 노드 id 목록 (책 하이라이트용) */

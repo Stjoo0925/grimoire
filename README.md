@@ -146,12 +146,15 @@ http://localhost:3000 에서 "GitHub로 로그인" 버튼으로 OAuth 흐름을 
 | 웹 컨테이너만 | `docker compose --profile app up -d --build` | `web` (3000) |
 | 풀 로컬 | `docker compose --profile app --profile llm up -d --build` | `web` + `ollama` (11434) |
 | DB까지 전부 | `docker compose --profile app --profile llm --profile db up -d --build` | + `neo4j`(7474/7687), `qdrant`(6333/6334) |
+| **GPU 가속 (선택)** | 위 명령에 `-f docker-compose.yml -f docker-compose.gpu.yml` 추가 | `ollama`가 NVIDIA GPU 사용 |
 
 - `web`은 `.env.local`을 `env_file`로 읽습니다(커밋 금지). 컨테이너 안에서는 `OLLAMA_HOST=http://ollama:11434`가 주입됩니다.
 - `ollama` 컨테이너는 **기동 시 `OLLAMA_MODEL`을 자동으로 내려받습니다**(볼륨에 이미 있으면 즉시 통과).
   수동으로 하려면 `docker exec grimoire-ollama ollama pull qwen2.5:7b-instruct`.
   첫 실행은 모델 다운로드로 수 GB·수 분이 걸립니다.
-- NVIDIA GPU 가속은 compose의 주석 블록을 푸세요 (Windows는 Docker Desktop + WSL2 + NVIDIA 드라이버 필요).
+- NVIDIA GPU 가속은 **선택사항**입니다 — `docker-compose.gpu.yml` 오버레이를 `-f`로 얹으면 켜집니다.
+  매번 치기 싫으면 `.env`에 `COMPOSE_FILE=docker-compose.yml;docker-compose.gpu.yml`(Windows, Linux는 `:` 구분).
+  GPU 없는 머신은 오버레이 없이 그대로 CPU 동작 (Windows GPU는 Docker Desktop + WSL2 + NVIDIA 드라이버 필요).
 - `db` 프로파일(Neo4j/Qdrant)은 **2차 준비용이며 지금 코드는 사용하지 않습니다**. 1차 저장은 JSON(`./data`)입니다.
   비밀번호는 `.env`의 `NEO4J_PASSWORD`에서 옵니다.
 - 볼륨은 전부 `./data/db/{ollama,neo4j,qdrant}` 아래로 모읍니다 — `.gitignore`의 `/data` 규칙에 이미 포함됩니다.

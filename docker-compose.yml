@@ -64,16 +64,16 @@ services:
       retries: 5
       # 첫 모델 다운로드(수 GB)가 끝날 때까지는 unhealthy로 보지 않는다.
       start_period: 600s
-    # NVIDIA GPU 가속을 쓰려면 아래 블록의 주석을 푼다.
+    # NVIDIA GPU 가속 (RTX 3090). GPU가 없는 머신에서는 이 블록을 다시 주석 처리하면 CPU로 동작한다.
     # Windows: Docker Desktop + WSL2 백엔드 + 호스트에 NVIDIA 드라이버(WSL용 CUDA) 필요.
-    # Linux: nvidia-container-toolkit 설치 필요. GPU가 없으면 CPU로도 동작한다(느림).
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
+    # Linux: nvidia-container-toolkit 설치 필요.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
   # ── profile: db ── 2차(그래프 DB 전환) 준비용 ─────────────────────────
   # 주의: 지금 코드는 이 DB들을 사용하지 않는다. 1차 저장은 JSON(./data)이며

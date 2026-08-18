@@ -433,12 +433,12 @@ body {
 
 .rpg-nameplate {
   display: inline-block;
-  padding: 2px 10px;
+  padding: 3px 12px;
   border: 1px solid rgba(251, 191, 36, 0.4);
   border-radius: 6px;
   background: rgba(76, 29, 149, 0.35);
   color: #fde68a;
-  font-size: 10px;
+  font-size: 12px;
   letter-spacing: 0.2em;
 }
 
@@ -457,6 +457,188 @@ body {
 .dialog-scroll {
   scrollbar-width: thin;
   scrollbar-color: rgba(251, 191, 36, 0.25) transparent;
+}
+
+/* ============================================================
+ * 도서관 방 — 탑다운 씬 (AI 일꾼 시뮬레이터 문법).
+ * 바닥 타일 + 뒷벽 + 가구 책장. 사서는 통로를 걷는다.
+ * ============================================================ */
+.room-floor {
+  background:
+    repeating-linear-gradient(
+      0deg,
+      rgba(0, 0, 0, 0.16) 0 1px,
+      transparent 1px 46px
+    ),
+    repeating-linear-gradient(
+      90deg,
+      rgba(0, 0, 0, 0.14) 0 1px,
+      transparent 1px 92px
+    ),
+    linear-gradient(180deg, #2a2019 0%, #1d1712 55%, #14100c 100%);
+}
+
+.room-wall {
+  background:
+    linear-gradient(180deg, #3b2d20 0%, #2c2117 78%, rgba(0, 0, 0, 0.55) 100%);
+  border-bottom: 3px solid rgba(0, 0, 0, 0.6);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.55);
+}
+
+/* 달빛 창문 */
+.room-window {
+  position: absolute;
+  top: 10px;
+  width: 46px;
+  height: 40px;
+  border: 2px solid rgba(120, 96, 60, 0.8);
+  border-radius: 6px 6px 2px 2px;
+  background:
+    linear-gradient(
+      160deg,
+      rgba(165, 180, 252, 0.28),
+      rgba(129, 140, 248, 0.1) 60%,
+      rgba(30, 27, 75, 0.25)
+    );
+  box-shadow:
+    inset 0 0 8px rgba(165, 180, 252, 0.3),
+    0 0 18px rgba(129, 140, 248, 0.12);
+}
+
+.room-window::before,
+.room-window::after {
+  content: "";
+  position: absolute;
+  background: rgba(120, 96, 60, 0.8);
+}
+
+.room-window::before {
+  inset-block: 0;
+  left: 50%;
+  width: 2px;
+}
+
+.room-window::after {
+  inset-inline: 0;
+  top: 50%;
+  height: 2px;
+}
+
+/* 현판 */
+.room-banner {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 4px 18px;
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  border-radius: 4px;
+  background: rgba(41, 30, 16, 0.9);
+  color: rgba(253, 230, 138, 0.85);
+  font-size: 12px;
+  letter-spacing: 0.35em;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.5);
+}
+
+/* ── 책장 가구 ─────────────────────────────────────────────── */
+.bookcase {
+  border: 2px solid #16100b;
+  border-radius: 4px;
+  background: linear-gradient(180deg, #6b4423 0%, #4a2e18 60%, #331f0f 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(253, 230, 138, 0.18),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.35),
+    0 10px 16px -8px rgba(0, 0, 0, 0.85);
+  transition: box-shadow 300ms ease-out;
+}
+
+/* 안에 빛나는 책이 있는 책장 — 가구째 은은히 */
+.bookcase-lit {
+  box-shadow:
+    inset 0 1px 0 rgba(253, 230, 138, 0.18),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.35),
+    0 0 18px rgba(251, 191, 36, 0.28),
+    0 10px 16px -8px rgba(0, 0, 0, 0.85);
+}
+
+.bookcase-cornice {
+  height: 7px;
+  border-radius: 3px 3px 0 0;
+  background: linear-gradient(180deg, #8a5a2b, #5b3a1d);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.5);
+}
+
+.bookcase-inner {
+  padding: 6px 10px 2px;
+}
+
+.bookcase-row + .bookcase-row {
+  margin-top: 4px;
+}
+
+.bookcase-shelfboard {
+  height: 5px;
+  margin-top: 1px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #7a4d24, #3a2412);
+  box-shadow: 0 2px 3px rgba(0, 0, 0, 0.55);
+}
+
+/* 미니 책등 */
+.mini-spine {
+  background-image: linear-gradient(
+    90deg,
+    rgba(0, 0, 0, 0.4) 0%,
+    rgba(255, 255, 255, 0.14) 25%,
+    rgba(0, 0, 0, 0.12) 65%,
+    rgba(0, 0, 0, 0.5) 100%
+  );
+  border: 1px solid rgba(0, 0, 0, 0.45);
+  cursor: pointer;
+  transition:
+    transform 180ms cubic-bezier(0.34, 1.4, 0.5, 1),
+    filter 150ms ease-out;
+}
+
+.mini-spine:hover,
+.mini-spine:focus-visible {
+  transform: translateY(-4px);
+  filter: brightness(1.35);
+  outline: none;
+}
+
+.mini-spine-selected {
+  transform: translateY(-6px);
+  filter: brightness(1.45);
+  box-shadow: 0 0 8px rgba(251, 191, 36, 0.7);
+}
+
+.mini-spine-lock {
+  position: absolute;
+  top: -1px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 7px;
+  line-height: 1;
+  color: rgba(253, 230, 138, 0.9);
+  pointer-events: none;
+}
+
+/* 명패 */
+.bookcase-plate {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin: 3px 6px 6px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  border: 1px solid rgba(0, 0, 0, 0.4);
+  background: rgba(20, 14, 8, 0.75);
+  color: rgba(231, 229, 228, 0.9);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
 }
 
 /* ============================================================
@@ -771,19 +953,20 @@ body {
 /* 말풍선 — NPC 머리 위, 반전과 무관하게 정방향 텍스트 */
 .npc-bubble {
   position: absolute;
-  bottom: calc(100% + 8px);
-  left: 10px;
-  max-width: 190px;
+  bottom: calc(100% + 10px);
+  left: 8px;
+  max-width: 240px;
   width: max-content;
-  padding: 5px 8px;
-  border: 1px solid rgba(251, 191, 36, 0.25);
-  border-radius: 8px;
-  background: rgba(28, 25, 23, 0.95);
+  padding: 7px 10px;
+  border: 1px solid rgba(251, 191, 36, 0.3);
+  border-radius: 9px;
+  background: rgba(28, 25, 23, 0.96);
   color: #e7e5e4;
-  font-size: 10px;
-  line-height: 1.45;
-  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.5);
+  font-size: 13px;
+  line-height: 1.5;
+  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.55);
   animation: grimoire-veil-in 200ms ease-out both;
+  z-index: 5;
 }
 
 @media (prefers-reduced-motion: reduce) {

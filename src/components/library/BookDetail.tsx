@@ -16,7 +16,7 @@ const SOURCE_KEYS = ["static", "llm", "topics", "mcp"] as const;
 function Meta({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex flex-col gap-0.5 border-l border-amber-200/15 pl-3">
-      <dt className="text-[10px] tracking-[0.15em] text-stone-500">{label}</dt>
+      <dt className="text-xs tracking-[0.15em] text-stone-500">{label}</dt>
       <dd className="text-sm text-amber-100/90">{value}</dd>
     </div>
   );
@@ -31,7 +31,7 @@ function Section({
 }) {
   return (
     <section className="space-y-2">
-      <h4 className="text-[11px] tracking-[0.25em] text-amber-200/60">{title}</h4>
+      <h4 className="text-[13px] tracking-[0.25em] text-amber-200/60">{title}</h4>
       {children}
     </section>
   );
@@ -102,12 +102,12 @@ export function BookDetail({
               />
               <h2 className="truncate text-xl text-amber-100">{book.name}</h2>
               {book.isPrivate ? (
-                <span className="rounded-full border border-violet-300/30 px-2 py-0.5 text-[10px] text-violet-200/80">
+                <span className="rounded-full border border-violet-300/30 px-2 py-0.5 text-xs text-violet-200/80">
                   {t("privateBadge")}
                 </span>
               ) : null}
               {book.isFork ? (
-                <span className="rounded-full border border-stone-500/30 px-2 py-0.5 text-[10px] text-stone-400">
+                <span className="rounded-full border border-stone-500/30 px-2 py-0.5 text-xs text-stone-400">
                   {t("forkBadge")}
                 </span>
               ) : null}
@@ -120,7 +120,7 @@ export function BookDetail({
                 {book.topics.map((topic) => (
                   <li
                     key={topic}
-                    className="rounded-full border border-amber-200/15 px-2 py-0.5 text-[10px] text-amber-200/70"
+                    className="rounded-full border border-amber-200/15 px-2 py-0.5 text-xs text-amber-200/70"
                   >
                     {topic}
                   </li>
@@ -181,7 +181,7 @@ export function BookDetail({
                   </div>
                 ))}
               </div>
-              <p className="text-[10px] text-stone-500">
+              <p className="text-xs text-stone-500">
                 {book.quarters[0]?.key} — {book.quarters.at(-1)?.key} ·{" "}
                 {t("book.lastPushed", { date: day(book.lastCommitAt ?? book.pushedAt) })}
               </p>
@@ -193,7 +193,7 @@ export function BookDetail({
               {book.recentCommits.map((commit, index) => (
                 <li
                   key={`${commit.date}-${index}`}
-                  className="flex gap-3 text-[11px] leading-relaxed"
+                  className="flex gap-3 text-[13px] leading-relaxed"
                 >
                   <span className="shrink-0 font-mono text-stone-600">
                     {commit.date}
@@ -213,14 +213,14 @@ export function BookDetail({
             <div className="grid gap-4 sm:grid-cols-2">
               {book.tech.length > 0 ? (
                 <div className="space-y-1.5">
-                  <p className="text-[10px] tracking-[0.15em] text-stone-500">
+                  <p className="text-xs tracking-[0.15em] text-stone-500">
                     {t("book.tech")}
                   </p>
                   <ul className="flex flex-wrap gap-1.5">
                     {book.tech.map((tech) => (
                       <li
                         key={tech.id}
-                        className="flex items-center gap-1 rounded border border-emerald-300/20 px-2 py-0.5 text-[11px] text-emerald-100/85"
+                        className="flex items-center gap-1 rounded border border-emerald-300/20 px-2 py-0.5 text-[13px] text-emerald-100/85"
                       >
                         {tech.label}
                         {tech.source &&
@@ -237,12 +237,12 @@ export function BookDetail({
 
               {book.concepts.length > 0 ? (
                 <div className="space-y-1.5">
-                  <p className="text-[10px] tracking-[0.15em] text-stone-500">
+                  <p className="text-xs tracking-[0.15em] text-stone-500">
                     {t("book.concepts")}
                   </p>
                   <ul className="space-y-1">
                     {book.concepts.map((concept) => (
-                      <li key={concept.id} className="text-[11px] text-violet-100/85">
+                      <li key={concept.id} className="text-[13px] text-violet-100/85">
                         {concept.label}
                         {concept.detail ? (
                           <span className="text-stone-500"> — {concept.detail}</span>
@@ -255,12 +255,12 @@ export function BookDetail({
 
               {book.problems.length > 0 ? (
                 <div className="space-y-1.5">
-                  <p className="text-[10px] tracking-[0.15em] text-stone-500">
+                  <p className="text-xs tracking-[0.15em] text-stone-500">
                     {t("book.problems")}
                   </p>
                   <ul className="space-y-1">
                     {book.problems.map((problem) => (
-                      <li key={problem.id} className="text-[11px] text-rose-100/80">
+                      <li key={problem.id} className="text-[13px] text-rose-100/80">
                         {problem.label}
                         {problem.detail ? (
                           <span className="text-stone-500"> — {problem.detail}</span>
@@ -273,10 +273,10 @@ export function BookDetail({
 
               {book.periods.length > 0 ? (
                 <div className="space-y-1.5">
-                  <p className="text-[10px] tracking-[0.15em] text-stone-500">
+                  <p className="text-xs tracking-[0.15em] text-stone-500">
                     {t("book.periods")}
                   </p>
-                  <p className="text-[11px] text-amber-100/70">
+                  <p className="text-[13px] text-amber-100/70">
                     {book.periods.join(" · ")}
                   </p>
                 </div>
@@ -294,7 +294,7 @@ export function BookDetail({
                   <button
                     type="button"
                     onClick={() => onSelect(related.id)}
-                    className="flex items-center gap-1.5 rounded border border-amber-200/20 px-2 py-1 text-[11px] text-amber-100/80 transition hover:border-amber-200/60 hover:text-amber-100"
+                    className="flex items-center gap-1.5 rounded border border-amber-200/20 px-2 py-1 text-[13px] text-amber-100/80 transition hover:border-amber-200/60 hover:text-amber-100"
                   >
                     <span
                       aria-hidden
@@ -314,7 +314,7 @@ export function BookDetail({
             href={book.htmlUrl}
             target="_blank"
             rel="noreferrer noopener"
-            className="text-[11px] text-stone-500 underline-offset-4 transition hover:text-amber-200/80 hover:underline"
+            className="text-[13px] text-stone-500 underline-offset-4 transition hover:text-amber-200/80 hover:underline"
           >
             {t("book.open")}
           </a>

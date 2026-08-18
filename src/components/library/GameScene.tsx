@@ -15,8 +15,8 @@ import type { LibrarianAnswer } from "@/lib/library/librarian";
 import type { BookView } from "@/lib/library/view";
 import AmbientScene from "./AmbientScene";
 import { BookDetail } from "./BookDetail";
+import { LibraryRoom } from "./LibraryRoom";
 import { NPCLibrarian } from "./NPCLibrarian";
-import { ShelfWall, type WallMode } from "./ShelfWall";
 
 export interface GameSceneProps {
   books: BookView[];
@@ -39,7 +39,6 @@ export function GameScene({
   hudTail,
 }: GameSceneProps) {
   const t = useTranslations("library");
-  const [mode, setMode] = useState<WallMode>("language");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [librarianGlow, setLibrarianGlow] = useState<string[]>([]);
   const [npcBookId, setNpcBookId] = useState<string | null>(null);
@@ -105,44 +104,22 @@ export function GameScene({
 
       {/* ── HUD 바 ─────────────────────────────────────────── */}
       <header className="relative z-20 flex shrink-0 items-center gap-3 border-b border-amber-200/10 bg-stone-950/80 px-4 py-2">
-        <h1 className="text-sm font-semibold tracking-[0.3em] text-amber-100">
+        <h1 className="text-base font-semibold tracking-[0.3em] text-amber-100">
           GRIMOIRE
         </h1>
-
-        <div
-          role="group"
-          aria-label={t("shelfBy.label")}
-          className="ml-4 flex overflow-hidden rounded border border-amber-200/20"
-        >
-          {(["language", "year"] as const).map((candidate) => (
-            <button
-              key={candidate}
-              type="button"
-              onClick={() => setMode(candidate)}
-              aria-pressed={mode === candidate}
-              className={`px-2.5 py-1 text-[10px] tracking-[0.15em] transition ${
-                mode === candidate
-                  ? "bg-amber-200/15 text-amber-100"
-                  : "text-stone-500 hover:text-amber-200/70"
-              }`}
-            >
-              {t(`shelfBy.${candidate}`)}
-            </button>
-          ))}
-        </div>
 
         <div className="ml-auto flex items-center gap-2">
           <button
             type="button"
             onClick={() => setOverlay("manage")}
-            className="rounded border border-amber-200/20 px-2.5 py-1 text-[10px] tracking-[0.15em] text-stone-400 transition hover:border-amber-200/50 hover:text-amber-100"
+            className="rounded border border-amber-200/20 px-3 py-1.5 text-xs tracking-[0.15em] text-stone-400 transition hover:border-amber-200/50 hover:text-amber-100"
           >
             {t("hud.manage")}
           </button>
           <button
             type="button"
             onClick={() => setOverlay("settings")}
-            className="rounded border border-amber-200/20 px-2.5 py-1 text-[10px] tracking-[0.15em] text-stone-400 transition hover:border-amber-200/50 hover:text-amber-100"
+            className="rounded border border-amber-200/20 px-3 py-1.5 text-xs tracking-[0.15em] text-stone-400 transition hover:border-amber-200/50 hover:text-amber-100"
           >
             ⚙ {t("hud.settings")}
           </button>
@@ -150,11 +127,10 @@ export function GameScene({
         </div>
       </header>
 
-      {/* ── 씬: 책장 벽 + 사서 NPC ───────────────────────────── */}
+      {/* ── 씬: 도서관 방 + 사서 NPC ─────────────────────────── */}
       <div className="relative z-10 min-h-0 flex-1">
-        <ShelfWall
+        <LibraryRoom
           books={books}
-          mode={mode}
           selectedId={selectedId}
           glowIds={glowIds}
           onSelect={(id) => {
@@ -167,10 +143,7 @@ export function GameScene({
             focusBookId={librarianGlow.length > 0 ? librarianGlow[0] : null}
             onActing={setNpcBookId}
           />
-        </ShelfWall>
-
-        {/* 바닥 — 사서가 걷는 마루 */}
-        <div aria-hidden className="scene-floor absolute inset-x-0 bottom-0 h-6" />
+        </LibraryRoom>
       </div>
 
       {/* ── RPG 대화창 ─────────────────────────────────────── */}
@@ -178,7 +151,7 @@ export function GameScene({
         <div className="rpg-window mx-auto flex max-w-4xl flex-col gap-2 px-4 py-3">
           <div className="flex items-start gap-3">
             <span className="rpg-nameplate shrink-0">🕯 {t("hud.dialogName")}</span>
-            <div className="dialog-scroll min-h-[3.2rem] max-h-28 flex-1 overflow-y-auto text-[12px] leading-relaxed text-stone-200">
+            <div className="dialog-scroll min-h-[3.6rem] max-h-32 flex-1 overflow-y-auto text-sm leading-relaxed text-stone-200">
               {pending ? (
                 <span className="text-stone-500">{t("chat.pending")}</span>
               ) : lastAnswer ? (
@@ -190,18 +163,18 @@ export function GameScene({
                     <p
                       className={
                         lastAnswer.ok
-                          ? "mt-1 text-[10px] text-amber-200/60"
-                          : "mt-1 text-[10px] text-rose-300/80"
+                          ? "mt-1 text-xs text-amber-200/60"
+                          : "mt-1 text-xs text-rose-300/80"
                       }
                     >
                       {lastAnswer.message}
                     </p>
                   ) : null}
                   {lastAnswer.degraded && lastAnswer.items.length > 0 ? (
-                    <ul className="mt-1 space-y-0.5 text-[11px] text-stone-400">
+                    <ul className="mt-1 space-y-0.5 text-[13px] text-stone-400">
                       {lastAnswer.items.slice(0, 5).map((item) => (
                         <li key={item.id}>
-                          <span className="mr-1 text-[9px] tracking-widest text-stone-600">
+                          <span className="mr-1 text-[11px] tracking-widest text-stone-600">
                             {t(`chat.kind.${item.kind}`)}
                           </span>
                           {item.label}
@@ -233,12 +206,12 @@ export function GameScene({
               onChange={(event) => setQuestion(event.target.value)}
               placeholder={t("chat.placeholder")}
               maxLength={500}
-              className="min-w-0 flex-1 rounded border border-stone-700/80 bg-stone-900/80 px-3 py-1.5 text-[12px] text-stone-100 placeholder:text-stone-600 focus:border-amber-200/50 focus:outline-none"
+              className="min-w-0 flex-1 rounded border border-stone-700/80 bg-stone-900/80 px-3 py-2 text-sm text-stone-100 placeholder:text-stone-600 focus:border-amber-200/50 focus:outline-none"
             />
             <button
               type="submit"
               disabled={pending || question.trim().length === 0}
-              className="rounded border border-amber-200/30 px-3 py-1.5 text-[11px] text-amber-100 transition hover:border-amber-200/60 disabled:cursor-not-allowed disabled:opacity-40"
+              className="rounded border border-amber-200/30 px-4 py-2 text-[13px] text-amber-100 transition hover:border-amber-200/60 disabled:cursor-not-allowed disabled:opacity-40"
             >
               {pending ? "…" : t("chat.send")}
             </button>
@@ -267,13 +240,13 @@ export function GameScene({
             onClick={(event) => event.stopPropagation()}
           >
             <header className="mb-4 flex items-center justify-between">
-              <h2 className="text-xs tracking-[0.25em] text-amber-100/90">
+              <h2 className="text-sm tracking-[0.25em] text-amber-100/90">
                 {overlay === "manage" ? t("hud.manage") : t("hud.settings")}
               </h2>
               <button
                 type="button"
                 onClick={() => setOverlay(null)}
-                className="text-[11px] text-stone-500 transition hover:text-amber-200/70"
+                className="text-[13px] text-stone-500 transition hover:text-amber-200/70"
               >
                 ✕ {t("hud.close")}
               </button>

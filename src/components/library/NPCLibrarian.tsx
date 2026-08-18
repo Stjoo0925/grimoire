@@ -92,7 +92,11 @@ export function NPCLibrarian({ books, focusBookId, onActing }: NPCLibrarianProps
     timerRef.current = setTimeout(fn, ms);
   }, []);
 
-  /** data-book-id로 책의 화면 위치를 찾아 레이어 기준 좌표로 바꾼다 */
+  /**
+   * data-book-id로 책의 화면 위치를 찾아 레이어 기준 좌표로 바꾼다.
+   * 방 씬(책장 가구)에서는 책이 아니라 **책장 앞 통로**에 선다 —
+   * x는 책에 맞추고, y는 책장(data-case-id)의 발치.
+   */
   const locateBook = useCallback((bookId: string): NpcPose | null => {
     const layer = layerRef.current;
     if (!layer) return null;
@@ -102,9 +106,12 @@ export function NPCLibrarian({ books, focusBookId, onActing }: NPCLibrarianProps
     if (!el) return null;
     const layerRect = layer.getBoundingClientRect();
     const bookRect = el.getBoundingClientRect();
+    const caseEl = el.closest<HTMLElement>("[data-case-id]");
+    const floorRect = (caseEl ?? el).getBoundingClientRect();
     const x =
       bookRect.left - layerRect.left + bookRect.width / 2 - NPC_WIDTH / 2;
-    const y = bookRect.bottom - layerRect.top - NPC_HEIGHT + 4;
+    // 책장 아래 통로에 발이 닿게 — 몸이 책장 하단과 살짝 겹치면 "앞에 서 있는" 그림
+    const y = floorRect.bottom - layerRect.top - NPC_HEIGHT + (caseEl ? 26 : 4);
     return {
       x: Math.max(0, x),
       y: Math.max(0, y),

@@ -53,3 +53,40 @@ body {
     filter: brightness(1.2);
   }
 }
+
+/* 상태창 EXP 바 — 채워진 구간 위로 빛이 한 번씩 훑고 지나간다 */
+@keyframes grimoire-exp-shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  60%,
+  100% {
+    transform: translateX(220%);
+  }
+}
+
+.exp-bar-fill {
+  position: relative;
+  overflow: hidden;
+}
+
+.exp-bar-fill::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 45%;
+  background: linear-gradient(
+    100deg,
+    transparent,
+    rgba(255, 255, 255, 0.35),
+    transparent
+  );
+  animation: grimoire-exp-shimmer 2.8s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .exp-bar-fill::after {
+    animation: none;
+    display: none;
+  }
+}

@@ -9,12 +9,15 @@
 import { useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
 
+import AchievementShelf from "./AchievementShelf";
 import { Book } from "./Book";
 import { BookDetail } from "./BookDetail";
 import { Bookshelf } from "./Bookshelf";
+import CharacterCard from "./CharacterCard";
 import { ContributionHeatmap } from "./ContributionHeatmap";
 import { LibrarianChat } from "./LibrarianChat";
 import { ModelSettings } from "./ModelSettings";
+import type { GameProfile } from "@/lib/library/game";
 import type { Heatmap } from "@/lib/library/heatmap";
 import { groupBooks, partitionPrivate, type ShelfMode } from "@/lib/library/shelves";
 import type { BookView } from "@/lib/library/view";
@@ -23,11 +26,20 @@ export interface LibraryViewProps {
   books: BookView[];
   heatmap: Heatmap;
   hasGraph: boolean;
+  /** 게임 프로필 — 서버에서 계산해 내려준다 */
+  profile: GameProfile;
+  login: string;
 }
 
 const MODES: ShelfMode[] = ["language", "year"];
 
-export function LibraryView({ books, heatmap, hasGraph }: LibraryViewProps) {
+export function LibraryView({
+  books,
+  heatmap,
+  hasGraph,
+  profile,
+  login,
+}: LibraryViewProps) {
   const t = useTranslations("library");
   const [mode, setMode] = useState<ShelfMode>("language");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -122,7 +134,14 @@ export function LibraryView({ books, heatmap, hasGraph }: LibraryViewProps) {
         <ModelSettings />
       </div>
 
-      <ContributionHeatmap heatmap={heatmap} />
+      {/* 모험가 상태창 + 업적 진열장 — 서재의 게임 층 */}
+      <div className="grid gap-4 md:grid-cols-[minmax(280px,360px)_1fr]">
+        <CharacterCard profile={profile} login={login} />
+        <div className="flex flex-col gap-4">
+          <AchievementShelf achievements={profile.achievements} />
+          <ContributionHeatmap heatmap={heatmap} />
+        </div>
+      </div>
 
       {!hasGraph ? (
         <p className="rounded border border-violet-200/15 bg-violet-950/10 px-3 py-2 text-[11px] leading-relaxed text-violet-200/70">

@@ -93,6 +93,37 @@
     "privateBadge": "비공개",
     "forkBadge": "사본",
     "needGraph": "아직 기억의 실타래가 없습니다. 그래프를 엮으면 책끼리의 연결과 발광이 살아납니다.",
+    "game": {
+      "cardLabel": "모험가 상태창",
+      "level": "레벨",
+      "streak": "{current}일 연속 수련",
+      "streakBest": "(최장 {longest}일)",
+      "totalExp": "총 EXP {exp}",
+      "stats": "언어 숙련",
+      "achievementsLabel": "업적 진열장",
+      "achievementsTitle": "업적",
+      "progress": "{value} / {target}",
+      "maxed": "달성 완료 · {value}",
+      "class": {
+        "mage": "환영술사",
+        "knight": "강철의 기사",
+        "alchemist": "연금술사",
+        "runesmith": "룬 대장장이",
+        "summoner": "소환술사",
+        "sage": "떠도는 현자"
+      },
+      "achievement": {
+        "streak": { "name": "꺼지지 않는 불꽃", "desc": "연속으로 수련(기여)한 날" },
+        "pages": { "name": "필경사", "desc": "지금까지 써 내려간 페이지(커밋)" },
+        "polyglot": { "name": "다언어 술사", "desc": "다뤄본 언어의 가짓수" },
+        "collection": { "name": "서고의 주인", "desc": "서재에 들인 마법서(레포)" },
+        "stars": { "name": "별의 수집가", "desc": "다른 이들이 남긴 별" },
+        "night-owl": { "name": "심야의 올빼미", "desc": "자정~새벽 5시 사이의 집필" },
+        "marathon": { "name": "완주자", "desc": "한 권에 쏟아부은 최다 페이지" },
+        "secret-archive": { "name": "비밀 서고지기", "desc": "비공개 서고의 장서" },
+        "comeback": { "name": "돌아온 자", "desc": "긴 공백(180일)을 깨고 돌아온 기록" }
+      }
+    },
     "shelfBy": {
       "label": "서가 배치",
       "language": "언어별 서가",

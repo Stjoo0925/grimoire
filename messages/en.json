@@ -93,6 +93,37 @@
     "privateBadge": "Private",
     "forkBadge": "Fork",
     "needGraph": "No threads of memory yet. Weave the graph to bring connections and glow to life.",
+    "game": {
+      "cardLabel": "Adventurer status",
+      "level": "Level",
+      "streak": "{current}-day training streak",
+      "streakBest": "(best {longest})",
+      "totalExp": "Total EXP {exp}",
+      "stats": "Language mastery",
+      "achievementsLabel": "Achievement cabinet",
+      "achievementsTitle": "Achievements",
+      "progress": "{value} / {target}",
+      "maxed": "Complete · {value}",
+      "class": {
+        "mage": "Illusionist",
+        "knight": "Steel Knight",
+        "alchemist": "Alchemist",
+        "runesmith": "Runesmith",
+        "summoner": "Summoner",
+        "sage": "Wandering Sage"
+      },
+      "achievement": {
+        "streak": { "name": "Undying Flame", "desc": "Consecutive days of training (contributions)" },
+        "pages": { "name": "Scribe", "desc": "Pages (commits) written so far" },
+        "polyglot": { "name": "Polyglot", "desc": "Languages you have wielded" },
+        "collection": { "name": "Keeper of Stacks", "desc": "Grimoires (repos) shelved" },
+        "stars": { "name": "Star Collector", "desc": "Stars left by others" },
+        "night-owl": { "name": "Night Owl", "desc": "Writing between midnight and 5am" },
+        "marathon": { "name": "Marathoner", "desc": "Most pages poured into one volume" },
+        "secret-archive": { "name": "Secret Archivist", "desc": "Volumes in the private stacks" },
+        "comeback": { "name": "The Returned", "desc": "Broke a long silence (180+ days)" }
+      }
+    },
     "shelfBy": {
       "label": "Shelving",
       "language": "By language",

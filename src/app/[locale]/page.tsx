@@ -18,6 +18,7 @@ import { fetchViewer } from "@/lib/collector/github";
 import { loadSnapshot } from "@/lib/collector/storage";
 import type { CollectionSnapshot } from "@/lib/collector/types";
 import { loadGraph } from "@/lib/graph/storage";
+import { computeGameProfile } from "@/lib/library/game";
 import { buildHeatmap } from "@/lib/library/heatmap";
 import { buildLibrary } from "@/lib/library/view";
 
@@ -147,6 +148,8 @@ export default async function Home({
           books={buildLibrary(snapshot, graph).books}
           heatmap={buildHeatmap(snapshot.contributions, todayInSeoul())}
           hasGraph={graph !== null}
+          profile={computeGameProfile(snapshot)}
+          login={login ?? snapshot.login}
         />
       ) : (
         <p className="max-w-md text-center text-xs leading-relaxed text-stone-600">

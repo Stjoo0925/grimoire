@@ -13,13 +13,12 @@ import { SnapshotSummary } from "@/components/collector/SnapshotSummary";
 import { GraphForm } from "@/components/graph/GraphForm";
 import { GraphSummary } from "@/components/graph/GraphSummary";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
-import { LibraryView } from "@/components/library/LibraryView";
+import { GameScene } from "@/components/library/GameScene";
+import { ModelSettings } from "@/components/library/ModelSettings";
 import { fetchViewer } from "@/lib/collector/github";
 import { loadSnapshot } from "@/lib/collector/storage";
 import type { CollectionSnapshot } from "@/lib/collector/types";
 import { loadGraph } from "@/lib/graph/storage";
-import { computeGameProfile } from "@/lib/library/game";
-import { buildHeatmap } from "@/lib/library/heatmap";
 import { buildLibrary } from "@/lib/library/view";
 
 /**
@@ -29,13 +28,6 @@ import { buildLibrary } from "@/lib/library/view";
 function isStaleSnapshot(snapshot: CollectionSnapshot): boolean {
   if ((snapshot.schemaVersion ?? 1) >= 2) return false;
   return !snapshot.repos.some((repo) => repo.topics || repo.manifests);
-}
-
-/** 잔디 격자의 기준일 — 서버 타임존과 무관하게 서울 기준 오늘(YYYY-MM-DD) */
-function todayInSeoul(): string {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Seoul" }).format(
-    new Date(),
-  );
 }
 
 /** 세션에 login이 없는(구버전 세션) 경우에만 GitHub에 한 번 물어본다. */
@@ -105,73 +97,77 @@ export default async function Home({
   const snapshot = login ? await loadSnapshot(login) : null;
   const graph = login ? await loadGraph(login) : null;
 
-  return (
-    <main className="relative flex min-h-screen flex-col items-center gap-10 bg-stone-950 px-6 py-16">
-      <div className="absolute top-6 right-6">
-        <LanguageSwitcher />
-      </div>
-
-      <div className="space-y-3 text-center">
-        <h1 className="text-4xl font-semibold tracking-[0.2em] text-amber-100">
-          {tLanding("title")}
-        </h1>
-        <p className="text-sm text-stone-400">{tLanding("tagline")}</p>
-      </div>
-
-      <div className="flex items-center gap-4 rounded-full border border-amber-200/15 bg-stone-900/40 px-4 py-2">
+  /** HUD 오른쪽 끝 — 유저 명패 + 언어 전환 + 로그아웃 */
+  const hudTail = (
+    <div className="flex items-center gap-3">
+      <div className="flex items-center gap-2">
         {session.user.image ? (
           <Image
             src={session.user.image}
             alt=""
-            width={36}
-            height={36}
+            width={22}
+            height={22}
             unoptimized
             className="rounded-full border border-amber-200/20"
           />
         ) : null}
-        <span className="text-sm text-amber-100">
+        <span className="text-[11px] text-amber-100/80">
           {login ?? session.user.name ?? tHome("librarian")}
         </span>
-        <form action={signOutAction}>
-          <button
-            type="submit"
-            className="text-xs text-stone-500 transition hover:text-amber-200/70"
-          >
-            {tHome("signOut")}
-          </button>
-        </form>
       </div>
+      <LanguageSwitcher />
+      <form action={signOutAction}>
+        <button
+          type="submit"
+          className="text-[10px] text-stone-500 transition hover:text-amber-200/70"
+        >
+          {tHome("signOut")}
+        </button>
+      </form>
+    </div>
+  );
 
-      {/* ③ 인터랙티브 도서관 — 수집을 마쳤다면 서재가 곧 첫 화면이다 */}
-      {snapshot ? (
-        <LibraryView
-          books={buildLibrary(snapshot, graph).books}
-          heatmap={buildHeatmap(snapshot.contributions, todayInSeoul())}
-          hasGraph={graph !== null}
-          profile={computeGameProfile(snapshot)}
-          login={login ?? snapshot.login}
+  /** 서고 관리 오버레이 내용물 — 수집·그래프 폼과 명패 */
+  const managePanel = (
+    <>
+      <CollectForm hasSnapshot={snapshot !== null} />
+      {snapshot ? <SnapshotSummary snapshot={snapshot} /> : null}
+      <GraphForm hasSnapshot={snapshot !== null} hasGraph={graph !== null} />
+      {graph ? (
+        <GraphSummary
+          graph={graph}
+          staleSnapshot={snapshot ? isStaleSnapshot(snapshot) : false}
         />
-      ) : (
+      ) : null}
+    </>
+  );
+
+  // 수집 전: 관리 패널만 가운데 보여주는 입구
+  if (!snapshot) {
+    return (
+      <main className="relative flex min-h-screen flex-col items-center justify-center gap-8 bg-stone-950 px-6">
+        <div className="absolute top-6 right-6">{hudTail}</div>
+        <h1 className="text-3xl font-semibold tracking-[0.2em] text-amber-100">
+          {tLanding("title")}
+        </h1>
         <p className="max-w-md text-center text-xs leading-relaxed text-stone-600">
           {tHome("emptyLibrary")}
         </p>
-      )}
+        <div className="flex w-full max-w-2xl flex-col items-center gap-8">
+          {managePanel}
+        </div>
+      </main>
+    );
+  }
 
-      {/* 서고 관리 — 수집·그래프 트리거와 명패는 서재 아래에 그대로 둔다 */}
-      <div className="flex w-full max-w-2xl flex-col items-center gap-10 border-t border-amber-200/10 pt-10">
-        <CollectForm hasSnapshot={snapshot !== null} />
-
-        {snapshot ? <SnapshotSummary snapshot={snapshot} /> : null}
-
-        <GraphForm hasSnapshot={snapshot !== null} hasGraph={graph !== null} />
-
-        {graph ? (
-          <GraphSummary
-            graph={graph}
-            staleSnapshot={snapshot ? isStaleSnapshot(snapshot) : false}
-          />
-        ) : null}
-      </div>
-    </main>
+  // ③ 쯔꾸르 씬 — 책장 벽 + 사서 NPC가 화면 전부다
+  return (
+    <GameScene
+      books={buildLibrary(snapshot, graph).books}
+      hasGraph={graph !== null}
+      managePanel={managePanel}
+      settingsPanel={<ModelSettings />}
+      hudTail={hudTail}
+    />
   );
 }

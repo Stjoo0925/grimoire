@@ -93,6 +93,12 @@
     "privateBadge": "Private",
     "forkBadge": "Fork",
     "needGraph": "No threads of memory yet. Weave the graph to bring connections and glow to life.",
+    "hud": {
+      "manage": "Archives",
+      "settings": "Settings",
+      "close": "Close",
+      "dialogName": "Librarian"
+    },
     "npc": {
       "shelve": "Shelving new pages into “{book}”…",
       "shelveNote": "New pages for “{book}” — \"{note}\"",

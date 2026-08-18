@@ -93,6 +93,12 @@
     "privateBadge": "비공개",
     "forkBadge": "사본",
     "needGraph": "아직 기억의 실타래가 없습니다. 그래프를 엮으면 책끼리의 연결과 발광이 살아납니다.",
+    "hud": {
+      "manage": "서고 관리",
+      "settings": "설정",
+      "close": "닫기",
+      "dialogName": "사서"
+    },
     "npc": {
       "shelve": "『{book}』에 새 페이지를 꽂는 중…",
       "shelveNote": "『{book}』에 새 페이지를 — \"{note}\"",

@@ -110,10 +110,10 @@ GitHub OAuth 로그인
 
 ## 6. 로드맵
 
-1. **1차 (완료·진행 중)**: OAuth 수집기 ✅ → 지식그래프 층 (JSON, 추출기 스위치) 🔄
-2. **2차: MCP 서버** — `query_grimoire_graph` 등 도구 3종, Claude Desktop/Cursor 연동. 그래프 생기는 즉시 세컨드 브레인 실현
-3. **3차: Docker 패키징** — compose 프로파일, web 컨테이너화, Ollama 동봉
-4. **4차: 2D 서재 UI** — 책장·책·발광 하이라이트·AI 사서 채팅
+1. **1차 ✅**: OAuth 수집기 → 지식그래프 층 (JSON, 추출기 스위치 none/ollama/claude)
+2. **2차 ✅: MCP 서버** — 도구 3종(stdio + 원격 HTTP·Bearer), Claude Desktop 등록 완료
+3. **3차 ✅: Docker 패키징** — compose 프로파일(app/llm/mcp/db), GPU 오버레이, named volume
+4. **4차 ✅: 2D 서재 UI** — 책장·책·발광·AI 사서 채팅 + **게임 층**(모험가 상태창·EXP/레벨/직업·업적 진열장·수련 스트릭) + 모델 선택 설정 패널
 5. **5차: GraphRAG 고도화** — 두 단계로 나눠 진행
    - **5-a. 로컬 임베딩 시맨틱 검색**: nomic-embed-text(Ollama)로 노드 텍스트(`이름+타입+요약`) 임베딩
      → 그래프 빌드 시 생성·JSON 보관 → 사서/MCP 검색을 키워드+시맨틱 하이브리드로

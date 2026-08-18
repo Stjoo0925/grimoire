@@ -68,8 +68,9 @@ services:
     environment:
       - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:7b-instruct}
     volumes:
-      # 내려받은 모델 가중치 (수 GB) — 재시작해도 다시 받지 않는다.
-      - ./data/db/ollama:/root/.ollama
+      # 내려받은 모델 가중치 (수 GB) — named volume이라 재시작해도 다시 받지 않는다.
+      # (올인 컨테이너 원칙: DB성 데이터는 호스트 폴더가 아니라 도커 볼륨에 산다. PLANNING.md §8)
+      - grimoire-ollama:/root/.ollama
     # 기동 시 모델을 자동으로 내려받는다. 이미 볼륨에 있으면 즉시 끝난다(idempotent).
     # 수동으로 하려면: docker exec grimoire-ollama ollama pull qwen2.5:7b-instruct
     entrypoint: ["/bin/sh", "-c"]
@@ -111,9 +112,9 @@ services:
       - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:-change-me-please}
       - NEO4J_PLUGINS=["apoc"]
     volumes:
-      - ./data/db/neo4j/data:/data
-      - ./data/db/neo4j/logs:/logs
-      - ./data/db/neo4j/import:/var/lib/neo4j/import
+      - grimoire-neo4j-data:/data
+      - grimoire-neo4j-logs:/logs
+      - grimoire-neo4j-import:/var/lib/neo4j/import
 
   qdrant:
     profiles: ["db"]
@@ -124,4 +125,14 @@ services:
       - "6333:6333" # REST API & Web Dashboard
       - "6334:6334" # gRPC
     volumes:
-      - ./data/db/qdrant/storage:/qdrant/storage
+      - grimoire-qdrant:/qdrant/storage
+
+# DB성 데이터는 named volume (올인 컨테이너 원칙, PLANNING.md §8).
+# 앱 데이터(./data의 스냅샷·그래프 JSON)는 개발 편의를 위해 당분간 바인드 마운트 유지 —
+# 서버 배포 시나리오에서는 이것도 named volume으로 교체한다.
+volumes:
+  grimoire-ollama:
+  grimoire-neo4j-data:
+  grimoire-neo4j-logs:
+  grimoire-neo4j-import:
+  grimoire-qdrant:

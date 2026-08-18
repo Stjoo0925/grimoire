@@ -131,27 +131,46 @@ export function buildLibrarianContext(
     for (const connection of item.connections) lines.push(`    ${connection}`);
   }
 
+  // 책별 사실 블록 — 각 책 아래에는 "그 책의 엣지"에서 나온 사실만 적는다.
+  // 소형 모델이 서로 다른 책의 기술을 섞어 붙이는 환각을 막기 위한 구조.
+  const labelOf = (id: string) =>
+    graph.nodes.find((node) => node.id === id)?.label;
   const briefs = projectIds.slice(0, PROJECT_BRIEFS).map((id) => {
     const project = projectNodes.get(id)!;
     const tech = graph.edges
       .filter(
         (edge): edge is UsesEdge => edge.kind === "USES" && edge.from === id,
       )
-      .map((edge) => graph.nodes.find((node) => node.id === edge.to)?.label)
+      .map((edge) => labelOf(edge.to))
       .filter((label): label is string => Boolean(label))
       .slice(0, TECH_PER_BRIEF);
-    const parts = [
-      `- ${project.fullName}`,
-      project.primaryLang ? `주 언어 ${project.primaryLang}` : null,
-      project.isPrivate ? "비공개" : null,
-      tech.length > 0 ? `기술 ${tech.join(", ")}` : null,
-    ].filter(Boolean);
-    return parts.join(" · ");
+    const concepts = graph.edges
+      .filter((edge) => edge.kind === "ABOUT" && edge.from === id)
+      .map((edge) => labelOf(edge.to))
+      .filter((label): label is string => Boolean(label))
+      .slice(0, 4);
+    const problems = graph.edges
+      .filter((edge) => edge.kind === "SOLVED" && edge.from === id)
+      .map((edge) => labelOf(edge.to))
+      .filter((label): label is string => Boolean(label))
+      .slice(0, 3);
+    return [
+      `## ${project.fullName}${project.isPrivate ? " (비공개)" : ""}`,
+      project.primaryLang ? `주 언어: ${project.primaryLang}` : null,
+      tech.length > 0 ? `사용 기술: ${tech.join(", ")}` : null,
+      concepts.length > 0 ? `다루는 개념: ${concepts.join(", ")}` : null,
+      problems.length > 0 ? `해결한 문제: ${problems.join(" / ")}` : null,
+    ]
+      .filter(Boolean)
+      .join("\n");
   });
 
   const sections: string[] = [];
   if (lines.length > 0) sections.push(`# 검색된 항목\n${lines.join("\n")}`);
-  if (briefs.length > 0) sections.push(`# 관련 책\n${briefs.join("\n")}`);
+  if (briefs.length > 0)
+    sections.push(
+      `# 책별 사실 (각 책에 대한 진술은 반드시 그 책의 블록 안 사실만 사용할 것)\n${briefs.join("\n\n")}`,
+    );
 
   return {
     items,
@@ -168,6 +187,8 @@ export function buildLibrarianContext(
 export const LIBRARIAN_SYSTEM_PROMPT = [
   "당신은 개발자의 GitHub 이력으로 지어진 마법 도서관의 사서입니다.",
   "주어진 '자료' 안의 사실만으로 답하세요. 자료에 없는 프로젝트·기술을 지어내지 마세요.",
+  "특정 책(레포)에 대해 말할 때는 '책별 사실'에서 **그 책의 블록 안에 적힌** 기술·개념·문제만 언급하세요.",
+  "한 책의 기술을 다른 책에 옮겨 붙이는 것은 금지입니다. 어느 책의 사실인지 불확실하면 언급하지 마세요.",
   "답변은 3~6문장으로 짧게, 차분한 사서의 말투로 씁니다.",
   "관련된 책(레포)이 있으면 그 이름을 문장 안에 그대로 적어 주세요 — 서가에서 그 책이 빛납니다.",
   "자료가 비어 있으면 찾지 못했다고 솔직히 말하고 다른 검색어를 제안하세요.",

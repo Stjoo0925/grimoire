@@ -51,7 +51,8 @@ export async function askOllama(
           { role: "user", content: userPrompt },
         ],
         stream: false,
-        options: { temperature: 0.3, num_predict: MAX_TOKENS },
+        // 사서는 창작이 아니라 자료 요약이다 — 낮은 온도로 교차 환각을 줄인다.
+        options: { temperature: 0.1, num_predict: MAX_TOKENS },
       }),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });

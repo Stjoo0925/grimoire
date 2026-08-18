@@ -191,6 +191,11 @@ export interface KnowledgeGraph {
   builtAt: string;
   /** 실제로 사용된 추출기. "none"이면 정적 분석만으로 만든 그래프 */
   extractorUsed: ExtractorName;
+  /**
+   * 노드 임베딩을 만든 로컬 모델 (예: "nomic-embed-text").
+   * null/undefined면 임베딩 없이 저장된 그래프 — 검색은 키워드만 쓴다 (PLANNING.md §6 5-a).
+   */
+  embeddingModel?: string | null;
   /** 일부 레포 추출이 실패했거나 스냅샷이 불완전한 경우 */
   partial?: boolean;
   partialReason?: string;

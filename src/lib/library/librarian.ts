@@ -1,9 +1,9 @@
 /**
  * ③ AI 사서 — 답변 파이프라인의 순수 부분.
  *
- * 흐름 (KNOWLEDGE_GRAPH.md §5의 1차 버전 — 임베딩은 5차):
- *   질문 → 그래프 키워드 검색(mcp/search 재사용) → 1홉 서브그래프 + 프로젝트 요약으로
- *   압축 컨텍스트 → 로컬 Ollama가 합성.
+ * 흐름 (KNOWLEDGE_GRAPH.md §5):
+ *   질문 → 그래프 하이브리드 검색(mcp/search 재사용: 키워드 + 로컬 임베딩 RRF)
+ *   → 1홉 서브그래프 + 프로젝트 요약으로 압축 컨텍스트 → 로컬 Ollama가 합성.
  *
  * 여기에는 네트워크가 없다. 실제 호출은 ollama.ts, 배선은 app/actions.ts.
  * 외부 API는 어떤 경로로도 부르지 않는다 (PLANNING.md §7).
@@ -73,12 +73,23 @@ const KIND_LABEL: Record<string, string> = {
   period: "시기",
 };
 
-/** 질문 → 검색 → 압축 컨텍스트 */
-export function buildLibrarianContext(
+/**
+ * 질문 → 검색 → 압축 컨텍스트.
+ *
+ * 검색은 5-a부터 비동기다 — 그래프에 임베딩이 있으면 질의를 로컬 임베딩 모델로
+ * 벡터화해 키워드 순위와 RRF로 섞는다(mcp/search.ts). 임베딩이 없거나 모델에 닿지
+ * 못하면 예전과 같은 키워드 검색이 되므로 이 함수의 결과 형태는 변하지 않는다.
+ */
+export async function buildLibrarianContext(
   graph: KnowledgeGraph,
   question: string,
-): LibrarianContext {
-  const search = searchGraph(graph, question, { limit: SEED_LIMIT, hops: 1 });
+  options: { semantic?: boolean } = {},
+): Promise<LibrarianContext> {
+  const search = await searchGraph(graph, question, {
+    limit: SEED_LIMIT,
+    hops: 1,
+    semantic: options.semantic,
+  });
 
   const items: LibrarianItem[] = search.seeds.map((seed) => {
     const connections = seed.connections

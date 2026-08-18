@@ -12,6 +12,7 @@ import { collectAll } from "@/lib/collector/github";
 import { loadSnapshot, saveSnapshot } from "@/lib/collector/storage";
 import type { CollectResult } from "@/lib/collector/types";
 import { buildGraph } from "@/lib/graph/builder";
+import { attachEmbeddings } from "@/lib/graph/embeddings";
 import { loadGraph, saveGraph } from "@/lib/graph/storage";
 import { summarizeGraph, type GraphBuildResult } from "@/lib/graph/types";
 import {
@@ -105,16 +106,28 @@ export async function buildGraphAction(
     // MCP(record_new_learning)로 손수 적어 넣은 노드는 재빌드에서도 살린다.
     const previous = await loadGraph(login);
     const { graph, reason } = await buildGraph(snapshot, { preserve: previous });
+
+    // 5-a: 노드 임베딩은 **선택적 보강**이다 — 로컬 임베딩 모델이 없으면
+    // 벡터 없이 그대로 저장되고 검색은 키워드로만 동작한다 (PLANNING.md §6·§7).
+    const embeddings = await attachEmbeddings(graph, { previous });
+    if (!embeddings.ok) {
+      console.warn("[graph] 임베딩 생략 —", embeddings.reason);
+    }
+
     await saveGraph(graph);
     revalidatePath("/", "layout");
 
     const summary = summarizeGraph(graph);
+    // 추출기 사유(builder.ts)와 같은 결로 임베딩 결과도 한 문장 덧붙인다.
+    const embedNote = embeddings.ok
+      ? `의미 검색 벡터 ${embeddings.embedded + embeddings.reused}개를 ${embeddings.model}로 만들었습니다.`
+      : "로컬 임베딩 모델에 닿지 못해 키워드 검색만 됩니다 (nomic-embed-text 내려받기 후 다시 생성).";
     return {
       ok: true,
       message: `${t("success", {
         nodes: summary.nodeTotal,
         edges: summary.edgeTotal,
-      })} ${reason}`,
+      })} ${reason} ${embedNote}`,
     };
   } catch (error) {
     console.error("[graph] 그래프 생성 실패", error);
@@ -166,7 +179,7 @@ export async function askLibrarianAction(
   const graph = await loadGraph(login);
   if (!graph) return empty(t("chat.noGraph"));
 
-  const context = buildLibrarianContext(graph, trimmed);
+  const context = await buildLibrarianContext(graph, trimmed);
   if (context.items.length === 0) {
     return {
       ok: true,

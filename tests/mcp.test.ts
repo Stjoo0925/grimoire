@@ -105,9 +105,9 @@ test("scoreNode: 정확 > 접두 > 부분 > 본문, 차수는 순서를 뒤집�
   assert.equal(scoreNode(react, tokenize("전혀없는말")), 0);
 });
 
-test("검색: 시드는 점수순, 엣지는 끝점 라벨과 함께 묶여 나온다", () => {
+test("검색: 시드는 점수순, 엣지는 끝점 라벨과 함께 묶여 나온다", async () => {
   const graph = fixtureGraph();
-  const result = searchGraph(graph, "React.js", { limit: 3 });
+  const result = await searchGraph(graph, "React.js", { limit: 3 });
 
   assert.equal(result.seeds[0].node.id, techId("react"));
   assert.equal(result.seeds[0].node.kind, "tech");
@@ -121,9 +121,9 @@ test("검색: 시드는 점수순, 엣지는 끝점 라벨과 함께 묶여 나�
   assert.ok(usedBy!.nodes.some((n) => n.label === "spellbook"));
 });
 
-test("검색: Problem은 solutionSummary를 항상 싣는다", () => {
+test("검색: Problem은 solutionSummary를 항상 싣는다", async () => {
   const graph = fixtureGraph();
-  const result = searchGraph(graph, "메모리 누수");
+  const result = await searchGraph(graph, "메모리 누수");
   const seed = result.seeds[0];
   assert.equal(seed.node.kind, "problem");
   assert.equal(seed.node.solutionSummary, "스트리밍 파싱으로 전환");
@@ -133,10 +133,10 @@ test("검색: Problem은 solutionSummary를 항상 싣는다", () => {
   );
 });
 
-test("검색: hops=2면 1홉 이웃 너머 경로가 붙는다", () => {
+test("검색: hops=2면 1홉 이웃 너머 경로가 붙는다", async () => {
   const graph = fixtureGraph();
-  const one = searchGraph(graph, "fastapi", { hops: 1 });
-  const two = searchGraph(graph, "fastapi", { hops: 2 });
+  const one = await searchGraph(graph, "fastapi", { hops: 1 });
+  const two = await searchGraph(graph, "fastapi", { hops: 2 });
 
   assert.equal(one.secondHop, undefined);
   assert.ok((two.secondHop ?? []).length > 0);
@@ -146,8 +146,8 @@ test("검색: hops=2면 1홉 이웃 너머 경로가 붙는다", () => {
   assert.equal(typeof hop.to, "string");
 });
 
-test("검색: 결과가 없으면 안내 note", () => {
-  const result = searchGraph(fixtureGraph(), "존재하지않는기술xyz");
+test("검색: 결과가 없으면 안내 note", async () => {
+  const result = await searchGraph(fixtureGraph(), "존재하지않는기술xyz");
   assert.equal(result.seeds.length, 0);
   assert.match(result.note ?? "", /일치하는 노드가 없습니다/);
 });

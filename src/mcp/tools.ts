@@ -100,10 +100,11 @@ async function queryGraph(context: McpContext, args: Record<string, unknown>) {
   return {
     login: context.login,
     graphBuiltAt: graph.builtAt,
-    ...searchGraph(graph, query, {
+    // 임베딩이 있으면 하이브리드(키워드+시맨틱), 없으면 그대로 키워드 검색.
+    ...(await searchGraph(graph, query, {
       limit: optionalNumber(args.limit),
       hops: optionalNumber(args.hops),
-    }),
+    })),
   };
 }
 

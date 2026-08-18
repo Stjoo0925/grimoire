@@ -1,11 +1,20 @@
 /**
- * ② MCP 서버 — `query_grimoire_graph`의 검색 로직 (순수, SDK 비의존).
+ * ② MCP 서버 — `query_grimoire_graph`의 검색 로직 (SDK 비의존).
  *
- * 1차에는 임베딩이 없으므로(KNOWLEDGE_GRAPH.md §5의 Qdrant 단계는 5차) 키워드 검색으로 시드 노드를
- * 고르고, 거기서 1~2홉을 펼쳐 서브그래프를 돌려준다. 정규화는 canonical.ts를 재사용해
- * "React.js" 질의가 `tech-react`에 걸리게 한다.
+ * 키워드 검색으로 시드 노드를 고르고 1~2홉을 펼쳐 서브그래프를 돌려준다.
+ * 정규화는 canonical.ts를 재사용해 "React.js" 질의가 `tech-react`에 걸리게 한다.
+ *
+ * 5-a(PLANNING.md §6)부터는 **하이브리드**다 — 그래프 노드에 임베딩이 있고 질의도
+ * 로컬 모델로 벡터화되면 키워드 순위와 코사인 순위를 RRF(k=60)로 섞는다.
+ * 임베딩이 없거나 로컬 임베딩 모델에 닿지 못하면 예전과 완전히 같은 키워드 검색으로 내려간다
+ * (KNOWLEDGE_GRAPH.md §5의 1단계를 JSON 안에서 하는 셈).
  */
 import { canonicalTech, normalizeName } from "../lib/graph/canonical";
+import {
+  cosineSimilarity,
+  embedTexts,
+  resolveEmbedModel,
+} from "../lib/graph/embeddings";
 import type {
   EdgeKind,
   GraphEdge,
@@ -40,6 +49,15 @@ const NEIGHBORS_PER_GROUP = 12;
 const SECOND_HOP_FROM = 20;
 /** 2홉 경로 출력 상한 */
 const SECOND_HOP_EDGES = 40;
+
+/** RRF 상수 — 정보검색 관례값. 클수록 상위 순위 차이를 완만하게 본다. */
+export const RRF_K = 60;
+/** 시맨틱 후보 풀 (limit의 몇 배까지 볼 것인가) */
+const SEMANTIC_POOL_FACTOR = 4;
+const SEMANTIC_POOL_MIN = 10;
+const SEMANTIC_POOL_MAX = 50;
+/** 이보다 안 닮은 노드는 후보로도 올리지 않는다 (엉뚱한 시드 방지) */
+const SEMANTIC_MIN_SIMILARITY = 0.35;
 
 export interface SearchToken {
   raw: string;
@@ -135,9 +153,14 @@ export interface Connection {
 
 export interface SeedResult {
   node: NodeDetail;
+  /** 키워드 점수 (시맨틱으로만 걸린 노드는 0) */
   score: number;
   degree: number;
   connections: Connection[];
+  /** 질의 벡터와의 코사인 유사도 (하이브리드일 때만) */
+  similarity?: number;
+  /** 최종 정렬에 쓴 RRF 점수 (하이브리드일 때만) */
+  fused?: number;
 }
 
 export interface SearchResult {
@@ -148,6 +171,10 @@ export interface SearchResult {
   seeds: SeedResult[];
   /** 2홉에서 새로 닿은 경로 ("React -[USES]-> …" 형태의 3연) */
   secondHop?: Array<{ from: string; kind: EdgeKind; to: string }>;
+  /** 시맨틱 랭킹이 실제로 섞였는가 */
+  hybrid?: boolean;
+  /** 그때 쓴 임베딩 모델 */
+  embeddingModel?: string;
   note?: string;
 }
 
@@ -155,13 +182,20 @@ export interface SearchOptions {
   limit?: number;
   /** 1 또는 2 (기본 1) */
   hops?: number;
+  /**
+   * 시맨틱(임베딩) 랭킹 사용 여부. 기본 true.
+   * 켜져 있어도 노드 임베딩이 없거나 질의 임베딩에 실패하면 조용히 키워드 검색이 된다.
+   */
+  semantic?: boolean;
+  /** 질의 임베딩 주입 (테스트·다른 백엔드용). 기본은 로컬 Ollama */
+  embedQuery?: (query: string) => Promise<number[] | null>;
 }
 
-export function searchGraph(
+export async function searchGraph(
   graph: KnowledgeGraph,
   query: string,
   options: SearchOptions = {},
-): SearchResult {
+): Promise<SearchResult> {
   const tokens = tokenize(query);
   const limit = clamp(options.limit ?? DEFAULT_LIMIT, 1, MAX_LIMIT);
   const hops = clamp(options.hops ?? 1, 1, 2);
@@ -183,10 +217,13 @@ export function searchGraph(
       a.node.id.localeCompare(b.node.id),
   );
 
-  const seeds = scored.slice(0, limit);
+  const semantic = await semanticRanking(graph, query, options, limit);
+  const ranked = fuse(scored, semantic?.ranked ?? [], degrees, limit);
+
+  const seeds = ranked.slice(0, limit);
   const visited = new Set(seeds.map((seed) => seed.node.id));
 
-  const seedResults: SeedResult[] = seeds.map(({ node, score }) => {
+  const seedResults: SeedResult[] = seeds.map(({ node, score, similarity, fused }) => {
     const edges = edgesByNode.get(node.id) ?? [];
     const groups = new Map<string, { kind: EdgeKind; direction: "out" | "in"; ids: string[] }>();
     for (const edge of edges) {
@@ -227,6 +264,8 @@ export function searchGraph(
       score,
       degree: degrees.get(node.id) ?? 0,
       connections,
+      ...(similarity !== undefined ? { similarity: round(similarity) } : {}),
+      ...(fused !== undefined ? { fused: round5(fused) } : {}),
     };
   });
 
@@ -234,9 +273,13 @@ export function searchGraph(
     query,
     tokens: tokens.map((token) => token.norm),
     hops,
-    totalMatches: scored.length,
+    totalMatches: ranked.length,
     seeds: seedResults,
   };
+  if (semantic) {
+    result.hybrid = true;
+    result.embeddingModel = semantic.model;
+  }
 
   if (hops >= 2 && seedResults.length > 0) {
     result.secondHop = expandSecondHop(
@@ -254,6 +297,134 @@ export function searchGraph(
   }
 
   return result;
+}
+
+/* ── 시맨틱 랭킹 + RRF 융합 ───────────────────────────────────────── */
+
+interface SemanticHit {
+  node: GraphNode;
+  similarity: number;
+}
+
+interface SemanticRanking {
+  model: string;
+  ranked: SemanticHit[];
+}
+
+/**
+ * 질의를 벡터로 만들어 임베딩이 있는 노드와의 코사인 유사도 순위를 낸다.
+ *
+ * 다음 중 하나라도 어긋나면 null — 호출부는 예전과 똑같은 키워드 검색을 한다:
+ *   임베딩을 끈 경우 / 노드에 벡터가 없는 경우 / 로컬 임베딩 모델에 닿지 못한 경우.
+ */
+async function semanticRanking(
+  graph: KnowledgeGraph,
+  query: string,
+  options: SearchOptions,
+  limit: number,
+): Promise<SemanticRanking | null> {
+  if (options.semantic === false) return null;
+  if (!query.trim()) return null;
+
+  const embedded = graph.nodes.filter(
+    (node) => Array.isArray(node.embedding) && node.embedding.length > 0,
+  );
+  if (embedded.length === 0) return null;
+
+  const model = graph.embeddingModel || resolveEmbedModel();
+  let vector: number[] | null = null;
+  try {
+    vector = options.embedQuery
+      ? await options.embedQuery(query)
+      : await defaultEmbedQuery(query, model);
+  } catch {
+    vector = null;
+  }
+  if (!vector || vector.length === 0) return null;
+
+  const pool = clamp(
+    limit * SEMANTIC_POOL_FACTOR,
+    SEMANTIC_POOL_MIN,
+    SEMANTIC_POOL_MAX,
+  );
+  const hits: SemanticHit[] = [];
+  for (const node of embedded) {
+    const similarity = cosineSimilarity(vector, node.embedding as number[]);
+    if (similarity >= SEMANTIC_MIN_SIMILARITY) hits.push({ node, similarity });
+  }
+  hits.sort(
+    (a, b) => b.similarity - a.similarity || a.node.id.localeCompare(b.node.id),
+  );
+
+  return { model, ranked: hits.slice(0, pool) };
+}
+
+/** 질의 임베딩 기본 구현 — 노드 벡터를 만든 것과 같은 로컬 모델을 쓴다. */
+async function defaultEmbedQuery(
+  query: string,
+  model: string,
+): Promise<number[] | null> {
+  const result = await embedTexts([query], { model });
+  return result.ok ? (result.vectors[0] ?? null) : null;
+}
+
+interface FusedCandidate {
+  node: GraphNode;
+  score: number;
+  similarity?: number;
+  fused?: number;
+}
+
+/**
+ * RRF(Reciprocal Rank Fusion, k=60) — 점수 스케일이 다른 두 랭킹을 순위만으로 섞는다.
+ *
+ *   fused(node) = 1/(k + 키워드순위) + 1/(k + 코사인순위)     (없는 쪽은 0)
+ *
+ * 시맨틱 랭킹이 비어 있으면 키워드 순서를 그대로 돌려준다 — 예전 동작과 동일.
+ */
+function fuse(
+  keyword: Array<{ node: GraphNode; score: number }>,
+  semantic: SemanticHit[],
+  degrees: Map<string, number>,
+  limit: number,
+): FusedCandidate[] {
+  if (semantic.length === 0) return keyword;
+
+  const candidates = new Map<string, FusedCandidate>();
+  const bump = (node: GraphNode, rank: number, patch: Partial<FusedCandidate>) => {
+    const existing = candidates.get(node.id) ?? { node, score: 0, fused: 0 };
+    existing.fused = (existing.fused ?? 0) + 1 / (RRF_K + rank);
+    candidates.set(node.id, { ...existing, ...patch, fused: existing.fused });
+  };
+
+  // 키워드 쪽은 후보 풀만큼만 융합에 참여시킨다 (꼬리 노드가 순위를 흔들지 않게).
+  const keywordPool = clamp(
+    limit * SEMANTIC_POOL_FACTOR,
+    SEMANTIC_POOL_MIN,
+    SEMANTIC_POOL_MAX,
+  );
+  keyword.slice(0, keywordPool).forEach(({ node, score }, index) => {
+    bump(node, index + 1, { score });
+  });
+  semantic.forEach(({ node, similarity }, index) => {
+    bump(node, index + 1, { similarity });
+  });
+
+  const fused = [...candidates.values()];
+  fused.sort(
+    (a, b) =>
+      (b.fused ?? 0) - (a.fused ?? 0) ||
+      b.score - a.score ||
+      (degrees.get(b.node.id) ?? 0) - (degrees.get(a.node.id) ?? 0) ||
+      a.node.id.localeCompare(b.node.id),
+  );
+
+  // 융합에서 잘린 키워드 꼬리는 뒤에 그대로 붙인다 (totalMatches 보존).
+  const seen = new Set(fused.map((entry) => entry.node.id));
+  for (const entry of keyword) {
+    if (!seen.has(entry.node.id)) fused.push(entry);
+  }
+  return fused;
 }
 
 /** 1홉 이웃에서 한 걸음 더 — 아직 보지 못한 노드로 가는 경로만 라벨 3연으로 */
@@ -294,4 +465,8 @@ function clamp(value: number, min: number, max: number): number {
 
 function round(value: number): number {
   return Math.round(value * 1000) / 1000;
+}
+
+function round5(value: number): number {
+  return Math.round(value * 100000) / 100000;
 }

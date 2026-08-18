@@ -307,9 +307,9 @@ test("buildHeatmap: 달 눈금은 열마다 한 번씩만", () => {
 
 /* ── AI 사서 컨텍스트 ───────────────────────────────────────────────── */
 
-test("buildLibrarianContext: 시드와 관련 책, 압축 컨텍스트를 만든다", () => {
+test("buildLibrarianContext: 시드와 관련 책, 압축 컨텍스트를 만든다", async () => {
   const graph = fixtureGraph();
-  const context = buildLibrarianContext(graph, "react");
+  const context = await buildLibrarianContext(graph, "react");
 
   assert.ok(context.items.length > 0);
   assert.ok(context.items.some((item) => item.label.toLowerCase() === "react"));
@@ -320,23 +320,23 @@ test("buildLibrarianContext: 시드와 관련 책, 압축 컨텍스트를 만든
   assert.ok(context.projectIds.length <= 10);
 });
 
-test("buildLibrarianContext: 걸리는 게 없으면 항목도 컨텍스트도 비어 있다", () => {
-  const context = buildLibrarianContext(fixtureGraph(), "존재하지않는주문서");
+test("buildLibrarianContext: 걸리는 게 없으면 항목도 컨텍스트도 비어 있다", async () => {
+  const context = await buildLibrarianContext(fixtureGraph(), "존재하지않는주문서");
   assert.equal(context.items.length, 0);
   assert.equal(context.contextText, "");
   assert.deepEqual(context.projectIds, []);
 });
 
-test("buildLibrarianPrompt: 질문·자료·로케일 지시가 모두 들어간다", () => {
-  const context = buildLibrarianContext(fixtureGraph(), "react");
+test("buildLibrarianPrompt: 질문·자료·로케일 지시가 모두 들어간다", async () => {
+  const context = await buildLibrarianContext(fixtureGraph(), "react");
   const ko = buildLibrarianPrompt("react 쓴 책?", context, "ko");
   assert.ok(ko.includes("react 쓴 책?"));
   assert.ok(ko.includes("한국어로 답하세요."));
   assert.ok(buildLibrarianPrompt("q", context, "en").includes("Answer in English."));
 });
 
-test("matchProjectMentions: 답변에 이름이 나온 책만 빛낸다", () => {
-  const context = buildLibrarianContext(fixtureGraph(), "realtime");
+test("matchProjectMentions: 답변에 이름이 나온 책만 빛낸다", async () => {
+  const context = await buildLibrarianContext(fixtureGraph(), "realtime");
   const matched = matchProjectMentions(
     "서고에서 spellbook을 찾았습니다. 실시간 동기화를 다룹니다.",
     context,
@@ -344,8 +344,8 @@ test("matchProjectMentions: 답변에 이름이 나온 책만 빛낸다", () => 
   assert.deepEqual(matched, [projectId("mage/spellbook")]);
 });
 
-test("matchProjectMentions: 이름이 안 나오면 검색 후보를 그대로 쓴다", () => {
-  const context = buildLibrarianContext(fixtureGraph(), "realtime");
+test("matchProjectMentions: 이름이 안 나오면 검색 후보를 그대로 쓴다", async () => {
+  const context = await buildLibrarianContext(fixtureGraph(), "realtime");
   const matched = matchProjectMentions("관련된 기록을 찾았습니다.", context);
   assert.deepEqual(matched, context.projectIds);
 });

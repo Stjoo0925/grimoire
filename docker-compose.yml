@@ -67,6 +67,8 @@ services:
       - "11434:11434"
     environment:
       - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:7b-instruct}
+      # 요청이 끝나면 즉시 GPU에서 모델을 내린다 (기본 5분 유지 대신).
+      - OLLAMA_KEEP_ALIVE=0
     volumes:
       # 내려받은 모델 가중치 (수 GB) — named volume이라 재시작해도 다시 받지 않는다.
       # (올인 컨테이너 원칙: DB성 데이터는 호스트 폴더가 아니라 도커 볼륨에 산다. PLANNING.md §8)

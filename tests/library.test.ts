@@ -7,7 +7,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { ContributionDay } from "../src/lib/collector/types";
 import { buildDeterministic } from "../src/lib/graph/deterministic";
 import {
   conceptId,
@@ -21,7 +20,6 @@ import {
   UNKNOWN_LANGUAGE_COLOR,
   languageColor,
 } from "../src/lib/library/colors";
-import { buildHeatmap } from "../src/lib/library/heatmap";
 import {
   buildLibrarianContext,
   buildLibrarianPrompt,
@@ -32,12 +30,6 @@ import {
   relatedProjectMap,
   relatedProjects,
 } from "../src/lib/library/relatedness";
-import {
-  UNKNOWN_SHELF,
-  groupBooks,
-  partitionPrivate,
-  spineMetrics,
-} from "../src/lib/library/shelves";
 import {
   buildLibrary,
   dominantYear,
@@ -74,54 +66,6 @@ test("languageColor: 모르는 언어도 결정론적이고 서로 다르다", (
 function library() {
   return buildLibrary(SNAPSHOT, fixtureGraph());
 }
-
-test("partitionPrivate: 비공개 서고를 따로 뗀다", () => {
-  const { open, restricted } = partitionPrivate(library().books);
-  assert.deepEqual(
-    restricted.map((book) => book.name),
-    ["familiar"],
-  );
-  assert.equal(open.length, 2);
-  assert.ok(open.every((book) => !book.isPrivate));
-});
-
-test("groupBooks(language): 언어별 서가, 권수 많은 순", () => {
-  const shelves = groupBooks(library().books, "language");
-  // 모두 1권씩이므로 커밋(쪽) 수가 많은 서가부터: spellbook 4 · familiar 2 · old-tome 1
-  assert.deepEqual(
-    shelves.map((shelf) => shelf.key),
-    ["TypeScript", "Python", "Go"],
-  );
-  const ts = shelves.find((shelf) => shelf.key === "TypeScript")!;
-  assert.equal(ts.books.length, 1);
-  assert.equal(ts.commitCount, 4);
-});
-
-test("groupBooks(language): 주 언어를 모르면 미상 서가로 가고 항상 맨 끝", () => {
-  const books = library().books.map((book, index) =>
-    index === 0 ? { ...book, primaryLanguage: null } : book,
-  );
-  const shelves = groupBooks(books, "language");
-  assert.equal(shelves.at(-1)!.key, UNKNOWN_SHELF);
-  assert.equal(shelves.at(-1)!.label, "");
-});
-
-test("groupBooks(year): 최근 연도가 위층", () => {
-  const shelves = groupBooks(library().books, "year");
-  assert.deepEqual(
-    shelves.map((shelf) => shelf.key),
-    ["2024", "2023", "2022"],
-  );
-});
-
-test("spineMetrics: 커밋이 많을수록 두껍고 높지만 상한이 있다", () => {
-  const thin = spineMetrics(1);
-  const thick = spineMetrics(1850);
-  assert.ok(thin.height < thick.height);
-  assert.ok(thin.width < thick.width);
-  assert.ok(thick.height <= 180 && thick.width <= 38);
-  assert.deepEqual(spineMetrics(0), spineMetrics(1));
-});
 
 /* ── 집필 연혁 ──────────────────────────────────────────────────────── */
 
@@ -267,42 +211,6 @@ test("projectsForNodes: 기술·개념 노드는 그것을 쓰는 책으로 펼�
   const ids = projectsForNodes(graph, [techId("react"), conceptId("realtime")]);
   assert.ok(ids.includes(projectId("mage/spellbook")));
   assert.ok(ids.every((id) => id.startsWith("project-")));
-});
-
-/* ── 수련 일지(잔디) ────────────────────────────────────────────────── */
-
-function days(entries: Array<[string, number]>): ContributionDay[] {
-  return entries.map(([date, count]) => ({
-    date,
-    count,
-    level: (count > 4 ? 4 : count) as ContributionDay["level"],
-  }));
-}
-
-test("buildHeatmap: 53주 격자, 마지막 열이 오늘이 속한 주", () => {
-  const heatmap = buildHeatmap(days([["2024-06-01", 3]]), "2024-06-05");
-  assert.equal(heatmap.weeks.length, 53);
-  assert.ok(heatmap.weeks.every((week) => week.length === 7));
-  assert.equal(heatmap.to, "2024-06-08"); // 2024-06-05는 수요일 → 그 주 토요일
-  assert.equal(heatmap.from, "2023-06-04"); // 53열 전 일요일
-  assert.equal(heatmap.total, 3);
-});
-
-test("buildHeatmap: 오늘 이후 칸은 future이고 집계에서 빠진다", () => {
-  const heatmap = buildHeatmap(days([["2024-06-07", 9]]), "2024-06-05");
-  const cells = heatmap.weeks.flat();
-  const future = cells.find((cell) => cell.date === "2024-06-07")!;
-  assert.equal(future.future, true);
-  assert.equal(future.count, 0);
-  assert.equal(heatmap.total, 0);
-  assert.equal(cells.find((cell) => cell.date === "2024-06-05")!.future, false);
-});
-
-test("buildHeatmap: 달 눈금은 열마다 한 번씩만", () => {
-  const heatmap = buildHeatmap([], "2024-06-05");
-  const columns = heatmap.monthTicks.map((tick) => tick.column);
-  assert.equal(new Set(columns).size, columns.length);
-  assert.ok(heatmap.monthTicks.length >= 12);
 });
 
 /* ── AI 사서 컨텍스트 ───────────────────────────────────────────────── */

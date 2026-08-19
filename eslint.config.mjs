@@ -21,6 +21,8 @@ const eslintConfig = [
       ".test-out/**",
       // MCP 서버 트랜스파일 산출물 (npm run mcp:build)
       "dist-mcp/**",
+      // CLI 그래프 재빌드 트랜스파일 산출물 (npm run graph:rebuild)
+      ".rebuild-out/**",
       "next-env.d.ts",
     ],
   },

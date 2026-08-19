@@ -41,6 +41,15 @@ const SCORE_BODY = 1.5;
 const DEGREE_BOOST_MAX = 2;
 const DEGREE_BOOST_SATURATION = 50;
 
+/**
+ * 흔한 토큰(IDF) 억제 — "데이터·상태·기능" 같은 토큰은 수많은 노드에
+ * substring·본문으로 약하게 걸려 노이즈를 만든다. 약한 매칭이 전체 노드의
+ * COMMON_DF_LOW 이하이면 그대로, COMMON_DF_HIGH 이상이면 0으로 낮춘다(선형).
+ * exact·prefix 매칭은 특정적이므로 억제하지 않는다.
+ */
+const COMMON_DF_LOW = 0.04;
+const COMMON_DF_HIGH = 0.1;
+
 const DEFAULT_LIMIT = 8;
 const MAX_LIMIT = 25;
 /** seed 하나가 한 관계 종류에서 보여줄 이웃 수 */
@@ -68,8 +77,28 @@ export interface SearchToken {
 }
 
 /**
+ * 한글 조사 제거 — "지식그래프와" → "지식그래프"처럼 명사 뒤 조사를 떼어
+ * 이름 매칭이 되게 한다. 남는 글자가 2자 이상일 때만, 끝의 흔한 조사만 뗀다.
+ * 원형도 함께 토큰으로 남기므로 잘못 떼도 손해가 없다.
+ */
+const PARTICLES_2 = ["으로", "에서", "에게", "부터", "까지", "이라", "라고", "처럼", "보다", "한테", "으로서", "으로써"];
+const PARTICLES_1 = ["을", "를", "이", "가", "은", "는", "의", "에", "와", "과", "도", "만", "로", "랑", "께"];
+
+export function stripParticle(word: string): string | null {
+  if (!/[가-힣]$/.test(word)) return null; // 한글로 끝날 때만
+  for (const p of PARTICLES_2) {
+    if (word.length >= 4 && word.endsWith(p)) return word.slice(0, -p.length);
+  }
+  for (const p of PARTICLES_1) {
+    if (word.length >= 3 && word.endsWith(p)) return word.slice(0, -p.length);
+  }
+  return null;
+}
+
+/**
  * 질의 토큰화. 공백/구두점으로 자르고, 여러 단어면 전체 구문도 토큰으로 더한다
- * ("knowledge graph" → "knowledge-graph" 노드에 정확 일치).
+ * ("knowledge graph" → "knowledge-graph" 노드에 정확 일치). 한글 조각은
+ * 조사를 뗀 형태도 함께 토큰으로 넣는다.
  */
 export function tokenize(query: string): SearchToken[] {
   const pieces = query
@@ -79,6 +108,10 @@ export function tokenize(query: string): SearchToken[] {
     .filter(Boolean);
 
   const raws = [...pieces];
+  for (const piece of pieces) {
+    const stripped = stripParticle(piece);
+    if (stripped) raws.push(stripped);
+  }
   if (pieces.length > 1) raws.push(query.trim());
 
   const seen = new Set<string>();
@@ -107,14 +140,85 @@ function nameScore(name: string, token: SearchToken): number {
   return 0;
 }
 
+/** 이 아래의 IDF 가중치를 가진 토큰의 prefix는 "강한 매칭"으로 안 친다 */
+const STRONG_WEIGHT_MIN = 0.5;
+
+/**
+ * 노드가 어떤 토큰에서든 강한 매칭을 가지는가 — 하이브리드 융합에서 "키워드 순위"를
+ * 받을 자격. exact는 항상 강함. prefix는 그 토큰이 흔하지 않을 때(IDF ≥ 0.5)만 강함.
+ * 약한(substring/body) 매칭이나 흔한 단어의 prefix만 있는 노드는 시맨틱으로만 경쟁한다.
+ */
+export function hasStrongKeyword(
+  node: GraphNode,
+  tokens: SearchToken[],
+  weights?: Map<string, number>,
+): boolean {
+  const { names } = searchableText(node);
+  for (const token of tokens) {
+    for (const name of names) {
+      const s = nameScore(name, token);
+      if (s === SCORE_EXACT) return true;
+      if (s === SCORE_PREFIX && (weights?.get(token.norm) ?? 1) >= STRONG_WEIGHT_MIN) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** 노드가 이 토큰에 exact 아닌(prefix/substring/body) 약한 매칭으로 걸리는가 — IDF 계산용 */
+function nonExactMatch(node: GraphNode, token: SearchToken): boolean {
+  const { names, bodies } = searchableText(node);
+  let best = 0;
+  for (const name of names) {
+    const s = nameScore(name, token);
+    if (s === SCORE_EXACT) return false; // 정확 일치는 IDF 대상이 아니다
+    best = Math.max(best, s);
+  }
+  if (best === SCORE_PREFIX || best === SCORE_SUBSTRING) return true;
+  if (best === 0 && token.norm.length >= 2) {
+    const needle = token.raw.trim().toLowerCase();
+    return bodies.some((body) => body.toLowerCase().includes(needle));
+  }
+  return false;
+}
+
+/**
+ * 토큰별 비-exact 매칭 가중치(IDF). 비-exact 매칭이 전체의 COMMON_DF_LOW 이하면 1,
+ * COMMON_DF_HIGH 이상이면 0으로 선형 감쇠. exact 매칭에는 적용하지 않는다.
+ * prefix·substring·body 모두 이 가중치를 곱해, 흔한 단어("데이터")가 이름 앞부분을
+ * 우연히 맞히는 노이즈까지 억제한다.
+ */
+export function weakMatchWeights(
+  graph: KnowledgeGraph,
+  tokens: SearchToken[],
+): Map<string, number> {
+  const total = graph.nodes.length || 1;
+  const weights = new Map<string, number>();
+  for (const token of tokens) {
+    let df = 0;
+    for (const node of graph.nodes) if (nonExactMatch(node, token)) df += 1;
+    const ratio = df / total;
+    let weight = 1;
+    if (ratio >= COMMON_DF_HIGH) weight = 0;
+    else if (ratio > COMMON_DF_LOW) {
+      weight = 1 - (ratio - COMMON_DF_LOW) / (COMMON_DF_HIGH - COMMON_DF_LOW);
+    }
+    weights.set(token.norm, weight);
+  }
+  return weights;
+}
+
 /**
  * 노드 점수. 토큰별 최고 점수를 합산하고 차수로 소폭 가산한다.
+ * 흔한 토큰의 약한 매칭(substring/body)은 weights로 억제한다.
  * 0이면 검색 결과에 들지 않는다.
  */
 export function scoreNode(
   node: GraphNode,
   tokens: SearchToken[],
   degree = 0,
+  weights?: Map<string, number>,
 ): number {
   if (tokens.length === 0) return 0;
   const { names, bodies } = searchableText(node);
@@ -125,10 +229,16 @@ export function scoreNode(
   for (const token of tokens) {
     let best = 0;
     for (const name of names) best = Math.max(best, nameScore(name, token));
+    // exact가 아닌 매칭(prefix/substring/body)에는 IDF 가중치를 곱한다.
+    let weak = best === SCORE_PREFIX || best === SCORE_SUBSTRING;
     if (best === 0 && token.norm.length >= 2) {
       const needle = token.raw.trim().toLowerCase();
-      if (lowerBodies.some((body) => body.includes(needle))) best = SCORE_BODY;
+      if (lowerBodies.some((body) => body.includes(needle))) {
+        best = SCORE_BODY;
+        weak = true;
+      }
     }
+    if (weak && weights) best *= weights.get(token.norm) ?? 1;
     if (best > 0) {
       matched = true;
       total += best;
@@ -204,9 +314,10 @@ export async function searchGraph(
   const index = nodeIndex(graph);
   const edgesByNode = adjacency(graph);
 
+  const weights = weakMatchWeights(graph, tokens);
   const scored: Array<{ node: GraphNode; score: number }> = [];
   for (const node of graph.nodes) {
-    const score = scoreNode(node, tokens, degrees.get(node.id) ?? 0);
+    const score = scoreNode(node, tokens, degrees.get(node.id) ?? 0, weights);
     if (score > 0) scored.push({ node, score });
   }
   // 점수 내림차순, 동점이면 차수 → id 순으로 결정론적 정렬
@@ -217,8 +328,14 @@ export async function searchGraph(
       a.node.id.localeCompare(b.node.id),
   );
 
+  const strongIds = new Set(
+    scored
+      .filter(({ node }) => hasStrongKeyword(node, tokens, weights))
+      .map(({ node }) => node.id),
+  );
+
   const semantic = await semanticRanking(graph, query, options, limit);
-  const ranked = fuse(scored, semantic?.ranked ?? [], degrees, limit);
+  const ranked = fuse(scored, semantic?.ranked ?? [], degrees, limit, strongIds);
 
   const seeds = ranked.slice(0, limit);
   const visited = new Set(seeds.map((seed) => seed.node.id));
@@ -387,6 +504,7 @@ function fuse(
   semantic: SemanticHit[],
   degrees: Map<string, number>,
   limit: number,
+  strongIds: Set<string>,
 ): FusedCandidate[] {
   if (semantic.length === 0) return keyword;
 
@@ -397,15 +515,24 @@ function fuse(
     candidates.set(node.id, { ...existing, ...patch, fused: existing.fused });
   };
 
-  // 키워드 쪽은 후보 풀만큼만 융합에 참여시킨다 (꼬리 노드가 순위를 흔들지 않게).
+  // 키워드 쪽은 후보 풀만큼만, 그리고 **강한 매칭(exact/prefix)만** 순위를 받는다.
+  // 약한(body/substring) 매칭만 있는 노드는 시맨틱으로만 겨뤄, 흔한 토큰 노이즈가
+  // 코사인 최상위 노드를 이중 가산으로 누르는 것을 막는다.
   const keywordPool = clamp(
     limit * SEMANTIC_POOL_FACTOR,
     SEMANTIC_POOL_MIN,
     SEMANTIC_POOL_MAX,
   );
-  keyword.slice(0, keywordPool).forEach(({ node, score }, index) => {
-    bump(node, index + 1, { score });
-  });
+  let kwRank = 0;
+  for (const { node, score } of keyword) {
+    // 점수(=키워드 표시값)는 강·약 무관하게 보존하되, 순위 가산은 강한 노드에만.
+    if (!candidates.has(node.id)) candidates.set(node.id, { node, score, fused: 0 });
+    else candidates.get(node.id)!.score = score;
+    if (strongIds.has(node.id) && kwRank < keywordPool) {
+      kwRank += 1;
+      bump(node, kwRank, { score });
+    }
+  }
   semantic.forEach(({ node, similarity }, index) => {
     bump(node, index + 1, { similarity });
   });

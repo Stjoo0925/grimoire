@@ -28,7 +28,14 @@ import {
   commitStats,
   resolveProject,
 } from "../src/mcp/project";
-import { scoreNode, searchGraph, tokenize } from "../src/mcp/search";
+import {
+  hasStrongKeyword,
+  scoreNode,
+  searchGraph,
+  stripParticle,
+  tokenize,
+  weakMatchWeights,
+} from "../src/mcp/search";
 import {
   listGraphLogins,
   readGraph,
@@ -103,6 +110,52 @@ test("scoreNode: 정확 > 접두 > 부분 > 본문, 차수는 순서를 뒤집�
   assert.equal(scoreNode(problem, tokenize("스트리밍")), 1.5);
   // 걸리는 게 없으면 0
   assert.equal(scoreNode(react, tokenize("전혀없는말")), 0);
+});
+
+test("stripParticle: 명사 뒤 흔한 조사를 뗀다 (원형도 유지)", () => {
+  assert.equal(stripParticle("지식그래프와"), "지식그래프");
+  assert.equal(stripParticle("데이터를"), "데이터");
+  assert.equal(stripParticle("서버로"), "서버");
+  assert.equal(stripParticle("클라이언트에서"), "클라이언트");
+  // 남는 글자가 2자 미만이면 뗴지 않는다
+  assert.equal(stripParticle("가"), null);
+  // 한글로 끝나지 않으면 대상 아님
+  assert.equal(stripParticle("react"), null);
+  // 토큰화가 조사 뗀 형태를 추가로 넣는다
+  assert.ok(tokenize("지식그래프와 노드").map((t) => t.norm).includes("지식그래프"));
+});
+
+test("weakMatchWeights: 흔한 토큰(다수 노드에 약매칭)은 가중치가 낮아진다", () => {
+  const graph = fixtureGraph();
+  // 픽스처엔 흔한 단어가 없어, 여러 노드 label에 든 조각으로 검증
+  const rare = weakMatchWeights(graph, tokenize("전혀없는희귀어"));
+  assert.equal(rare.get("전혀없는희귀어"), 1); // 아무 데도 안 걸림 → 온전한 가중치
+
+  // 인위적으로 흔한 토큰을 만든다: 노드 label 다수에 "공통" 삽입
+  const common: KnowledgeGraph = {
+    ...graph,
+    nodes: graph.nodes.map((n, i) =>
+      i < graph.nodes.length ? { ...n, label: `공통어 ${n.label}` } : n,
+    ),
+  };
+  const w = weakMatchWeights(common, tokenize("공통어"));
+  assert.ok((w.get("공통어") ?? 1) < 0.5); // 대부분 노드에 걸리므로 강하게 억제
+});
+
+test("hasStrongKeyword: exact는 항상 강함, 흔한 토큰의 prefix는 약함으로 강등", () => {
+  const graph = fixtureGraph();
+  const react = find(graph, techId("react"))!;
+  // exact 매칭 → 강함
+  assert.equal(hasStrongKeyword(react, tokenize("react")), true);
+  // prefix인데 그 토큰 가중치가 낮으면(흔한 단어) 강함이 아니다
+  const weights = new Map([["react", 0.2]]);
+  const reactQuery = find(graph, techId("react-query"))!;
+  assert.equal(hasStrongKeyword(reactQuery, tokenize("react"), weights), false);
+  // 가중치가 높으면(희귀) prefix도 강함
+  assert.equal(
+    hasStrongKeyword(reactQuery, tokenize("react"), new Map([["react", 1]])),
+    true,
+  );
 });
 
 test("검색: 시드는 점수순, 엣지는 끝점 라벨과 함께 묶여 나온다", async () => {

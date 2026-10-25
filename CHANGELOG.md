@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/Stjoo0925/grimoire/compare/v0.4.0...v0.5.0) (2026-10-25)
+
+
+### 기능
+
+* **search:** 같은 변경의 커밋 접기, 도구 설명 영어화와 show_commit 여러 커밋 조회 ([#9](https://github.com/Stjoo0925/grimoire/issues/9)) ([438b97b](https://github.com/Stjoo0925/grimoire/commit/438b97ba5cd5fc1b6d213d8025d797ec0fcf4358))
+
 ## [0.4.0](https://github.com/Stjoo0925/grimoire/compare/v0.3.0...v0.4.0) (2026-10-25)
 
 

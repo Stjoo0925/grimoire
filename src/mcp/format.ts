@@ -14,6 +14,18 @@ import type { SearchHit, SearchResult } from "../core/search";
 const SHA = 10;
 const FILES_PER_HIT = 4;
 const SNIPPET_CHARS = 140;
+/**
+ * detail=summary에서 자세히 싣는 상위 커밋 수와 그 크기. 이력 질문("어떻게 풀었지?")에서 AI가 diff를 보러
+ * show_commit을 한 번 더 부르던 것을, 본문 전체와 바뀐 선언으로 대신한다.
+ */
+const SUMMARY_COMMITS = 3;
+const SUMMARY_BODY_CHARS = 600;
+const SUMMARY_FILES = 8;
+const SUMMARY_TOUCHED_FILES = 3;
+const SUMMARY_NAMES = 6;
+
+/** 검색 응답의 자세함 — index: 목록만, summary(기본): 상위 커밋에 본문·바뀐 선언, full: 1위 커밋 diff까지 */
+export type Detail = "index" | "summary" | "full";
 const FILES_PER_COMMIT = 30;
 
 const day = (iso: string | null) => (iso ? iso.slice(0, 10) : null);
@@ -31,14 +43,15 @@ function linkPrefix(url: string | null, sha: string): string | null {
   return url && url.endsWith(sha) ? url.slice(0, -sha.length) : null;
 }
 
-function snippet(text: string): string | undefined {
+function snippet(text: string, max = SNIPPET_CHARS): string | undefined {
   const cleaned = text.replace(/\s+/g, " ").trim();
   if (!cleaned) return undefined;
-  return cleaned.length > SNIPPET_CHARS ? cleaned.slice(0, SNIPPET_CHARS) + "…" : cleaned;
+  return cleaned.length > max ? cleaned.slice(0, max) + "…" : cleaned;
 }
 
-export function slimSearch(result: SearchResult, me: string[]) {
+export function slimSearch(result: SearchResult, me: string[], detail: Detail = "index") {
   const links: Record<string, string> = {};
+  let commits = 0;
   const hits = result.hits.map((hit: SearchHit) => {
     if (hit.kind === "file") {
       // 현재 코드의 위치: 파일 + 심볼:줄. 마지막으로 건드린 커밋도 붙여 이력과 잇는다
@@ -55,7 +68,24 @@ export function slimSearch(result: SearchResult, me: string[]) {
     }
     const prefix = linkPrefix(hit.url, hit.ref);
     if (hit.repo && prefix) links[hit.repo] = prefix;
-    const more = hit.filesChanged !== null && hit.filesChanged > FILES_PER_HIT ? hit.filesChanged - FILES_PER_HIT : 0;
+    const rich = detail !== "index" && commits++ < SUMMARY_COMMITS;
+    const shown = rich ? SUMMARY_FILES : FILES_PER_HIT;
+    const more = hit.filesChanged !== null && hit.filesChanged > shown ? hit.filesChanged - shown : 0;
+    if (rich) {
+      const changed = (hit.touched ?? [])
+        .slice(0, SUMMARY_TOUCHED_FILES)
+        .map((item) => `${item.file.split("/").pop()}: ${item.names.slice(0, SUMMARY_NAMES).join(", ")}`);
+      return {
+        repo: hit.repo,
+        sha: hit.ref.slice(0, SHA),
+        date: day(hit.date),
+        by: who(hit.author, me),
+        title: hit.title,
+        files: [...hit.files.slice(0, shown), ...(more > 0 ? [`+${more}`] : [])],
+        ...(changed.length > 0 ? { changed } : {}),
+        body: snippet(hit.body || hit.snippet, SUMMARY_BODY_CHARS),
+      };
+    }
     return {
       repo: hit.repo,
       sha: hit.ref.slice(0, SHA),
@@ -74,7 +104,7 @@ export function slimSearch(result: SearchResult, me: string[]) {
 
 export function slimCommit(detail: CommitDetail, me: string[]) {
   const files = detail.files.slice(0, FILES_PER_COMMIT).map((file) =>
-    file.insertions === null ? `${file.path} (binary)` : `${file.path} +${file.insertions} -${file.deletions}`,
+    file.binary ? `${file.path} (binary)` : file.insertions === null ? file.path : `${file.path} +${file.insertions} -${file.deletions}`,
   );
   if (detail.files.length > FILES_PER_COMMIT) files.push(`… ${detail.files.length - FILES_PER_COMMIT}개 더`);
   const shownLines = detail.patch ? detail.patch.split("\n").length : 0;

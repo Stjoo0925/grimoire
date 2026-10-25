@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { extractSymbols, headerComment, isIndexable, splitIdentifier } from "../src/core/code";
+import { DiffParser } from "../src/core/diffs";
 import { addRepo, syncRepo } from "../src/core/indexer";
 import { buildMatchExpression, search } from "../src/core/search";
 import { addCommit, git, makeRepo, memoryDb } from "./helpers";
@@ -92,4 +93,39 @@ test("현재 코드 색인: 파일·심볼:줄로 핀포인트, 바뀐 파일만
   git(dir, ["commit", "-q", "-m", "chore: 제거"], { GIT_AUTHOR_NAME: "me", GIT_AUTHOR_EMAIL: "me@example.com", GIT_COMMITTER_NAME: "me", GIT_COMMITTER_EMAIL: "me@example.com" });
   await syncRepo(db, repo);
   assert.equal((await search(db, "rate limit", { kind: "file" })).hits.length, 0);
+});
+
+test("DiffParser: 바뀐 줄·hunk 머리의 선언 이름을 커밋별로, 소스 파일만", () => {
+  const parser = new DiffParser();
+  const lines = [
+    "\x1eaaa",
+    "",
+    "diff --git a/src/rate-limit.ts b/src/rate-limit.ts",
+    "--- a/src/rate-limit.ts",
+    "+++ b/src/rate-limit.ts",
+    "@@ -10,0 +11,3 @@ export function requireRateLimit(req) {",
+    "+export function resetBucket(key: string) {",
+    "++++ not a header, just content",
+    "-const oldLimiter = () => 1;",
+    "diff --git a/package-lock.json b/package-lock.json",
+    "--- a/package-lock.json",
+    "+++ b/package-lock.json",
+    "@@ -1 +1 @@",
+    "+function fromLockfile() {}",
+    "\x1ebbb",
+    "",
+    "diff --git a/gone.py b/gone.py",
+    "--- a/gone.py",
+    "+++ /dev/null",
+    "@@ -1,2 +0,0 @@",
+    "-def legacy_handler():",
+  ];
+  for (const line of lines) parser.line(line);
+  parser.flush();
+  assert.deepEqual(
+    parser.done.map((item) => item.symbols),
+    [[{ file: "src/rate-limit.ts", names: ["requireRateLimit", "resetBucket", "oldLimiter"] }], [{ file: "gone.py", names: ["legacy_handler"] }]],
+  );
+  assert.match(parser.done[0].words, /\breset\b.*\bbucket\b/);
+  assert.doesNotMatch(parser.done[0].words, /lockfile/);
 });

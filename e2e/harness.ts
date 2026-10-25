@@ -191,12 +191,16 @@ async function runScenario(spec: ServerSpec): Promise<StepResult[]> {
 
   await step("응답 크기 예산 (토큰 = 비용)", async () => {
     // 응답은 대화 컨텍스트에 쌓여 매 턴 다시 읽힌다. 형식이 다시 부풀면 여기서 잡는다.
-    const search = await call(live(), "search_memory", { query: "토큰 동시성 장바구니 시작" });
-    const perHit = search.text.length / Math.max(1, search.json.hits.length);
-    expect(perHit < 260, `검색 결과 건당 ${Math.round(perHit)}자 — 예산 260자`);
+    const query = "토큰 동시성 장바구니 시작";
+    const index = await call(live(), "search_memory", { query, detail: "index" });
+    const perHit = index.text.length / Math.max(1, index.json.hits.length);
+    expect(perHit < 260, `검색 결과(index) 건당 ${Math.round(perHit)}자 — 예산 260자`);
+    // 기본(summary)은 상위 커밋 3개에 본문·바뀐 함수를 더 싣는다 — show_commit 한 번(diff 120줄)보다 작아야 남는 장사다
+    const summary = await call(live(), "search_memory", { query });
+    expect(summary.text.length < 3000, `검색 응답(summary) ${summary.text.length}자 — 예산 3000자`);
     const tools = JSON.stringify((await live().client.listTools()).tools);
     expect(tools.length < 2600, `도구 정의 ${tools.length}자 — 예산 2600자`);
-    return `검색 건당 ${Math.round(perHit)}자 · 도구 정의 ${tools.length}자`;
+    return `index 건당 ${Math.round(perHit)}자 · summary ${summary.text.length}자 · 도구 정의 ${tools.length}자`;
   });
 
   await step("search_memory: author=me 필터", async () => {

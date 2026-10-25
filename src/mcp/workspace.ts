@@ -17,6 +17,7 @@ import path from "node:path";
 import type { Env } from "../core/config";
 import type { DB } from "../core/db";
 import { repoRoot } from "../core/git";
+import { indexCommitCode } from "../core/diffs";
 import { addRepo, syncRepo, type RepoRow } from "../core/indexer";
 
 export interface Workspace {
@@ -29,7 +30,15 @@ export interface Workspace {
    * 꺼졌거나 해당 없으면 null. 이미 등록된 레포면 곧바로 풀리고 동기화는 뒤에서 계속된다.
    */
   begin(): Promise<RepoRow | null>;
+  /**
+   * 작업 레포를 다시 동기화한다 — 방금 만든 커밋·고친 파일도 검색되게. 바뀐 게 없으면 git 몇 번 부르고 끝난다.
+   * 직전 동기화 뒤 REFRESH_INTERVAL_MS가 안 지났으면 건너뛰고, maxWaitMs 넘게 걸리면 기다리지 않는다(뒤에서 계속).
+   */
+  refresh?(repo: RepoRow, maxWaitMs: number): Promise<void>;
 }
+
+/** 작업 레포 재동기화 간격 — 검색마다 git을 부르지 않게 */
+export const REFRESH_INTERVAL_MS = 15_000;
 
 function realpathOrSelf(dir: string): string {
   try {
@@ -66,11 +75,17 @@ export async function resolveWorkspaceRoot(cwd: string, env: Env = process.env):
 export function startWorkspace(db: DB, root: string | null, env: Env, log: (line: string) => void): Workspace {
   const disabled = env.GRIMOIRE_AUTO_ADD === "0";
   let started: Promise<RepoRow | null> | null = null;
+  let lastSync = 0;
 
-  const sync = (repo: RepoRow) =>
-    syncRepo(db, repo).then(
+  const sync = (repo: RepoRow) => {
+    lastSync = Date.now();
+    return syncRepo(db, repo).then(
       (result) => {
         if (result.added > 0 || result.files > 0) log(`${repo.name}: 새 커밋 ${result.added}개, 바뀐 파일 ${result.files}개`);
+        // 새 커밋의 diff 식별자는 뒤에서 채운다 — 검색은 기다리지 않는다
+        if (result.added > 0) {
+          indexCommitCode(db, repo).catch((error) => log(`${repo.name} diff 색인 실패 — ${error instanceof Error ? error.message : error}`));
+        }
         return repo;
       },
       (error) => {
@@ -78,6 +93,7 @@ export function startWorkspace(db: DB, root: string | null, env: Env, log: (line
         return repo;
       },
     );
+  };
 
   const run = (): Promise<RepoRow | null> => {
     if (!root || disabled) return Promise.resolve(null);
@@ -102,6 +118,18 @@ export function startWorkspace(db: DB, root: string | null, env: Env, log: (line
     root,
     disabled,
     begin: () => (started ??= run()),
+    refresh: async (repo, maxWaitMs) => {
+      if (disabled || repo.path !== root || Date.now() - lastSync < REFRESH_INTERVAL_MS) return;
+      let timer: NodeJS.Timeout | undefined;
+      const timeout = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, maxWaitMs);
+      });
+      try {
+        await Promise.race([sync(repo).then(() => undefined), timeout]);
+      } finally {
+        clearTimeout(timer);
+      }
+    },
   };
 }
 

@@ -127,6 +127,25 @@ const MIGRATIONS: string[] = [
   `
   DROP TABLE IF EXISTS embeddings;
   `,
+  // 4: 증분 동기화 기준점 — 지난번 ref 끝 커밋들(JSON 배열)과 HEAD 트리. 그대로면 git을 거의 부르지 않는다.
+  //    commits.insertions·deletions는 이제 색인 때 세지 않는다(0). 줄 수는 show_commit 때 git에서 바로 센다.
+  `
+  ALTER TABLE repos ADD COLUMN tips TEXT;
+  ALTER TABLE repos ADD COLUMN head_tree TEXT;
+  `,
+  // 5: 커밋 diff의 식별자 색인(diffs.ts) — FTS에 code 컬럼을 더하고(가상 테이블이라 새로 만들어 옮긴다),
+  //    커밋마다 diff를 읽었는지(code_state)와 바뀐 선언(symbols, JSON)을 둔다. 기존 커밋은 뒤에서 채워진다.
+  `
+  CREATE VIRTUAL TABLE docs_fts_next USING fts5(
+    title, body, paths, code,
+    tokenize = 'unicode61 remove_diacritics 2'
+  );
+  INSERT INTO docs_fts_next (rowid, title, body, paths, code) SELECT rowid, title, body, paths, '' FROM docs_fts;
+  DROP TABLE docs_fts;
+  ALTER TABLE docs_fts_next RENAME TO docs_fts;
+  ALTER TABLE commits ADD COLUMN code_state INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE commits ADD COLUMN symbols TEXT;
+  `,
 ];
 
 export function openDb(file: string): DB {
@@ -202,7 +221,7 @@ export function upsertDoc(
     );
   }
   db.prepare(
-    "INSERT INTO docs_fts (rowid, title, body, paths) VALUES (?, ?, ?, ?)",
+    "INSERT INTO docs_fts (rowid, title, body, paths, code) VALUES (?, ?, ?, ?, '')",
   ).run(id, doc.title, doc.body, doc.paths);
   return id;
 }

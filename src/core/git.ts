@@ -93,18 +93,62 @@ export async function listShas(dir: string): Promise<string[]> {
   }
 }
 
-/** 주어진 sha들의 메타 + 파일별 변경 줄 수 */
+/**
+ * 브랜치·태그·원격 브랜치의 끝 커밋들 (정렬). 다음 동기화의 기준점으로 저장해 두고,
+ * 그 뒤에 생긴 커밋만 `listNewShas`로 받는다.
+ */
+export async function refTips(dir: string): Promise<string[]> {
+  try {
+    const out = await runGit(dir, ["for-each-ref", "--format=%(objectname)", "refs/heads", "refs/tags", "refs/remotes"]);
+    return [...new Set(out.split("\n").filter(Boolean))].sort();
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 지난번 끝 커밋들(oldTips)에서 닿지 않는 새 커밋만. 전체 sha 목록을 매번 받아 DB와 비교하지 않아도 된다.
+ * oldTips 중 하나라도 사라졌으면(gc된 rebase 이전 커밋 등) git이 실패한다 — 호출부가 전체 목록으로 돌아간다.
+ */
+export async function listNewShas(dir: string, oldTips: string[]): Promise<string[]> {
+  const out = await runGit(
+    dir,
+    ["rev-list", "--no-merges", "--branches", "--tags", "--remotes", "--stdin"],
+    ["--not", ...oldTips].join("\n") + "\n",
+  );
+  return out.split("\n").filter(Boolean);
+}
+
+/** HEAD의 트리 sha — 그대로면 현재 코드 색인을 다시 볼 필요가 없다. 커밋이 없으면 null */
+export async function headTree(dir: string): Promise<string | null> {
+  try {
+    return (await runGit(dir, ["rev-parse", "--verify", "--quiet", "HEAD^{tree}"])).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 주어진 sha들의 메타 + 변경 파일 경로.
+ * 줄 수(`--numstat`)는 blob 내용을 diff해야 해서 경로만 읽는 것보다 열 배쯤 느리다 — 색인에는 경로만 쓰고,
+ * 줄 수는 `show_commit` 때 그 커밋만 `lineCounts`로 센다.
+ */
 export async function readCommits(dir: string, shas: string[]): Promise<GitCommit[]> {
   if (shas.length === 0) return [];
   const out = await runGit(
     dir,
-    ["log", "--no-walk=unsorted", "--stdin", "--numstat", `--format=${LOG_FORMAT}`],
+    ["log", "--no-walk=unsorted", "--stdin", "--name-status", `--format=${LOG_FORMAT}`],
     shas.join("\n") + "\n",
   );
   return parseLog(out);
 }
 
-/** `LOG_FORMAT` + `--numstat` 출력 → 커밋 목록 */
+/** 커밋 하나의 파일별 추가·삭제 줄 수 (바이너리는 null) */
+export async function lineCounts(dir: string, sha: string): Promise<GitFileChange[]> {
+  return parseNumstat(await runGit(dir, ["show", "--numstat", "--format=", sha]));
+}
+
+/** `LOG_FORMAT` + `--name-status`(또는 `--numstat`) 출력 → 커밋 목록 */
 export function parseLog(out: string): GitCommit[] {
   const commits: GitCommit[] = [];
   for (const record of out.split(RS)) {
@@ -120,7 +164,7 @@ export function parseLog(out: string): GitCommit[] {
       authoredAt,
       subject,
       body,
-      files: parseNumstat(numstat),
+      files: parseChangedFiles(numstat),
     });
   }
   return commits;
@@ -133,13 +177,39 @@ export function splitMessage(message: string): { subject: string; body: string }
   return { subject, body };
 }
 
+/**
+ * 커밋 레코드 뒤의 파일 목록. `--name-status`("M\tpath", "R100\told\tnew")는 줄 수 없이 경로만,
+ * `--numstat`("3\t1\tpath")은 줄 수까지 준다. 둘 다 받아들인다.
+ */
+export function parseChangedFiles(text: string): GitFileChange[] {
+  const files: GitFileChange[] = [];
+  for (const line of text.split("\n")) {
+    const trimmed = line.replace(/\r$/, "");
+    if (!trimmed.trim()) continue;
+    const status = /^[ACDMRTUXB]\d*\t(.+)$/.exec(trimmed);
+    if (status) {
+      const fields = status[1].split("\t");
+      files.push({ path: unquotePath(fields[fields.length - 1]), insertions: null, deletions: null });
+      continue;
+    }
+    files.push(...parseNumstat(trimmed));
+  }
+  return files;
+}
+
+/** git이 따옴표로 감싼 경로("a\"b.ts") → 원래 경로. core.quotepath=off라 한글은 그대로 오고 제어 문자만 이스케이프된다. */
+export function unquotePath(raw: string): string {
+  if (!(raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"'))) return raw;
+  return raw.slice(1, -1).replace(/\\(["\\tnr])/g, (_, ch: string) => ({ t: "\t", n: "\n", r: "\r" })[ch] ?? ch);
+}
+
 export function parseNumstat(text: string): GitFileChange[] {
   const files: GitFileChange[] = [];
   for (const line of text.split("\n")) {
     const match = /^(\d+|-)\t(\d+|-)\t(.+)$/.exec(line.trim());
     if (!match) continue;
     files.push({
-      path: renamedTarget(match[3]),
+      path: unquotePath(renamedTarget(match[3])),
       insertions: match[1] === "-" ? null : Number(match[1]),
       deletions: match[2] === "-" ? null : Number(match[2]),
     });

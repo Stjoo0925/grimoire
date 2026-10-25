@@ -22,6 +22,7 @@ import { parseArgs } from "node:util";
 import { dbPath } from "./core/config";
 import { openDb, type DB } from "./core/db";
 import { myEmails, resolveAuthors } from "./core/identity";
+import { indexCommitCode } from "./core/diffs";
 import { addRepo, discoverRepos, findRepo, listRepos, removeRepo, syncRepo, type RepoRow } from "./core/indexer";
 import { addNote } from "./core/notes";
 import { commitDetail, repoOverview, repoSummaries } from "./core/overview";
@@ -129,7 +130,7 @@ async function main(argv: string[]): Promise<number> {
         }
         print(`${detail.repo} ${detail.sha}${detail.url ? `\n${detail.url}` : ""}`);
         print(`${detail.author}  ${detail.date}\n\n    ${detail.subject}${detail.body ? `\n\n    ${detail.body.split("\n").join("\n    ")}` : ""}\n`);
-        for (const file of detail.files) print(`  ${file.path}  +${file.insertions ?? "-"} -${file.deletions ?? "-"}`);
+        for (const file of detail.files) print(file.binary ? `  ${file.path}  (binary)` : file.insertions === null ? `  ${file.path}` : `  ${file.path}  +${file.insertions} -${file.deletions}`);
         print("");
         print(detail.patch ?? detail.patchNote ?? "");
         if (detail.patchTruncated) {
@@ -230,7 +231,9 @@ async function cmdSync(db: DB, repos: RepoRow[]): Promise<number> {
   for (const repo of repos) {
     try {
       const result = await syncRepo(db, repo);
-      print(`✓ ${result.repo}: 새 커밋 ${result.added} / 전체 ${result.total}, 기술 ${result.tech}`);
+      // diff 식별자는 메타 색인 뒤에 채운다 (MCP 서버는 같은 일을 뒤에서 한다)
+      const code = await indexCommitCode(db, repo);
+      print(`✓ ${result.repo}: 새 커밋 ${result.added} / 전체 ${result.total}, 기술 ${result.tech}${code > 0 ? `, diff 색인 ${code}` : ""}`);
     } catch (error) {
       failed++;
       console.error(`✗ ${repo.name}: ${error instanceof Error ? error.message : error}`);

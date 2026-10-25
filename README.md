@@ -1,5 +1,7 @@
 # Grimoire
 
+[![CI](https://github.com/Stjoo0925/grimoire/actions/workflows/ci.yml/badge.svg)](https://github.com/Stjoo0925/grimoire/actions/workflows/ci.yml) [![npm](https://img.shields.io/npm/v/@stjoo0925/grimoire)](https://www.npmjs.com/package/@stjoo0925/grimoire)
+
 **English** | [한국어](./README.ko.md)
 
 > A local dev memory that answers "How did I solve this before?" and "Where is that code?" **with evidence**.
@@ -232,14 +234,20 @@ npm run bench -- --questions bench/questions.local.json --modes grimoire --only 
 ### Cutting a release
 
 The update check looks at the latest GitHub release, and `grimoire update` either installs that version from npm (npm installs) or fast-forwards to that tag (clones).
-So **publish to npm and cut the GitHub release with the same version**, and tag a commit on `main`. Publish to npm first, then create the release, so nobody is told about a version they can't install yet.
+So **npm and the GitHub release must share a version**, the tag must sit on a commit on `main`, and npm must be published before the release is created, so nobody is told about a version they can't install yet.
+The [release workflow](.github/workflows/release.yml) enforces this order. All you do is push a tag.
 
 ```bash
-npm version minor                           # bump package.json + commit + v0.3.0 tag (the MCP server version is read from it)
-git push origin main --follow-tags
-npm publish                                 # prepublishOnly rebuilds dist from scratch and runs the tests
-gh release create v0.3.0 --generate-notes   # note anything users need to do
+npm version minor                  # bump package.json + commit + v0.3.0 tag (the MCP server version is read from it)
+git push origin main --follow-tags # → Release workflow: check version and main → tests and e2e → npm publish → GitHub release
 ```
+
+Release notes are generated. If users need to do something, edit the notes on GitHub after the release is created.
+
+**One-time setup — npm Trusted Publishing.** The workflow publishes over OIDC without a token (works with a 2FA account and adds provenance).
+On npmjs.com → `@stjoo0925/grimoire` → Settings → Trusted Publisher → GitHub Actions, register `Stjoo0925` / `grimoire` / `release.yml`.
+
+The [CI workflow](.github/workflows/ci.yml) runs typecheck, tests, the end-to-end MCP harness and a package-contents check on Ubuntu (node 20, 22, 24) and macOS (node 22) for every push to main and every PR.
 
 - The update check calls the GitHub API without auth, so **the repo must be public** for other users to see new versions.
 - If you change the DB schema, only append a step to `MIGRATIONS` in `src/core/db.ts`. Editing an existing step breaks existing users' DBs.

@@ -1,5 +1,7 @@
 # Grimoire
 
+[![CI](https://github.com/Stjoo0925/grimoire/actions/workflows/ci.yml/badge.svg)](https://github.com/Stjoo0925/grimoire/actions/workflows/ci.yml) [![npm](https://img.shields.io/npm/v/@stjoo0925/grimoire)](https://www.npmjs.com/package/@stjoo0925/grimoire)
+
 [English](./README.md) | **한국어**
 
 > "내가 예전에 이걸 어떻게 풀었더라?" "그 코드 어디 있지?"에 **근거와 함께** 답하는 로컬 개발 메모리.
@@ -232,14 +234,20 @@ npm run bench -- --questions bench/questions.local.json --modes grimoire --only 
 ### 릴리스 내기
 
 업데이트 확인은 GitHub의 latest 릴리스를 보고, `grimoire update`는 그 버전을 npm에서 받거나(npm 설치본) 그 태그로 fast-forward합니다(clone).
-그래서 **npm 배포와 GitHub 릴리스는 같은 버전으로**, 태그는 `main` 위의 커밋에 답니다. npm에 먼저 올린 뒤 릴리스를 만드세요(릴리스를 본 사용자가 아직 없는 버전을 받지 않게).
+그래서 **npm 배포와 GitHub 릴리스는 같은 버전으로**, 태그는 `main` 위의 커밋에 달고, npm에 먼저 올린 뒤 릴리스를 만들어야 합니다(릴리스를 본 사용자가 아직 없는 버전을 받지 않게).
+이 순서는 [릴리스 워크플로](.github/workflows/release.yml)가 지킵니다. 할 일은 태그를 push하는 것뿐입니다.
 
 ```bash
-npm version minor                           # package.json 버전 올리기 + 커밋 + v0.3.0 태그 (MCP 서버 버전도 여기서 읽음)
-git push origin main --follow-tags
-npm publish                                 # prepublishOnly가 dist를 새로 빌드하고 테스트를 돌림
-gh release create v0.3.0 --generate-notes   # 사용자에게 할 일이 있으면 노트에 적기
+npm version minor                  # package.json 버전 올리기 + 커밋 + v0.3.0 태그 (MCP 서버 버전도 여기서 읽음)
+git push origin main --follow-tags # → Release 워크플로: 버전·main 확인 → 테스트·e2e → npm publish → GitHub 릴리스
 ```
+
+릴리스 노트는 자동 생성됩니다. 사용자에게 할 일이 있으면 릴리스가 만들어진 뒤 GitHub에서 노트를 고치세요.
+
+**처음 한 번 — npm Trusted Publishing 등록.** 워크플로는 토큰 없이 OIDC로 배포합니다(2FA 계정에서도 동작하고 provenance가 붙음).
+npmjs.com → `@stjoo0925/grimoire` → Settings → Trusted Publisher → GitHub Actions에 `Stjoo0925` / `grimoire` / `release.yml`을 등록하세요.
+
+[CI 워크플로](.github/workflows/ci.yml)는 main push와 PR마다 Ubuntu(node 20·22·24)와 macOS(node 22)에서 타입 검사·테스트·MCP 종단 하네스·패키지 내용을 확인합니다.
 
 - 업데이트 확인은 로그인 없이 GitHub API를 부르므로, **레포가 public이어야** 다른 사용자에게 새 버전이 보입니다.
 - DB 스키마를 바꿨다면 `src/core/db.ts`의 `MIGRATIONS`에 단계를 덧붙이기만 하세요. 이미 있는 단계를 고치면 기존 사용자 DB와 어긋납니다.

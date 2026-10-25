@@ -1,18 +1,27 @@
-# v* 태그를 push하면 npm에 배포하고 GitHub 릴리스를 만든다.
+# 자동 버저닝과 배포 — main push마다 돈다.
 #
-# 순서가 중요하다: 업데이트 확인은 GitHub 릴리스를 보고 `grimoire update`는 그 버전을 npm에서 받으므로,
-# npm에 먼저 올라간 뒤에야 릴리스를 만든다(알림을 받았는데 받을 버전이 없는 일이 없게).
+#   1. publish     package.json 버전의 태그가 아직 없으면(= 릴리스 PR이 방금 머지됨)
+#                  테스트 → 태그 → npm publish → GitHub 릴리스 순서로 내보낸다.
+#   2. release-pr  release-please가 지난 릴리스 이후의 Conventional Commits를 모아
+#                  "chore: release vX.Y.Z" PR(버전·CHANGELOG)을 열어 두고 계속 갱신한다.
+#                  0.x 동안은 feat → minor, fix → patch, 깨지는 변경(!)도 minor.
 #
-# npm 배포는 Trusted Publishing(OIDC)으로 한다 — 토큰 시크릿이 없고, 2FA 계정에서도 동작하며, provenance가 붙는다.
-# 처음 한 번 npmjs.com의 패키지 Settings → Trusted Publisher에 이 레포와 release.yml을 등록해야 한다.
+# 순서가 중요하다: 업데이트 확인은 GitHub 릴리스를 보고 `grimoire update`는 그 버전을 npm에서 받거나
+# 그 태그로 fast-forward한다. 그래서 태그와 npm이 먼저, GitHub 릴리스는 마지막이다.
+# release-please는 PR만 관리하고(skip-github-release) 태그·릴리스는 여기서 직접 만든다.
+#
+# npm 배포는 Trusted Publishing(OIDC) — 토큰 시크릿이 없고 2FA 계정에서도 동작하며 provenance가 붙는다.
+# npmjs.com의 패키지 Settings → Trusted Publisher에 이 레포와 이 파일(release.yml)이 등록돼 있어야 한다.
 name: Release
 
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
-  contents: write # gh release create
+  contents: write # 태그·릴리스, 릴리스 PR 브랜치
+  pull-requests: write # 릴리스 PR
   id-token: write # npm Trusted Publishing
 
 concurrency:
@@ -20,7 +29,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  publish:
     runs-on: ubuntu-latest
     env:
       GRIMOIRE_UPDATE_CHECK: "0"
@@ -28,36 +37,47 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+
+      - name: 새 버전인지
+        id: version
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
+            echo "v$version 태그가 이미 있습니다 — 배포할 것이 없습니다"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "v$version 을 배포합니다"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/setup-node@v5
+        if: steps.version.outputs.release == 'true'
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
           cache: npm
       # Trusted Publishing은 npm 11.5.1 이상이 필요하다
-      - run: npm install -g npm@latest
+      - if: steps.version.outputs.release == 'true'
+        run: npm install -g npm@latest
+      - if: steps.version.outputs.release == 'true'
+        run: npm ci
+      - if: steps.version.outputs.release == 'true'
+        run: npm run e2e
 
-      - name: 태그와 package.json 버전이 같은지
+      - name: 태그
+        if: steps.version.outputs.release == 'true'
+        env:
+          TAG: v${{ steps.version.outputs.version }}
         run: |
-          version="v$(node -p "require('./package.json').version")"
-          if [ "$version" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::태그 $GITHUB_REF_NAME 와 package.json $version 이 다릅니다"
-            exit 1
-          fi
-      - name: 태그가 main 위에 있는지 (clone 사용자의 update는 main을 fast-forward한다)
-        run: |
-          git fetch origin main
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::$GITHUB_REF_NAME 이 main에 없는 커밋을 가리킵니다"
-            exit 1
-          fi
-
-      - run: npm ci
-      - run: npm run e2e
+          git tag "$TAG" "$GITHUB_SHA"
+          git push origin "$TAG"
 
       - name: npm 배포 (prepublishOnly가 dist를 새로 빌드하고 테스트를 돌린다)
+        if: steps.version.outputs.release == 'true'
         run: |
           name="$(node -p "require('./package.json').name")"
-          version="$(node -p "require('./package.json').version")"
+          version="${{ steps.version.outputs.version }}"
           if npm view "$name@$version" version >/dev/null 2>&1; then
             echo "$name@$version 은 이미 npm에 있습니다 — 건너뜁니다 (재실행)"
           else
@@ -65,11 +85,33 @@ jobs:
           fi
 
       - name: GitHub 릴리스
+        if: steps.version.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ steps.version.outputs.version }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "릴리스 $TAG 이 이미 있습니다 — 건너뜁니다"
+          else
+            node .github/scripts/release-notes.mjs "${{ steps.version.outputs.version }}" > "$RUNNER_TEMP/notes.md"
+            gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
+          fi
+
+      - name: 릴리스 PR 표시 정리 (release-please가 다음 PR을 열 수 있게)
+        if: steps.version.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            echo "릴리스 $GITHUB_REF_NAME 이 이미 있습니다 — 건너뜁니다"
-          else
-            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
-          fi
+          gh label create "autorelease: tagged" --color EDEDED --force >/dev/null
+          for pr in $(gh pr list --state merged --label "autorelease: pending" --json number -q '.[].number'); do
+            gh pr edit "$pr" --remove-label "autorelease: pending" --add-label "autorelease: tagged"
+          done
+
+  release-pr:
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

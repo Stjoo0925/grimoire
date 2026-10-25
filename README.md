@@ -243,19 +243,21 @@ npm run bench -- --questions bench/questions.local.json --modes grimoire --only 
 
 ### Cutting a release
 
-The update check looks at the latest GitHub release, and `grimoire update` either installs that version from npm (npm installs) or fast-forwards to that tag (clones).
-So **npm and the GitHub release must share a version**, the tag must sit on a commit on `main`, and npm must be published before the release is created, so nobody is told about a version they can't install yet.
-The [release workflow](.github/workflows/release.yml) enforces this order. All you do is push a tag.
+Versioning and publishing are handled by the [release workflow](.github/workflows/release.yml). **All you do is merge the release PR.**
 
-```bash
-npm version minor                  # bump package.json + commit + v0.3.0 tag (the MCP server version is read from it)
-git push origin main --follow-tags # → Release workflow: check version and main → tests and e2e → npm publish → GitHub release
-```
+1. Write commit messages as [Conventional Commits](https://www.conventionalcommits.org/) (`feat: …`, `fix(search): …`, `feat!: …` for breaking changes).
+2. On every push to main, [release-please](https://github.com/googleapis/release-please) collects the commits since the last release and keeps a `chore: release vX.Y.Z` PR open and up to date. That PR bumps the `package.json` version and `CHANGELOG.md`.
+   - Before 1.0: `feat` → minor, `fix` and `perf` → patch, breaking changes → minor as well. Only `docs`, `chore`, `ci`, `test` or `refactor` commits produce no release.
+3. When it's time to ship, merge that PR. It then goes out in this order: tests and e2e → `vX.Y.Z` tag → npm publish → GitHub release (notes taken from the CHANGELOG).
 
-Release notes are generated. If users need to do something, edit the notes on GitHub after the release is created.
+The update check looks at GitHub releases, and `grimoire update` installs that version from npm or fast-forwards to the tag, so the release is created last, once the tag and npm are ready.
+If something fails midway, re-run it from Actions. Steps that already finished (tag, npm, release) are skipped.
 
-**One-time setup — npm Trusted Publishing.** The workflow publishes over OIDC without a token (works with a 2FA account and adds provenance).
-On npmjs.com → `@stjoo0925/grimoire` → Settings → Trusted Publisher → GitHub Actions, register `Stjoo0925` / `grimoire` / `release.yml`.
+**One-time setup**
+- On npmjs.com → `@stjoo0925/grimoire` → Settings → Trusted Publisher → GitHub Actions, register `Stjoo0925` / `grimoire` / `release.yml`. Publishing then uses OIDC without a token (works with a 2FA account) and adds provenance.
+- On GitHub → Settings → Actions → General → Workflow permissions, turn on **Allow GitHub Actions to create and approve pull requests**. Without it release-please can't open the release PR.
+
+The release PR is created with the Actions token, so CI doesn't run on that PR. CI runs on main after the merge, and the release workflow runs the tests and e2e again before publishing.
 
 The [CI workflow](.github/workflows/ci.yml) runs typecheck, tests, the end-to-end MCP harness and a package-contents check on Ubuntu (node 20, 22, 24) and macOS (node 22) for every push to main and every PR.
 

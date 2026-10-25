@@ -1,0 +1,24 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "packages": {
+    ".": {
+      "release-type": "node",
+      "package-name": "@stjoo0925/grimoire",
+      "include-component-in-tag": false,
+      "bump-minor-pre-major": true,
+      "skip-github-release": true,
+      "pull-request-title-pattern": "chore: release v${version}",
+      "changelog-sections": [
+        { "type": "feat", "section": "기능" },
+        { "type": "fix", "section": "버그 수정" },
+        { "type": "perf", "section": "성능" },
+        { "type": "revert", "section": "되돌림" },
+        { "type": "docs", "section": "문서", "hidden": true },
+        { "type": "refactor", "section": "리팩터링", "hidden": true },
+        { "type": "test", "section": "테스트", "hidden": true },
+        { "type": "ci", "section": "CI", "hidden": true },
+        { "type": "chore", "section": "기타", "hidden": true }
+      ]
+    }
+  }
+}

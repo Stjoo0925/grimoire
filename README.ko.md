@@ -243,19 +243,21 @@ npm run bench -- --questions bench/questions.local.json --modes grimoire --only 
 
 ### 릴리스 내기
 
-업데이트 확인은 GitHub의 latest 릴리스를 보고, `grimoire update`는 그 버전을 npm에서 받거나(npm 설치본) 그 태그로 fast-forward합니다(clone).
-그래서 **npm 배포와 GitHub 릴리스는 같은 버전으로**, 태그는 `main` 위의 커밋에 달고, npm에 먼저 올린 뒤 릴리스를 만들어야 합니다(릴리스를 본 사용자가 아직 없는 버전을 받지 않게).
-이 순서는 [릴리스 워크플로](.github/workflows/release.yml)가 지킵니다. 할 일은 태그를 push하는 것뿐입니다.
+버전과 배포는 [릴리스 워크플로](.github/workflows/release.yml)가 맡습니다. 사람이 하는 일은 **릴리스 PR을 머지하는 것뿐**입니다.
 
-```bash
-npm version minor                  # package.json 버전 올리기 + 커밋 + v0.3.0 태그 (MCP 서버 버전도 여기서 읽음)
-git push origin main --follow-tags # → Release 워크플로: 버전·main 확인 → 테스트·e2e → npm publish → GitHub 릴리스
-```
+1. 커밋 메시지는 [Conventional Commits](https://www.conventionalcommits.org/ko/)로 씁니다(`feat: …`, `fix(search): …`, 깨지는 변경은 `feat!: …`).
+2. main에 push될 때마다 [release-please](https://github.com/googleapis/release-please)가 지난 릴리스 이후 커밋을 모아 `chore: release vX.Y.Z` PR을 열어 두고 갱신합니다. 이 PR이 `package.json` 버전과 `CHANGELOG.md`를 올립니다.
+   - 1.0 전에는 `feat` → minor, `fix`·`perf` → patch, 깨지는 변경도 minor입니다. `docs`·`chore`·`ci`·`test`·`refactor`만 있으면 릴리스하지 않습니다.
+3. 내보낼 때가 되면 그 PR을 머지합니다. 그러면 테스트·e2e → `vX.Y.Z` 태그 → npm 배포 → GitHub 릴리스(노트는 CHANGELOG에서) 순서로 나갑니다.
 
-릴리스 노트는 자동 생성됩니다. 사용자에게 할 일이 있으면 릴리스가 만들어진 뒤 GitHub에서 노트를 고치세요.
+업데이트 확인은 GitHub 릴리스를 보고 `grimoire update`는 그 버전을 npm에서 받거나 태그로 fast-forward하므로, 릴리스는 태그와 npm이 준비된 뒤에 맨 마지막으로 만듭니다.
+도중에 실패하면 Actions에서 다시 실행하세요. 이미 끝난 단계(태그·npm·릴리스)는 건너뜁니다.
 
-**처음 한 번 — npm Trusted Publishing 등록.** 워크플로는 토큰 없이 OIDC로 배포합니다(2FA 계정에서도 동작하고 provenance가 붙음).
-npmjs.com → `@stjoo0925/grimoire` → Settings → Trusted Publisher → GitHub Actions에 `Stjoo0925` / `grimoire` / `release.yml`을 등록하세요.
+**처음 한 번 해 둘 것**
+- npmjs.com → `@stjoo0925/grimoire` → Settings → Trusted Publisher → GitHub Actions에 `Stjoo0925` / `grimoire` / `release.yml`을 등록합니다. 토큰 없이 OIDC로 배포하고(2FA 계정에서도 동작) provenance가 붙습니다.
+- GitHub → Settings → Actions → General → Workflow permissions에서 **Allow GitHub Actions to create and approve pull requests**를 켭니다. 꺼져 있으면 release-please가 릴리스 PR을 열지 못합니다.
+
+릴리스 PR은 Actions 토큰으로 만들어져 그 PR에서는 CI가 돌지 않습니다. 머지한 뒤 main에서 CI가 돌고, 배포 전에 릴리스 워크플로가 테스트와 e2e를 다시 돌립니다.
 
 [CI 워크플로](.github/workflows/ci.yml)는 main push와 PR마다 Ubuntu(node 20·22·24)와 macOS(node 22)에서 타입 검사·테스트·MCP 종단 하네스·패키지 내용을 확인합니다.
 

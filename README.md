@@ -256,8 +256,13 @@ If something fails midway, re-run it from Actions. Steps that already finished (
 **One-time setup**
 - On npmjs.com → `@stjoo0925/grimoire` → Settings → Trusted Publisher → GitHub Actions, register `Stjoo0925` / `grimoire` / `release.yml`. Publishing then uses OIDC without a token (works with a 2FA account) and adds provenance.
 - On GitHub → Settings → Actions → General → Workflow permissions, turn on **Allow GitHub Actions to create and approve pull requests**. Without it release-please can't open the release PR.
+- Add a token for release-please. CI doesn't run on PRs opened with the default Actions token, so under the main protection below the release PR couldn't be merged.
+  Create one under GitHub → Settings → Developer settings → Fine-grained tokens, limited to this repo with **Contents, Pull requests and Issues: Read and write**, then store it as a secret: `gh secret set RELEASE_PLEASE_TOKEN`
 
-The release PR is created with the Actions token, so CI doesn't run on that PR. CI runs on main after the merge, and the release workflow runs the tests and e2e again before publishing.
+**main is protected.** Direct pushes are blocked; changes go in through PRs only.
+- A PR merges only after the four CI jobs and the PR title check pass. Admins can bypass this from the PR in an emergency.
+- Only squash merges are allowed. **The squash commit title is the PR title**, and it becomes a CHANGELOG line, so write PR titles as Conventional Commits like `feat: …` or `fix(search): …` (the [PR title check](.github/workflows/pr-title.yml) enforces this).
+- Merged branches are deleted automatically.
 
 The [CI workflow](.github/workflows/ci.yml) runs typecheck, tests, the end-to-end MCP harness and a package-contents check on Ubuntu (node 20, 22, 24) and macOS (node 22) for every push to main and every PR.
 

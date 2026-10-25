@@ -256,8 +256,13 @@ npm run bench -- --questions bench/questions.local.json --modes grimoire --only 
 **처음 한 번 해 둘 것**
 - npmjs.com → `@stjoo0925/grimoire` → Settings → Trusted Publisher → GitHub Actions에 `Stjoo0925` / `grimoire` / `release.yml`을 등록합니다. 토큰 없이 OIDC로 배포하고(2FA 계정에서도 동작) provenance가 붙습니다.
 - GitHub → Settings → Actions → General → Workflow permissions에서 **Allow GitHub Actions to create and approve pull requests**를 켭니다. 꺼져 있으면 release-please가 릴리스 PR을 열지 못합니다.
+- release-please용 토큰을 넣습니다. 기본 Actions 토큰으로 연 PR에서는 CI가 돌지 않아, 아래 main 보호 때문에 릴리스 PR을 머지할 수 없습니다.
+  GitHub → Settings → Developer settings → Fine-grained tokens에서 이 레포만 고르고 **Contents·Pull requests·Issues: Read and write** 권한으로 만든 뒤 시크릿으로 넣으세요: `gh secret set RELEASE_PLEASE_TOKEN`
 
-릴리스 PR은 Actions 토큰으로 만들어져 그 PR에서는 CI가 돌지 않습니다. 머지한 뒤 main에서 CI가 돌고, 배포 전에 릴리스 워크플로가 테스트와 e2e를 다시 돌립니다.
+**main은 보호돼 있습니다.** 직접 push는 막혀 있고 PR로만 들어갑니다.
+- CI 네 작업과 PR 제목 검사를 통과해야 머지됩니다. 관리자는 급할 때 PR에서 이를 건너뛰고 머지할 수 있습니다.
+- 머지는 squash만 됩니다. **squash 커밋 제목 = PR 제목**이고 그것이 CHANGELOG 한 줄이 되므로, PR 제목을 `feat: …`·`fix(search): …`처럼 Conventional Commits로 씁니다([PR 제목 검사](.github/workflows/pr-title.yml)가 확인합니다).
+- 머지된 브랜치는 자동으로 지워집니다.
 
 [CI 워크플로](.github/workflows/ci.yml)는 main push와 PR마다 Ubuntu(node 20·22·24)와 macOS(node 22)에서 타입 검사·테스트·MCP 종단 하네스·패키지 내용을 확인합니다.
 

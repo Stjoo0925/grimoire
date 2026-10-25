@@ -113,5 +113,8 @@ jobs:
     steps:
       - uses: googleapis/release-please-action@v4
         with:
+          # 기본 토큰으로 연 PR에서는 CI가 돌지 않아, main 보호(필수 체크) 아래에서 머지할 수 없다.
+          # RELEASE_PLEASE_TOKEN(fine-grained PAT)이 있으면 그것으로 PR을 열어 CI가 돌게 한다.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json

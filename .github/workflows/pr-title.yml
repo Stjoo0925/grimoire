@@ -1,0 +1,28 @@
+# squash 머지라 PR 제목이 곧 main의 커밋 메시지이고, release-please는 그것으로 버전과 CHANGELOG를 정한다.
+# 그래서 PR 제목이 Conventional Commits 형식인지 확인한다 (예: "feat: …", "fix(search): …", "feat!: …").
+name: PR title
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  conventional:
+    name: conventional title
+    runs-on: ubuntu-latest
+    steps:
+      - name: PR 제목 확인
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(feat|fix|perf|revert|docs|refactor|test|ci|chore|build|style)(\([a-z0-9._/-]+\))?!?: .+'
+          if printf '%s' "$TITLE" | grep -Eq "$pattern"; then
+            echo "ok: $TITLE"
+          else
+            echo "::error::PR 제목이 Conventional Commits 형식이 아닙니다: \"$TITLE\""
+            echo "예: feat: 새 기능 / fix(search): 버그 수정 / feat!: 깨지는 변경"
+            exit 1
+          fi

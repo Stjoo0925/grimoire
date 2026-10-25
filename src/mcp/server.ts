@@ -16,6 +16,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { dbPath } from "../core/config";
 import { openDb } from "../core/db";
 import { myEmails } from "../core/identity";
+import { indexCommitCode } from "../core/diffs";
 import { listRepos, syncRepo } from "../core/indexer";
 import { pendingUpdate, refreshUpdateCache, updateHint, VERSION } from "../core/update";
 import { callTool, ToolError, TOOLS, type ToolContext } from "./tools";
@@ -94,6 +95,16 @@ async function backgroundSync(context: ToolContext): Promise<void> {
       if (result.added > 0) console.error(`[grimoire] ${repo.name}: 새 커밋 ${result.added}개`);
     } catch (error) {
       console.error(`[grimoire] ${repo.name} 동기화 건너뜀 —`, error instanceof Error ? error.message : error);
+    }
+  }
+  // 메타를 다 넣은 뒤 diff 식별자를 채운다 — 작업 레포부터 (diffs.ts)
+  const repos = listRepos(context.db).sort((a, b) => Number(b.id === current?.id) - Number(a.id === current?.id));
+  for (const repo of repos) {
+    try {
+      const filled = await indexCommitCode(context.db, repo);
+      if (filled > 0) console.error(`[grimoire] ${repo.name}: diff 색인 ${filled}개`);
+    } catch (error) {
+      console.error(`[grimoire] ${repo.name} diff 색인 건너뜀 —`, error instanceof Error ? error.message : error);
     }
   }
 }

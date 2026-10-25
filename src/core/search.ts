@@ -6,7 +6,7 @@
  */
 import path from "node:path";
 
-import { splitIdentifier } from "./code";
+import { isIndexable, splitIdentifier } from "./code";
 import type { DB } from "./db";
 import { commitWebUrl } from "./git";
 import { canonicalTech } from "./tech/canonical";
@@ -122,12 +122,12 @@ function rerankByCoverage(db: DB, concepts: string[][], candidates: Candidate[])
 
   for (const terms of concepts) {
     const expr = conceptExpression(terms);
-    const df = (db.prepare("SELECT COUNT(*) AS n FROM docs_fts WHERE docs_fts MATCH ?").get(expr) as { n: number }).n;
+    const df = (db.prepare("SELECT COUNT(*) AS n FROM docs_fts WHERE docs_fts MATCH ?").get(`{title body paths}: (${expr})`) as { n: number }).n;
     if (df === 0) continue;
     const weight = Math.log(1 + total / df) ** 2;
     const matched = db
       .prepare(`SELECT rowid AS id FROM docs_fts WHERE docs_fts MATCH ? AND rowid IN (${placeholders})`)
-      .all(expr, ...ids) as { id: number }[];
+      .all(`{title body paths}: (${expr})`, ...ids) as { id: number }[];
     for (const row of matched) {
       const nameWords = fileNames.get(row.id);
       const inName = nameWords?.some((word) => terms.some((term) => word.startsWith(term.toLowerCase())));
@@ -203,6 +203,10 @@ export interface SearchHit {
   lines?: number;
   /** kind='file'일 때: 이 파일을 마지막으로 건드린 커밋 */
   lastCommit?: { sha: string; date: string; title: string } | null;
+  /** kind='commit'일 때: 커밋 본문 전체 (snippet은 발췌) */
+  body?: string;
+  /** kind='commit'일 때: diff에서 바뀐 선언 — 파일별 이름 (diffs.ts가 뒤에서 채운다, 아직이면 빈 배열) */
+  touched?: { file: string; names: string[] }[];
 }
 
 export interface SearchResult {
@@ -224,18 +228,30 @@ export function search(db: DB, query: string, options: SearchOptions = {}): Sear
   const concepts = queryConcepts(query);
   const match = buildMatchExpression(query);
   if (match) {
-    const rows = db
-      .prepare(
-        `SELECT d.id AS docId, snippet(docs_fts, 1, '[', ']', '…', 16) AS snippet
-           FROM docs_fts f
-           JOIN docs d ON d.id = f.rowid
-           LEFT JOIN commits c ON d.kind = 'commit' AND c.repo_id = d.repo_id AND c.sha = d.ref
-          WHERE docs_fts MATCH ? ${where}
-          ORDER BY bm25(docs_fts, 4.0, 1.0, 1.5)
-          LIMIT ?`,
-      )
-      .all(match, ...params, pool * RERANK_FACTOR) as Candidate[];
+    const candidates = (expression: string, weights: string, count: number) =>
+      db
+        .prepare(
+          `SELECT d.id AS docId, snippet(docs_fts, 1, '[', ']', '…', 16) AS snippet
+             FROM docs_fts f
+             JOIN docs d ON d.id = f.rowid
+             LEFT JOIN commits c ON d.kind = 'commit' AND c.repo_id = d.repo_id AND c.sha = d.ref
+            WHERE docs_fts MATCH ? ${where}
+            ORDER BY bm25(docs_fts, ${weights})
+            LIMIT ?`,
+        )
+        .all(expression, ...params, count) as Candidate[];
+    // 순위는 제목·본문·경로로만 매긴다. diff 이름(code 컬럼)을 순위에 섞으면 검색이 2~3배 느려지는데,
+    // 89문항 평가(npm run eval)에서 정확도 이득은 아직 유의하지 않다 (식별자 전부: Acc@3 +6문항, p=0.07).
+    const rows = candidates(`{title body paths}: (${match})`, "4.0, 1.0, 1.5, 0", pool * RERANK_FACTOR);
     keyword.push(...rerankByCoverage(db, concepts, rows).slice(0, pool));
+    // 그래도 모자라면 diff에만 남은 이름으로 채운다 — 지금 코드에도 메시지에도 없는 "지워진 함수" 같은 질문
+    if (keyword.length < limit) {
+      const seen = new Set(keyword.map((candidate) => candidate.docId));
+      for (const row of candidates(`code: (${match})`, "0, 0, 0, 1.0", limit * 2)) {
+        if (keyword.length >= limit) break;
+        if (!seen.has(row.docId)) keyword.push(row);
+      }
+    }
   }
 
   const ranked = preferRepo(
@@ -297,6 +313,30 @@ function preferRepo<T extends { docId: number; score: number }>(db: DB, items: T
   return items
     .map((item) => (inRepo.has(item.docId) ? { ...item, score: item.score * CURRENT_REPO_BOOST } : item))
     .sort((a, b) => b.score - a.score);
+}
+
+/** 변경 파일 중 답에 쓸 만한 것 — 잠금 파일·문서·설정보다 소스를 앞에 */
+const TEST_FILE = /(\.(test|spec)\.[^/]+$|(^|\/)(__tests__|tests?)\/|(^|\/)test_[^/]+$)/;
+const LOW_VALUE_FILE = /(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb|Cargo\.lock|go\.sum|poetry\.lock|CHANGELOG\.md)$|\.(md|lock|snap|svg|png|jpe?g|gif|ico|webp)$/i;
+
+/**
+ * 커밋의 변경 파일을 근거로 보여 줄 순서로 — 경로에 질의 낱말이 든 파일, 소스 파일, 나머지, 잠금 파일·문서·이미지 순.
+ * (줄 수는 색인하지 않으므로 "많이 바뀐 파일" 순서는 쓸 수 없다. 대신 질문과의 관련성으로 고른다.)
+ */
+export function rankFiles(paths: string[], terms: string[]): string[] {
+  const score = (file: string) => {
+    const lower = file.toLowerCase();
+    const words = splitIdentifier(file);
+    let value = 0;
+    if (terms.some((term) => term.length >= 2 && (lower.includes(term) || words.includes(term)))) value += 4;
+    if (isIndexable(file, 0)) value += TEST_FILE.test(file) ? 1 : 2;
+    if (LOW_VALUE_FILE.test(file)) value -= 2;
+    return value;
+  };
+  return paths
+    .map((file, index) => ({ file, index, value: score(file) }))
+    .sort((a, b) => b.value - a.value || a.index - b.index)
+    .map((item) => item.file);
 }
 
 /** 심볼 매칭에 쓰는 질의 낱말 (조사 제거·한영 확장 포함, 소문자) */
@@ -398,18 +438,16 @@ function toHit(
   }
 
   const commit = db
-    .prepare("SELECT author_name, author_email, files_changed, body FROM commits WHERE repo_id = ? AND sha = ?")
+    .prepare("SELECT author_name, author_email, files_changed, body, symbols FROM commits WHERE repo_id = ? AND sha = ?")
     .get(doc.repo_id, doc.ref) as
-    | { author_name: string; author_email: string; files_changed: number; body: string }
+    | { author_name: string; author_email: string; files_changed: number; body: string; symbols: string | null }
     | undefined;
-  const files = (
-    db
-      .prepare(
-        `SELECT path FROM commit_files WHERE repo_id = ? AND sha = ?
-          ORDER BY COALESCE(insertions, 0) + COALESCE(deletions, 0) DESC LIMIT ?`,
-      )
-      .all(doc.repo_id, doc.ref, FILES_PER_HIT) as { path: string }[]
-  ).map((row) => row.path);
+  const files = rankFiles(
+    (db.prepare("SELECT path FROM commit_files WHERE repo_id = ? AND sha = ? LIMIT 400").all(doc.repo_id, doc.ref) as { path: string }[]).map(
+      (row) => row.path,
+    ),
+    terms,
+  ).slice(0, FILES_PER_HIT);
 
   return {
     ...base,
@@ -419,5 +457,19 @@ function toHit(
     files,
     filesChanged: commit?.files_changed ?? null,
     url: commitWebUrl(doc.remote, doc.ref),
+    body: commit?.body ?? "",
+    touched: touchedSymbols(commit?.symbols ?? null, terms),
   };
+}
+
+/** commits.symbols(JSON) → 파일별 바뀐 선언, 질문과 맞는 파일·소스 파일부터 */
+function touchedSymbols(json: string | null, terms: string[]): { file: string; names: string[] }[] {
+  if (!json) return [];
+  try {
+    const items = JSON.parse(json) as { file: string; names: string[] }[];
+    const order = rankFiles(items.map((item) => item.file), terms);
+    return [...items].sort((a, b) => order.indexOf(a.file) - order.indexOf(b.file));
+  } catch {
+    return [];
+  }
 }

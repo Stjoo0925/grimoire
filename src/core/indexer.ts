@@ -12,10 +12,13 @@ import path from "node:path";
 import { extractSymbols, headerComment, listHeadFiles, readBlobs, splitIdentifier } from "./code";
 import { deleteDoc, upsertDoc, pruneOrphanFts, type DB } from "./db";
 import {
+  headTree,
   listFiles,
+  listNewShas,
   listShas,
   readCommits,
   readFileAtHead,
+  refTips,
   remoteUrl,
   repoRoot,
   type GitCommit,
@@ -46,6 +49,10 @@ export interface RepoRow {
   remote_url: string | null;
   added_at: string;
   synced_at: string | null;
+  /** 지난 동기화의 ref 끝 커밋들 (JSON 배열) */
+  tips?: string | null;
+  /** 지난 동기화의 HEAD 트리 sha */
+  head_tree?: string | null;
 }
 
 export interface SyncResult {
@@ -151,48 +158,92 @@ async function syncRepoNow(db: DB, repo: RepoRow): Promise<SyncResult> {
     throw new Error(`레포 경로가 사라졌습니다: ${repo.path} (grimoire remove로 정리하세요)`);
   }
 
-  const known = new Set(
-    (db.prepare("SELECT sha FROM commits WHERE repo_id = ?").all(repo.id) as { sha: string }[]).map(
-      (row) => row.sha,
-    ),
-  );
-  const fresh = (await listShas(repo.path)).filter((sha) => !known.has(sha));
+  // 넘겨받은 repo 행은 오래됐을 수 있다 — 기준점은 DB에서 다시 읽는다
+  const saved = db.prepare("SELECT tips, head_tree FROM repos WHERE id = ?").get(repo.id) as
+    | { tips: string | null; head_tree: string | null }
+    | undefined;
+  const tips = await refTips(repo.path);
+  const fresh = await newShas(db, repo, saved?.tips ?? null, tips);
 
   const commits: GitCommit[] = [];
   for (let start = 0; start < fresh.length; start += READ_BATCH) {
     commits.push(...(await readCommits(repo.path, fresh.slice(start, start + READ_BATCH))));
   }
-  const tech = await readTechStack(repo.path);
+  // HEAD 트리가 그대로면 현재 코드·기술 스택도 그대로다
+  const tree = await headTree(repo.path);
+  const treeChanged = tree === null || tree !== saved?.head_tree;
+  const tech = treeChanged ? await readTechStack(repo.path) : null;
   const remote = await remoteUrl(repo.path);
-  const code = await readChangedCode(db, repo);
+  const code = treeChanged ? await readChangedCode(db, repo) : { changed: [], removed: [] };
 
   db.transaction(() => {
     for (const commit of commits) insertCommit(db, repo, commit);
 
-    db.prepare("DELETE FROM repo_tech WHERE repo_id = ?").run(repo.id);
-    const insertTech = db.prepare(
-      "INSERT OR IGNORE INTO repo_tech (repo_id, tech, category, manifest_path, dev) VALUES (?, ?, ?, ?, ?)",
-    );
-    for (const item of tech) {
-      insertTech.run(repo.id, item.tech, item.category, item.manifestPath, item.dev ? 1 : 0);
+    if (tech) {
+      db.prepare("DELETE FROM repo_tech WHERE repo_id = ?").run(repo.id);
+      const insertTech = db.prepare(
+        "INSERT OR IGNORE INTO repo_tech (repo_id, tech, category, manifest_path, dev) VALUES (?, ?, ?, ?, ?)",
+      );
+      for (const item of tech) {
+        insertTech.run(repo.id, item.tech, item.category, item.manifestPath, item.dev ? 1 : 0);
+      }
     }
 
     applyCode(db, repo, code);
 
-    db.prepare("UPDATE repos SET synced_at = ?, remote_url = ? WHERE id = ?").run(
+    db.prepare("UPDATE repos SET synced_at = ?, remote_url = ?, tips = ?, head_tree = ? WHERE id = ?").run(
       new Date().toISOString(),
       remote,
+      JSON.stringify(tips),
+      tree,
       repo.id,
     );
   })();
 
+  const count = (sql: string) => (db.prepare(sql).get(repo.id) as { n: number }).n;
   return {
     repo: repo.name,
     added: commits.length,
-    total: known.size + commits.length,
-    tech: new Set(tech.map((item) => item.tech)).size,
+    total: count("SELECT COUNT(*) AS n FROM commits WHERE repo_id = ?"),
+    tech: count("SELECT COUNT(DISTINCT tech) AS n FROM repo_tech WHERE repo_id = ?"),
     files: code.changed.length,
   };
+}
+
+/**
+ * DB에 없는 새 sha. ref 끝 커밋이 지난번과 같으면 git을 더 부르지 않고, 달라졌으면 그 뒤 커밋만 받는다.
+ * 기준점이 없거나(첫 동기화·옛 DB) 지난 끝 커밋이 사라졌으면 전체 목록과 DB를 비교한다.
+ */
+async function newShas(db: DB, repo: RepoRow, savedTips: string | null, tips: string[]): Promise<string[]> {
+  const previous = parseTips(savedTips);
+  if (previous && previous.length === tips.length && previous.every((sha, index) => sha === tips[index])) return [];
+  let candidates: string[] | null = null;
+  if (previous && previous.length > 0) {
+    try {
+      candidates = await listNewShas(repo.path, previous);
+    } catch {
+      candidates = null; // 지난 끝 커밋이 사라짐 → 전체 비교
+    }
+  }
+  if (candidates === null) {
+    const known = new Set(
+      (db.prepare("SELECT sha FROM commits WHERE repo_id = ?").all(repo.id) as { sha: string }[]).map((row) => row.sha),
+    );
+    return (await listShas(repo.path)).filter((sha) => !known.has(sha));
+  }
+  // rebase로 같은 커밋이 다른 ref에서 다시 닿는 경우 등 — 이미 있는 것은 뺀다
+  const exists = db.prepare("SELECT 1 FROM commits WHERE repo_id = ? AND sha = ?");
+  return candidates.filter((sha) => !exists.get(repo.id, sha));
+}
+
+function parseTips(value: string | null): string[] | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) && parsed.every((item) => typeof item === "string") ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 interface CodeChanges {

@@ -4,7 +4,7 @@
 import fs from "node:fs";
 
 import type { DB } from "./db";
-import { commitWebUrl, showCommit } from "./git";
+import { commitWebUrl, lineCounts, showCommit } from "./git";
 import type { RepoRow } from "./indexer";
 import { displayName } from "./tech/canonical";
 
@@ -143,7 +143,8 @@ export interface CommitDetail {
   date: string;
   subject: string;
   body: string;
-  files: { path: string; insertions: number | null; deletions: number | null }[];
+  /** binary: 바이너리 파일. 줄 수가 null인데 binary가 아니면 줄 수를 알 수 없는 것(로컬 레포 없음) */
+  files: { path: string; insertions: number | null; deletions: number | null; binary?: boolean }[];
   /** 로컬 레포에서 읽은 패치. 레포가 없거나 실패하면 null */
   patch: string | null;
   patchTruncated: boolean;
@@ -196,6 +197,21 @@ export async function commitDetail(
   const files = db
     .prepare("SELECT path, insertions, deletions FROM commit_files WHERE repo_id = ? AND sha = ?")
     .all(row.repo_id, row.sha) as CommitDetail["files"];
+  // 줄 수는 색인하지 않는다 — 이 커밋 하나만 지금 센다 (레포가 없으면 옛 색인 값이 있으면 그것을 쓴다)
+  if (fs.existsSync(row.repo_path)) {
+    try {
+      const counts = new Map((await lineCounts(row.repo_path, row.sha)).map((file) => [file.path, file]));
+      for (const file of files) {
+        const count = counts.get(file.path);
+        if (!count) continue;
+        file.insertions = count.insertions;
+        file.deletions = count.deletions;
+        file.binary = count.insertions === null;
+      }
+    } catch {
+      // 줄 수 없이 경로만 보여 준다
+    }
+  }
 
   const maxLines = Math.min(Math.max(20, options.maxDiffLines ?? DEFAULT_DIFF_LINES), MAX_DIFF_LINES);
   let patch: string | null = null;

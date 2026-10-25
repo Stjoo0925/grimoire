@@ -15,13 +15,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { isIndexable } from "../core/code";
 import type { DB } from "../core/db";
 import { resolveAuthors } from "../core/identity";
+import { indexCommitCode } from "../core/diffs";
 import { addRepo, discoverRepos, findRepo, listRepos, syncRepo } from "../core/indexer";
 import { addNote } from "../core/notes";
 import { commitDetail, repoOverview, repoSummaries } from "../core/overview";
-import { search } from "../core/search";
-import { slimCommit, slimOverview, slimRepos, slimSearch } from "./format";
+import { search, type SearchHit } from "../core/search";
+import { slimCommit, slimOverview, slimRepos, slimSearch, type Detail } from "./format";
 import { waitForWorkspace, type Workspace } from "./workspace";
 
 export interface ToolContext {
@@ -38,6 +40,8 @@ export interface ToolContext {
 
 /** 새 작업 레포의 첫 인덱싱을 검색이 기다려 주는 상한 */
 const WORKSPACE_WAIT_MS = 15_000;
+/** 검색 전 작업 레포 재동기화를 기다려 주는 상한 (새 커밋 몇 개면 이 안에 끝난다) */
+const REFRESH_WAIT_MS = 2_000;
 
 /** 레포가 없을 때 AI가 사용자에게 전할 안내. 레포가 있으면 undefined. */
 export function emptyHint(context: ToolContext): string | undefined {
@@ -79,6 +83,7 @@ export const TOOLS = [
         until: { type: "string", description: "YYYY-MM-DD" },
         kind: { type: "string", enum: ["file", "commit", "note"] },
         limit: { type: "number", description: "기본 8" },
+        detail: { type: "string", enum: ["index", "summary", "full"], description: "기본 index. summary=상위 커밋 본문·바뀐 함수, full=1위 커밋 diff까지" },
       },
       required: ["query"],
     },
@@ -131,6 +136,22 @@ export const TOOLS = [
   },
 ] as const;
 
+/** detail=full에서 1위 커밋에 붙이는 diff 줄 수 */
+const FULL_DIFF_LINES = 120;
+
+async function topDiff(db: DB, hit: SearchHit) {
+  const repo = hit.repoPath ? (db.prepare("SELECT id FROM repos WHERE path = ?").get(hit.repoPath) as { id: number } | undefined) : undefined;
+  // 질문과 맞는 순서로 정렬된 변경 파일 중 소스 파일 앞쪽만
+  const paths = hit.files.filter((file) => isIndexable(file, 0)).slice(0, 3);
+  const detail = await commitDetail(db, hit.ref, { repoId: repo?.id, maxDiffLines: FULL_DIFF_LINES, paths });
+  if ("error" in detail || !detail.patch) return undefined;
+  return {
+    sha: hit.ref.slice(0, 10),
+    patch: detail.patch,
+    ...(detail.patchTruncated ? { truncated: `${FULL_DIFF_LINES}/${detail.patchLines}줄 — 나머지는 show_commit` } : {}),
+  };
+}
+
 /** MCP로 scan하기엔 너무 넓은 곳: 파일 시스템 루트와 홈 디렉터리 자체 */
 function isTooBroad(dir: string): boolean {
   const resolved = path.resolve(dir);
@@ -178,6 +199,7 @@ export async function callTool(context: ToolContext, name: string, args: Args = 
       if (authors && authors.length === 0) {
         throw new ToolError("내 이메일을 알 수 없습니다. GRIMOIRE_ME 또는 git config user.email을 설정하세요.");
       }
+      if (current) await context.workspace?.refresh?.(current, REFRESH_WAIT_MS);
       const result = await search(db, query, {
         repoId: repoFilter(args.repo)?.id,
         authors,
@@ -187,7 +209,13 @@ export async function callTool(context: ToolContext, name: string, args: Args = 
         limit: num(args.limit) ?? SEARCH_LIMIT,
         preferRepoId: current?.id,
       });
-      return withHint({ ...(current ? { current: current.name } : {}), ...slimSearch(result, me) });
+      // 기본은 index — summary는 응답이 66% 커지는데 한 번에 답할 수 있는 비율은 유의하게 늘지 않았다 (docs/improvement-plan.md §7)
+      const detail: Detail = args.detail === "summary" || args.detail === "full" ? args.detail : "index";
+      const slim = slimSearch(result, me, detail);
+      // full: 1위 커밋의 diff를 소스 파일 위주로 붙인다 — show_commit을 따로 부르지 않게
+      const top = detail === "full" ? result.hits.find((hit) => hit.kind === "commit") : undefined;
+      const diff = top ? await topDiff(db, top) : undefined;
+      return withHint({ ...(current ? { current: current.name } : {}), ...slim, ...(diff ? { diff } : {}) });
     }
     case "show_commit": {
       const sha = str(args.sha);
@@ -227,7 +255,10 @@ export async function callTool(context: ToolContext, name: string, args: Args = 
       const failed: { path: string; error: string }[] = [];
       for (const repoDir of dirs) {
         try {
-          added.push(await syncRepo(db, await addRepo(db, repoDir)));
+          const repo = await addRepo(db, repoDir);
+          added.push(await syncRepo(db, repo));
+          // diff 식별자는 뒤에서 — 등록 응답을 붙잡지 않는다
+          indexCommitCode(db, repo).catch((error) => console.error(`[grimoire] ${repo.name} diff 색인 실패`, error));
         } catch (error) {
           failed.push({ path: repoDir, error: error instanceof Error ? error.message : String(error) });
         }

@@ -11,7 +11,7 @@ import path from "node:path";
 import { runGit } from "./git";
 
 /** 색인할 소스 확장자 */
-const SOURCE_EXT = new Set([
+export const SOURCE_EXT = new Set([
   ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".svelte",
   ".py", ".go", ".rs", ".java", ".kt", ".kts", ".swift", ".rb", ".php", ".cs",
   ".c", ".cc", ".cpp", ".h", ".hpp", ".scala", ".sql", ".sh", ".dart", ".ex", ".exs",

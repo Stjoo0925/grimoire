@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { commitWebUrl, LOG_FORMAT, parseLog, parseNumstat, remoteWebBase, renamedTarget } from "../src/core/git";
+import { commitWebUrl, LOG_FORMAT, parseChangedFiles, parseLog, parseNumstat, remoteWebBase, renamedTarget, unquotePath } from "../src/core/git";
 import { isMeaningfulSubject } from "../src/core/meaningful";
 
 test("parseLog: 메시지 본문과 numstat을 레코드별로 나눈다", () => {
@@ -27,6 +27,19 @@ test("parseLog: 메시지 본문과 numstat을 레코드별로 나눈다", () =>
     { path: "logo.png", insertions: null, deletions: null },
   ]);
   assert.equal(commits[1].files[0].path, "README.md");
+});
+
+test("parseChangedFiles: --name-status는 경로만(이름 변경은 새 경로), 따옴표 경로는 풀어 준다", () => {
+  assert.deepEqual(parseChangedFiles("\n\nM\tsrc/a.ts\nR087\tsrc/old.ts\tsrc/new.ts\nD\tgone.ts\nA\t\"we\\\"ird.ts\"\n"), [
+    { path: "src/a.ts", insertions: null, deletions: null },
+    { path: "src/new.ts", insertions: null, deletions: null },
+    { path: "gone.ts", insertions: null, deletions: null },
+    { path: 'we"ird.ts', insertions: null, deletions: null },
+  ]);
+  // numstat 꼴도 그대로 받는다
+  assert.deepEqual(parseChangedFiles("3\t1\tsrc/a.ts\n"), [{ path: "src/a.ts", insertions: 3, deletions: 1 }]);
+  assert.equal(unquotePath('"a\\tb.ts"'), "a\tb.ts");
+  assert.equal(unquotePath("plain.ts"), "plain.ts");
 });
 
 test("renamedTarget: 이름 변경 표기에서 새 경로를 꺼낸다", () => {

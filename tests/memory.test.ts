@@ -5,6 +5,7 @@ import { test } from "node:test";
 
 import { openDb } from "../src/core/db";
 import { addRepo, discoverRepos, listRepos, removeRepo, syncRepo } from "../src/core/indexer";
+import { indexCommitCode } from "../src/core/diffs";
 import { addNote } from "../src/core/notes";
 import { commitDetail, repoOverview } from "../src/core/overview";
 import { buildMatchExpression, search, stripParticle } from "../src/core/search";
@@ -52,6 +53,43 @@ test("stripParticle / buildMatchExpression: 조사 제거·접두 일치·연산
   assert.match(expr!, /"인증"\*/);
   assert.match(expr!, /"react"\*/); // 기술 별칭 정규화
   assert.equal(buildMatchExpression("  ??? "), null);
+});
+
+test("syncRepo: 지난 끝 커밋 뒤의 새 커밋만 읽고, 끝 커밋이 사라지면 전체 비교로 돌아간다", async () => {
+  const db = memoryDb();
+  const dir = sampleRepo();
+  const repo = await addRepo(db, dir);
+  assert.equal((await syncRepo(db, repo)).added, 4);
+
+  const noop = await syncRepo(db, repo);
+  assert.deepEqual([noop.added, noop.files, noop.total], [0, 0, 4]);
+
+  addCommit(dir, { message: "feat: 결제 웹훅 서명 검증", files: { "src/pay/webhook.ts": "export function verifySignature() {}\n" } });
+  const next = await syncRepo(db, repo);
+  assert.deepEqual([next.added, next.files, next.total], [1, 1, 5]);
+  assert.equal(search(db, "웹훅 서명", { kind: "file" }).hits[0]?.ref, "src/pay/webhook.ts");
+
+  // 마지막 커밋을 고쳐 쓰고 옛 커밋을 지운다 → 저장해 둔 끝 커밋이 사라짐
+  // 테스트 git은 HOME을 바꿔 사용자 설정이 없다 — 작성자를 직접 준다 (Linux git은 추정하지 않고 거부한다)
+  const who = { GIT_AUTHOR_NAME: "me", GIT_AUTHOR_EMAIL: "me@example.com", GIT_COMMITTER_NAME: "me", GIT_COMMITTER_EMAIL: "me@example.com" };
+  git(dir, ["commit", "-q", "--amend", "-m", "feat: 결제 웹훅 서명 검증 (HMAC)"], who);
+  git(dir, ["reflog", "expire", "--expire=now", "--all"]);
+  git(dir, ["gc", "-q", "--prune=now"]);
+  const rewritten = await syncRepo(db, repo);
+  assert.equal(rewritten.added, 1);
+  assert.ok(search(db, "HMAC").hits.some((hit) => hit.title.includes("HMAC")));
+});
+
+test("commitDetail: 줄 수는 색인하지 않고 show_commit 때 센다", async () => {
+  const db = memoryDb();
+  const dir = sampleRepo();
+  await syncRepo(db, await addRepo(db, dir));
+  const stored = db.prepare("SELECT insertions FROM commit_files WHERE path = 'src/order/lock.ts'").get() as { insertions: number | null };
+  assert.equal(stored.insertions, null);
+  const sha = (db.prepare("SELECT sha FROM commits WHERE subject LIKE '%분산 락%'").get() as { sha: string }).sha;
+  const detail = await commitDetail(db, sha);
+  assert.ok(!("error" in detail));
+  if (!("error" in detail)) assert.deepEqual(detail.files, [{ path: "src/order/lock.ts", insertions: 1, deletions: 0, binary: false }]);
 });
 
 test("syncRepo: 인덱싱은 멱등이고 새 커밋만 더한다", async () => {
@@ -193,4 +231,44 @@ test("discoverRepos: 하위 레포를 찾되 레포 안으로는 내려가지 �
   }
   const found = discoverRepos(root).map((dir) => path.relative(root, dir)).sort();
   assert.deepEqual(found, ["a", path.join("nested", "b")]);
+});
+
+test("diff 단계: 바뀐 선언을 채우고, search_memory 기본(index)은 목록만, summary를 요청하면 본문·바뀐 함수를 싣는다", async () => {
+  const db = memoryDb();
+  const dir = sampleRepo();
+  addCommit(dir, {
+    message: "fix: 웹훅 재전송 중복 처리\n\n같은 이벤트 id가 다시 오면 저장된 결과를 돌려준다. 결제사가 타임아웃 뒤 같은 웹훅을 다시 보내기 때문.",
+    files: { "src/pay/webhook.ts": "export function dedupeWebhookEvent(id: string) {\n  return id;\n}\n" },
+  });
+  const repo = await addRepo(db, dir);
+  await syncRepo(db, repo);
+  const pending = () => (db.prepare("SELECT COUNT(*) AS n FROM commits WHERE code_state = 0").get() as { n: number }).n;
+  assert.equal(pending(), 5);
+  assert.equal(await indexCommitCode(db, repo), 5);
+  assert.equal(pending(), 0);
+  assert.equal(await indexCommitCode(db, repo), 0);
+
+  const context = { db, me: ["me@example.com"], cwd: dir };
+  const summary = (await callTool(context, "search_memory", { query: "웹훅 중복", kind: "commit", detail: "summary" })) as { hits: Record<string, unknown>[] };
+  assert.deepEqual(summary.hits[0].changed, ["webhook.ts: dedupeWebhookEvent"]);
+  assert.match(String(summary.hits[0].body), /결제사가 타임아웃 뒤/);
+  // detail을 주지 않으면 index — 예전 목록 형태
+  const index = (await callTool(context, "search_memory", { query: "웹훅 중복", kind: "commit" })) as { hits: Record<string, unknown>[] };
+  assert.equal(index.hits[0].changed, undefined);
+  assert.ok(String(index.hits[0].body ?? "").length <= 141);
+  const full = (await callTool(context, "search_memory", { query: "웹훅 중복", kind: "commit", detail: "full" })) as { diff?: { patch: string } };
+  assert.match(full.diff?.patch ?? "", /\+export function dedupeWebhookEvent/);
+});
+
+test("검색: 제목·본문·경로에 없는 지워진 함수 이름은 diff 이름으로 채워 찾는다", async () => {
+  const db = memoryDb();
+  const dir = sampleRepo();
+  addCommit(dir, { message: "feat: 쿠폰", files: { "src/coupon.ts": "export function applyLegacyCoupon() {}\n" } });
+  addCommit(dir, { message: "refactor: 정리", files: { "src/coupon.ts": "export const coupon = 1;\n" } });
+  const repo = await addRepo(db, dir);
+  await syncRepo(db, repo);
+  assert.equal(search(db, "applyLegacyCoupon").hits.length, 0);
+  await indexCommitCode(db, repo);
+  const titles = search(db, "applyLegacyCoupon").hits.map((hit) => hit.title);
+  assert.deepEqual(titles.sort(), ["feat: 쿠폰", "refactor: 정리"]);
 });

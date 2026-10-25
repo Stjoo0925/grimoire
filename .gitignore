@@ -7,3 +7,7 @@ npm-debug.log*
 .env*
 # 로컬 DB는 기본적으로 ~/.grimoire 에 생기지만, GRIMOIRE_HOME을 레포 안으로 잡았을 때 대비
 /.grimoire
+
+# 벤치 질문(내 레포 기준)·결과는 로컬 전용
+/bench/*.local.json
+/bench/results/

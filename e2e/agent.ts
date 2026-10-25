@@ -12,12 +12,13 @@
  *   답의 근거는 Grimoire MCP를 거친 것뿐이다.
  * - DB는 임시 폴더, MCP 설정은 --strict-mcp-config로 이 하네스의 것만 쓴다(사용자 설정 무시).
  */
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 
 import { tempDir } from "../tests/helpers";
+import { runClaude, type AgentRun } from "./claude";
 import { makeFixture, ME, type Fixture } from "./fixture";
 
 const CASE_TIMEOUT_MS = 240_000;
@@ -27,15 +28,6 @@ interface Shas {
   refresh: string;
   lock: string;
   all: string[];
-}
-
-interface AgentRun {
-  answer: string;
-  tools: string[];
-  turns: number | null;
-  costUsd: number | null;
-  ms: number;
-  error?: string;
 }
 
 interface Case {
@@ -112,70 +104,6 @@ function cliPath(): string {
   return cli;
 }
 
-function runClaude(prompt: string, mcpConfig: string, cwd: string, model?: string): Promise<AgentRun> {
-  const args = [
-    "-p",
-    prompt,
-    "--mcp-config",
-    mcpConfig,
-    "--strict-mcp-config",
-    "--tools",
-    "",
-    "--allowedTools",
-    "mcp__grimoire",
-    "--output-format",
-    "stream-json",
-    "--verbose",
-    "--no-session-persistence",
-    "--max-budget-usd",
-    BUDGET_USD,
-    ...(model ? ["--model", model] : []),
-  ];
-  const started = Date.now();
-  return new Promise((resolve) => {
-    const child = spawn("claude", args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk) => (stdout += String(chunk)));
-    child.stderr.on("data", (chunk) => (stderr += String(chunk)));
-    const timer = setTimeout(() => child.kill("SIGTERM"), CASE_TIMEOUT_MS);
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      resolve({ answer: "", tools: [], turns: null, costUsd: null, ms: Date.now() - started, error: error.message });
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      const run: AgentRun = { answer: "", tools: [], turns: null, costUsd: null, ms: Date.now() - started };
-      for (const line of stdout.split("\n")) {
-        if (!line.trim()) continue;
-        let event: any;
-        try {
-          event = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        if (event.type === "assistant") {
-          for (const block of event.message?.content ?? []) {
-            if (block.type === "tool_use") run.tools.push(block.name);
-          }
-        } else if (event.type === "result") {
-          run.answer = typeof event.result === "string" ? event.result : "";
-          run.turns = event.num_turns ?? null;
-          run.costUsd = event.total_cost_usd ?? null;
-          if (event.is_error) {
-            const reason = run.answer.trim() || event.subtype || "unknown";
-            run.error = /not logged in|\/login/i.test(reason)
-              ? "Claude Code에 로그인돼 있지 않습니다 — 터미널에서 claude를 실행해 /login 하세요"
-              : `claude 오류: ${reason.slice(0, 300)}`;
-          }
-        }
-      }
-      if (code !== 0 && !run.error) run.error = `claude 종료 코드 ${code}: ${stderr.trim().slice(0, 500)}`;
-      resolve(run);
-    });
-  });
-}
-
 async function main(): Promise<number> {
   const { values } = parseArgs({
     options: {
@@ -208,7 +136,16 @@ async function main(): Promise<number> {
       );
 
       if (!values.json) process.stdout.write(`… ${item.name}${repeat > 1 ? ` #${attempt}` : ""}\n`);
-      const run = await runClaude(item.prompt(fixture), mcpConfig, workdir, values.model);
+      const run = await runClaude({
+        prompt: item.prompt(fixture),
+        cwd: workdir,
+        mcpConfig,
+        tools: "",
+        allowedTools: ["mcp__grimoire"],
+        model: values.model,
+        budgetUsd: BUDGET_USD,
+        timeoutMs: CASE_TIMEOUT_MS,
+      });
       const problems = run.error ? [run.error] : item.judge(run, shas);
       report.push({ case: item.name, attempt, ok: problems.length === 0, problems, run });
 

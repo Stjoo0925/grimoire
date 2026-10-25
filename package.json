@@ -20,7 +20,8 @@
     "grimoire": "npm run build --silent && node dist/cli.js",
     "mcp": "npm run build --silent && node dist/cli.js mcp",
     "e2e": "npm run build --silent && tsc -p tsconfig.test.json && node .test-out/e2e/harness.js",
-    "e2e:agent": "npm run build --silent && tsc -p tsconfig.test.json && node .test-out/e2e/agent.js"
+    "e2e:agent": "npm run build --silent && tsc -p tsconfig.test.json && node .test-out/e2e/agent.js",
+    "bench": "npm run build --silent && tsc -p tsconfig.test.json && node .test-out/e2e/bench.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

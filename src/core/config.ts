@@ -2,7 +2,7 @@
  * 경로와 환경 설정.
  *
  * 상태는 전부 `GRIMOIRE_HOME`(기본 `~/.grimoire`) 아래 SQLite 파일 하나에 있다.
- * 외부 API는 없다 — 임베딩을 켜면 로컬 Ollama에만 닿는다.
+ * 외부 요청은 하루 한 번의 업데이트 확인뿐이다(update.ts, 끌 수 있음). 임베딩을 켜면 로컬 Ollama에만 닿는다.
  */
 import os from "node:os";
 import path from "node:path";

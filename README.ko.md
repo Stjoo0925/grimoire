@@ -44,7 +44,7 @@ node dist/cli.js doctor                       # 연결 상태 점검
 - 설정에는 **지금 실행 중인 node의 절대경로**가 들어갑니다. Claude Desktop·Cursor 같은 GUI 앱은 셸의 PATH를
   모르기 때문에 `"command": "node"`로 적으면 `spawn node ENOENT`로 연결이 안 됩니다. 또 SQLite 모듈은
   빌드할 때 쓴 node로만 열립니다. 그래서 node 버전을 바꿨다면 `install`을 다시 하세요.
-- `GRIMOIRE_HOME`·`GRIMOIRE_ME`·`OLLAMA_HOST`·`OLLAMA_EMBED_MODEL`을 설정해 둔 상태라면 그 값도 같이 적혀,
+- `GRIMOIRE_HOME`·`GRIMOIRE_ME`·`OLLAMA_HOST`·`OLLAMA_EMBED_MODEL`·`GRIMOIRE_UPDATE_CHECK`를 설정해 둔 상태라면 그 값도 같이 적혀,
   CLI와 MCP가 같은 DB를 보게 됩니다.
 - 다른 서버 항목은 그대로 두고 `grimoire` 항목만 넣습니다. 기존 파일은 `.bak`으로 백업하고, JSON이 깨져 있으면
   건드리지 않고 멈춥니다. 무엇을 쓸지 먼저 보려면 `--dry-run`을 붙이세요.
@@ -52,7 +52,7 @@ node dist/cli.js doctor                       # 연결 상태 점검
 
 ### 연결이 안 될 때 — `grimoire doctor`
 
-node 버전과 SQLite 모듈, git, DB와 등록된 레포, 내 이메일, Ollama, 각 클라이언트에 적힌 설정(node 경로가
+Grimoire 버전(새 릴리스가 있는지), node 버전과 SQLite 모듈, git, DB와 등록된 레포, 내 이메일, Ollama, 각 클라이언트에 적힌 설정(node 경로가
 실제로 있는지, 지금 node와 같은지, 같은 DB를 보는지)을 점검하고 고치는 명령을 알려 줍니다.
 
 ### 레포 등록은 대화 중에도
@@ -105,6 +105,7 @@ grimoire show 2518bf75 --path route.ts         # 경로 일부가 맞는 파일�
 grimoire overview please_readme                # 기술 스택·활동·많이 건드린 곳·최근 주요 커밋
 grimoire note "결정: 세션 대신 JWT — 모바일 때문" --repo shop-api --tag decision
 grimoire remove shop-api                       # 레포와 색인 삭제
+grimoire update                                # 최신 릴리스로 올리기 (아래 '업데이트')
 ```
 
 데이터는 `~/.grimoire/grimoire.db`(SQLite) 하나에 있습니다. `GRIMOIRE_HOME`으로 위치를 바꿀 수 있습니다.
@@ -132,9 +133,30 @@ grimoire embed          # 의미 있는 커밋과 노트를 임베딩 (중간에
 조용히 폴백합니다. 새 커밋이 들어오면 `grimoire embed`를 다시 돌리세요.
 `OLLAMA_HOST`·`OLLAMA_EMBED_MODEL`로 주소와 모델을 바꿀 수 있습니다.
 
+## 업데이트
+
+배포 채널은 [GitHub 릴리스](https://github.com/Stjoo0925/grimoire/releases)입니다.
+
+```bash
+grimoire update            # 최신 릴리스 태그로 fast-forward → npm install → npm run build
+grimoire update --check    # 확인만
+grimoire update --dry-run  # 무엇을 실행할지만 보기
+```
+
+업데이트한 뒤에는 MCP 클라이언트를 다시 시작하세요. 같은 자리에서 다시 빌드하므로 MCP 설정은 다시 쓸 필요가 없습니다.
+설치 폴더에 커밋하지 않은 변경이 있거나 fast-forward가 안 되면 아무것도 바꾸지 않고 멈춥니다.
+
+새 버전은 하루 한 번 확인하고(`~/.grimoire/update.json`에 기록), 이렇게 알립니다.
+
+- **MCP**: 세션마다 한 번, `search_memory`·`list_repos` 응답의 `hint`에 실려 AI가 사용자에게 전합니다
+- **CLI**: 명령이 끝난 뒤 stderr에 한 줄 (`--json` 출력은 그대로)
+- **`grimoire doctor`**: 지금 버전과 최신 버전
+
+끄려면 `GRIMOIRE_UPDATE_CHECK=0`을 주세요(설정해 둔 뒤 `grimoire install`을 다시 하면 MCP 설정에도 들어갑니다).
+
 ## 프라이버시
 
-- Grimoire 자체는 외부로 아무것도 보내지 않습니다.
+- Grimoire가 외부로 보내는 요청은 하루 한 번의 업데이트 확인(GitHub API에 최신 릴리스 버전 조회)뿐입니다. 레포·커밋·질의 내용은 보내지 않으며, `GRIMOIRE_UPDATE_CHECK=0`으로 끌 수 있습니다.
 - **MCP로 외부 LLM 클라이언트에 연결하면 질의 결과(커밋 메시지·파일 경로·diff)는 그 LLM에 전달됩니다.**
   민감한 레포는 등록하지 말거나 `grimoire remove <repo>`로 빼세요.
 
@@ -205,14 +227,29 @@ npm run bench -- --questions bench/questions.local.json --modes grimoire --only 
 - 질문은 내 레포 기준이라 `bench/*.local.json`으로 두고, 결과는 `bench/results/<시각>.json`에 남깁니다. 둘 다 git에 올라가지 않습니다.
 - `grimoire` 모드는 `root` 아래 레포를 임시 DB에 새로 인덱싱해서 씁니다. 실제 `~/.grimoire`는 건드리지 않습니다.
 
+### 릴리스 내기
+
+`grimoire update`는 GitHub의 latest 릴리스 태그로 fast-forward합니다. 그래서 태그는 `main` 위의 커밋에 달아야 합니다.
+
+```bash
+npm version minor --no-git-tag-version   # package.json 버전 올리기 (MCP 서버 버전도 여기서 읽음)
+git commit -am "chore: v0.3.0"
+git tag v0.3.0 && git push origin main v0.3.0
+gh release create v0.3.0 --generate-notes   # 사용자에게 할 일이 있으면 노트에 적기
+```
+
+- 업데이트 확인은 로그인 없이 GitHub API를 부르므로, **레포가 public이어야** 다른 사용자에게 새 버전이 보입니다.
+- DB 스키마를 바꿨다면 `src/core/db.ts`의 `MIGRATIONS`에 단계를 덧붙이기만 하세요. 이미 있는 단계를 고치면 기존 사용자 DB와 어긋납니다.
+
 ## 구조
 
 ```
 src/
   cli.ts            CLI 진입점
   mcp/              MCP 서버(stdio)·도구 정의·응답 다이어트(format)
-  core/             단일 코어 — db · git · indexer · code · search · terms · embed · overview · notes · identity
+  core/             단일 코어 — db · git · indexer · code · search · terms · embed · overview · notes · identity · update
     tech/           매니페스트 파서와 기술 이름 정규화 사전
+  setup/            install · doctor · update 명령
 e2e/                종단 하네스(harness) · 에이전트 하네스(agent) · 벤치(bench) · 공용 픽스처와 claude 실행기
 tests/              단위·통합 테스트 (임시 git 레포, 네트워크 없음)
 ```

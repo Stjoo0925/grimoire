@@ -10,6 +10,7 @@ import { loadSqlite, openDb } from "../core/db";
 import { runGit } from "../core/git";
 import { myEmails } from "../core/identity";
 import { listRepos } from "../core/indexer";
+import { compareVersions, RELEASES_URL, refreshUpdateCache, updateCheckEnabled, VERSION } from "../core/update";
 import { CLIENTS, configPath, hasCommand, readInstalled, run, SERVER_NAME } from "./install";
 
 export type Level = "ok" | "warn" | "fail";
@@ -35,6 +36,9 @@ const OLLAMA_TIMEOUT_MS = 1_500;
 export async function doctor(options: DoctorOptions): Promise<Check[]> {
   const env = options.env ?? process.env;
   const checks: Check[] = [];
+
+  // 0. Grimoire 버전 (GitHub 릴리스 기준)
+  checks.push(await versionCheck(env, options.fetchImpl));
 
   // 1. Node와 네이티브 SQLite 모듈
   const major = Number(process.versions.node.split(".")[0]);
@@ -126,6 +130,17 @@ export async function doctor(options: DoctorOptions): Promise<Check[]> {
   // 5. 클라이언트 설정
   checks.push(...(await clientChecks(options, env)));
   return checks;
+}
+
+async function versionCheck(env: Env, fetchImpl?: typeof fetch): Promise<Check> {
+  const title = `Grimoire ${VERSION}`;
+  if (!updateCheckEnabled(env)) return { level: "ok", title, detail: "업데이트 확인 꺼짐 (GRIMOIRE_UPDATE_CHECK=0)" };
+  const cache = await refreshUpdateCache({ env, force: true, fetchImpl });
+  if (!cache?.latest) return { level: "ok", title, detail: `최신 릴리스를 확인하지 못했습니다 — ${RELEASES_URL}` };
+  if (compareVersions(cache.latest, VERSION) > 0) {
+    return { level: "warn", title: `${title} — 새 버전 ${cache.latest}이 있습니다`, detail: cache.url, fix: "grimoire update" };
+  }
+  return { level: "ok", title: `${title} (최신)` };
 }
 
 async function ollamaCheck(env: Env, embedded: number, fetchImpl: typeof fetch = fetch): Promise<Check> {

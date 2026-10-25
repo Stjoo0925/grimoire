@@ -44,7 +44,7 @@ After `npm link` you can call `grimoire` instead of `node dist/cli.js`.
 - The config contains the **absolute path of the node currently running**. GUI apps like Claude Desktop and Cursor
   don't see your shell's PATH, so `"command": "node"` fails with `spawn node ENOENT`. The SQLite module also only
   loads under the node it was built with. If you switch node versions, run `install` again.
-- If `GRIMOIRE_HOME`, `GRIMOIRE_ME`, `OLLAMA_HOST` or `OLLAMA_EMBED_MODEL` are set, they are written too,
+- If `GRIMOIRE_HOME`, `GRIMOIRE_ME`, `OLLAMA_HOST`, `OLLAMA_EMBED_MODEL` or `GRIMOIRE_UPDATE_CHECK` are set, they are written too,
   so the CLI and MCP server see the same DB.
 - Other server entries are left alone; only the `grimoire` entry is added. The existing file is backed up as `.bak`,
   and if its JSON is broken Grimoire stops without touching it. Add `--dry-run` to preview what would be written.
@@ -52,7 +52,7 @@ After `npm link` you can call `grimoire` instead of `node dist/cli.js`.
 
 ### When it won't connect — `grimoire doctor`
 
-Checks the node version and SQLite module, git, the DB and registered repos, your email, Ollama, and the config
+Checks the Grimoire version (whether a new release is out), the node version and SQLite module, git, the DB and registered repos, your email, Ollama, and the config
 each client has (whether the node path exists, matches the current node, and points at the same DB), and tells you the command to fix it.
 
 ### Registering repos mid-conversation
@@ -105,6 +105,7 @@ grimoire show 2518bf75 --path route.ts         # diff of files whose path partly
 grimoire overview please_readme                # tech stack, activity, hot spots, recent notable commits
 grimoire note "Decision: JWT over sessions — because of mobile" --repo shop-api --tag decision
 grimoire remove shop-api                       # delete a repo and its index
+grimoire update                                # move to the latest release (see Updating)
 ```
 
 All data lives in a single `~/.grimoire/grimoire.db` (SQLite). Change the location with `GRIMOIRE_HOME`.
@@ -132,9 +133,30 @@ With embeddings on, search fuses keyword (FTS5 bm25) and cosine rankings with RR
 falls back to keywords. Run `grimoire embed` again after new commits come in.
 Change the address and model with `OLLAMA_HOST` and `OLLAMA_EMBED_MODEL`.
 
+## Updating
+
+Releases are distributed through [GitHub Releases](https://github.com/Stjoo0925/grimoire/releases).
+
+```bash
+grimoire update            # fast-forward to the latest release tag → npm install → npm run build
+grimoire update --check    # only check
+grimoire update --dry-run  # only show what would run
+```
+
+Restart your MCP client afterwards. The build happens in place, so the MCP config doesn't need to be rewritten.
+If the install folder has uncommitted changes or can't be fast-forwarded, nothing is changed and the update stops.
+
+New versions are checked once a day (recorded in `~/.grimoire/update.json`) and announced like this:
+
+- **MCP**: once per session, in the `hint` of a `search_memory` or `list_repos` response, so the AI tells you
+- **CLI**: one line on stderr after a command finishes (`--json` output is untouched)
+- **`grimoire doctor`**: current and latest version
+
+Set `GRIMOIRE_UPDATE_CHECK=0` to turn it off (run `grimoire install` again afterwards to put it in the MCP config too).
+
 ## Privacy
 
-- Grimoire itself sends nothing anywhere.
+- The only request Grimoire makes to the outside is the daily update check (asking the GitHub API for the latest release version). No repos, commits or queries are sent, and `GRIMOIRE_UPDATE_CHECK=0` turns it off.
 - **When connected to an external LLM client over MCP, query results (commit messages, file paths, diffs) are passed to that LLM.**
   Don't register sensitive repos, or take them out with `grimoire remove <repo>`.
 
@@ -205,14 +227,29 @@ npm run bench -- --questions bench/questions.local.json --modes grimoire --only 
 - Questions are about your own repos, so keep them as `bench/*.local.json`; results go to `bench/results/<timestamp>.json`. Neither is committed to git.
 - `grimoire` mode freshly indexes the repos under `root` into a temp DB. Your real `~/.grimoire` is never touched.
 
+### Cutting a release
+
+`grimoire update` fast-forwards to the latest GitHub release tag, so tag a commit on `main`.
+
+```bash
+npm version minor --no-git-tag-version   # bump package.json (the MCP server version is read from it)
+git commit -am "chore: v0.3.0"
+git tag v0.3.0 && git push origin main v0.3.0
+gh release create v0.3.0 --generate-notes   # note anything users need to do
+```
+
+- The update check calls the GitHub API without auth, so **the repo must be public** for other users to see new versions.
+- If you change the DB schema, only append a step to `MIGRATIONS` in `src/core/db.ts`. Editing an existing step breaks existing users' DBs.
+
 ## Layout
 
 ```
 src/
   cli.ts            CLI entry point
   mcp/              MCP server (stdio), tool definitions, response slimming (format)
-  core/             the single core — db · git · indexer · code · search · terms · embed · overview · notes · identity
+  core/             the single core — db · git · indexer · code · search · terms · embed · overview · notes · identity · update
     tech/           manifest parsers and tech name normalization dictionary
+  setup/            install · doctor · update commands
 e2e/                end-to-end harness · agent harness · bench · shared fixture and claude runner
 tests/              unit and integration tests (temp git repos, no network)
 ```

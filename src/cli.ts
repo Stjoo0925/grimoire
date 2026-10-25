@@ -14,6 +14,7 @@
  *   grimoire remove <repo>      레포와 색인 삭제
  *   grimoire install <client>   MCP 클라이언트 설정 자동 작성
  *   grimoire doctor             연결 문제 진단
+ *   grimoire update             최신 GitHub 릴리스로 올리기
  *   grimoire mcp                MCP 서버 (stdio)
  */
 import path from "node:path";
@@ -27,9 +28,11 @@ import { addRepo, discoverRepos, findRepo, listRepos, removeRepo, syncRepo, type
 import { addNote } from "./core/notes";
 import { commitDetail, repoOverview, repoSummaries } from "./core/overview";
 import { search } from "./core/search";
+import { pendingUpdate, refreshUpdateCache, VERSION } from "./core/update";
 import { runMcpServer } from "./mcp/server";
 import { doctor, formatChecks } from "./setup/doctor";
 import { CLIENTS, install, InstallError, type ClientName } from "./setup/install";
+import { runUpdate } from "./setup/update";
 
 const HELP = `grimoire — 로컬 git 이력을 AI 코딩 도구의 기억으로
 
@@ -51,6 +54,11 @@ MCP 연결:
   grimoire doctor                 연결 문제 진단
   grimoire mcp                    MCP 서버 (stdio) — 보통 클라이언트가 직접 띄웁니다
 
+업데이트 (GitHub 릴리스):
+  grimoire update                 최신 릴리스로 올리고 다시 빌드  [--check] 확인만  [--dry-run] 할 일만 보기
+                                  하루 한 번 자동 확인 — 끄려면 GRIMOIRE_UPDATE_CHECK=0
+
+버전: ${VERSION}
 데이터: ${dbPath()}
 `;
 
@@ -81,6 +89,7 @@ async function main(argv: string[]): Promise<number> {
       json: { type: "boolean" },
       project: { type: "string" },
       "dry-run": { type: "boolean" },
+      check: { type: "boolean" },
     },
   });
 
@@ -92,6 +101,9 @@ async function main(argv: string[]): Promise<number> {
   }
   if (command === "install") {
     return cmdInstall(positionals[0], values.project, values["dry-run"]);
+  }
+  if (command === "update") {
+    return runUpdate({ check: values.check, dryRun: values["dry-run"] });
   }
 
   const db = openDb(dbPath());
@@ -314,7 +326,22 @@ const printJson = (value: unknown) => {
   return 0;
 };
 
-main(process.argv.slice(2)).then(
+/** 끝나고 새 버전을 알려 줄 명령 — mcp(stdout이 통신로)·doctor·update는 따로 다룬다 */
+const NOTICE_COMMANDS = new Set(["add", "scan", "sync", "repos", "search", "show", "overview", "note", "embed", "remove"]);
+
+/** 명령과 나란히 하루 한 번 업데이트를 확인하고, 새 버전이 있으면 stderr로 한 줄 알린다 */
+async function runWithUpdateNotice(argv: string[]): Promise<number> {
+  const checking = NOTICE_COMMANDS.has(argv[0] ?? "") ? refreshUpdateCache({ timeoutMs: 1_500 }) : null;
+  const code = await main(argv);
+  if (checking) {
+    await checking;
+    const update = pendingUpdate();
+    if (update) console.error(`\n새 버전 ${update.latest}이 있습니다 (지금 ${update.current}) — grimoire update`);
+  }
+  return code;
+}
+
+runWithUpdateNotice(process.argv.slice(2)).then(
   (code) => {
     if (code >= 0) process.exitCode = code;
   },

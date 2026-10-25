@@ -115,7 +115,7 @@ async function main(): Promise<number> {
   // grimoire용 임시 DB — root 아래 레포를 새로 인덱싱
   const data = tempDir("grimoire-bench-data-");
   const neutralCwd = tempDir("grimoire-bench-cwd-");
-  const env = { GRIMOIRE_HOME: data, GRIMOIRE_SYNC_ON_START: "0", OLLAMA_HOST: process.env.BENCH_OLLAMA_HOST ?? "http://127.0.0.1:9" };
+  const env = { GRIMOIRE_HOME: data, GRIMOIRE_SYNC_ON_START: "0", GRIMOIRE_UPDATE_CHECK: "0", OLLAMA_HOST: process.env.BENCH_OLLAMA_HOST ?? "http://127.0.0.1:9" };
   if (modes.includes("grimoire")) {
     const started = Date.now();
     execFileSync(process.execPath, [cli, "scan", root], { env: { ...process.env, ...env }, stdio: "ignore" });

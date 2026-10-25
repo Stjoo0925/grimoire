@@ -9,6 +9,7 @@
  *   record_note        — 대화 중 배운 것·결정을 노트로 남김
  *
  * 등록된 레포가 하나도 없으면 결과에 `hint`를 실어, AI가 사용자에게 등록 방법을 안내하게 한다.
+ * 새 버전이 있으면 세션에 한 번 같은 `hint`로 업데이트를 알린다.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -27,6 +28,8 @@ export interface ToolContext {
   me: string[];
   /** 서버의 작업 디렉터리 — Claude Code는 보통 열려 있는 프로젝트 폴더다 */
   cwd: string;
+  /** 새 버전 안내 — 세션에 한 번만 문자열을 돌려준다 (서버가 채움) */
+  updateHint?: () => string | undefined;
 }
 
 /** 레포가 없을 때 AI가 사용자에게 전할 안내. 레포가 있으면 undefined. */
@@ -131,7 +134,7 @@ const SEARCH_LIMIT = 8;
 export async function callTool(context: ToolContext, name: string, args: Args = {}): Promise<unknown> {
   const { db, me } = context;
   const withHint = <T extends object>(result: T): T & { hint?: string } => {
-    const hint = emptyHint(context);
+    const hint = [emptyHint(context), context.updateHint?.()].filter(Boolean).join(" ");
     return hint ? { ...result, hint } : result;
   };
 

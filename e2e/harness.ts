@@ -77,6 +77,8 @@ async function connect(spec: ServerSpec, sandbox: { home: string; data: string }
       HOME: sandbox.home,
       GRIMOIRE_HOME: sandbox.data,
       GRIMOIRE_ME: ME,
+      // 하네스는 네트워크에 닿지 않는다 — 업데이트 확인은 단위 테스트에서 본다
+      GRIMOIRE_UPDATE_CHECK: "0",
       // 샌드박스에 Ollama가 있을 리 없지만, 혹시 있더라도 결과가 흔들리지 않게 닿지 않는 주소로
       OLLAMA_HOST: "http://127.0.0.1:9",
       ...extraEnv,

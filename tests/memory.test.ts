@@ -70,7 +70,9 @@ test("syncRepo: 지난 끝 커밋 뒤의 새 커밋만 읽고, 끝 커밋이 사
   assert.equal(search(db, "웹훅 서명", { kind: "file" }).hits[0]?.ref, "src/pay/webhook.ts");
 
   // 마지막 커밋을 고쳐 쓰고 옛 커밋을 지운다 → 저장해 둔 끝 커밋이 사라짐
-  git(dir, ["commit", "-q", "--amend", "-m", "feat: 결제 웹훅 서명 검증 (HMAC)"]);
+  // 테스트 git은 HOME을 바꿔 사용자 설정이 없다 — 작성자를 직접 준다 (Linux git은 추정하지 않고 거부한다)
+  const who = { GIT_AUTHOR_NAME: "me", GIT_AUTHOR_EMAIL: "me@example.com", GIT_COMMITTER_NAME: "me", GIT_COMMITTER_EMAIL: "me@example.com" };
+  git(dir, ["commit", "-q", "--amend", "-m", "feat: 결제 웹훅 서명 검증 (HMAC)"], who);
   git(dir, ["reflog", "expire", "--expire=now", "--all"]);
   git(dir, ["gc", "-q", "--prune=now"]);
   const rewritten = await syncRepo(db, repo);

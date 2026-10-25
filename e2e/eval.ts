@@ -9,12 +9,13 @@
  *   npm run eval -- --repo ~/big-repo --no-questions   색인 속도만
  *
  * 설정 파일(bench/eval.local.json):
- *   { "corpus": [{ "path": "~/work-dir/x", "sha": "<40자>" }, …],
- *     "questions": [{ id, repo?, type, q, expect: ["sha 7자 또는 경로 일부"], key?: ["답에 필요한 코드 조각"] }],
+ *   { "corpus": [{ "path": "~/work-dir/x", "sha": "<기본 브랜치 40자>", "tips": ["<고정 시점의 태그 끝 커밋>", …] }, …],
+ *     "questions": [{ id, repo?, type, q, expect: ["sha 7자 또는 경로 일부", "대안은 a|b"], key?: ["답에 필요한 코드 조각"] }],
  *     "include": ["eval-new.local.json"] }
  *
- * 코퍼스 고정: 원본 레포는 건드리지 않고, 고정한 sha만 가리키는 임시 shared clone(객체는 원본 것을 빌려 씀)을 색인한다.
- * 그래서 레포에 커밋이 쌓여도 같은 코퍼스를 다시 잴 수 있다.
+ * 코퍼스 고정: 원본 레포는 건드리지 않고, 고정한 sha(+ tips)만 가리키는 임시 shared clone(객체는 원본 것을 빌려 씀)을
+ * 색인한다. 실제 Grimoire는 브랜치·태그를 모두 보므로, 태그에서만 닿는 커밋도 tips로 남긴다.
+ * 레포에 커밋이 쌓여도 같은 코퍼스를 다시 잴 수 있다.
  *
  * 지표
  *  - 찾기(locate): search() 상위 8개 안에서 expect를 모두 담은 첫 결과의 순위 → Acc@1/3/8, MRR.
@@ -75,11 +76,12 @@ function git(cwd: string, args: string[]): string {
 }
 
 /** 원본 레포의 sha 하나만 가리키는 임시 clone — 원본 객체를 빌려 써서 빠르고, 원본은 건드리지 않는다 */
-function pin(source: string, sha: string, root: string): string {
+function pin(source: string, sha: string, root: string, tips: string[] = []): string {
   const dir = path.join(root, path.basename(source));
   execFileSync("git", ["clone", "-q", "--shared", "--no-checkout", source, dir], { stdio: "ignore" });
   for (const ref of git(dir, ["for-each-ref", "--format=%(refname)"]).split("\n").filter(Boolean)) git(dir, ["update-ref", "-d", ref]);
   git(dir, ["update-ref", "refs/heads/pinned", sha]);
+  tips.forEach((tip, index) => git(dir, ["update-ref", `refs/tags/pinned-${index}`, tip]));
   git(dir, ["symbolic-ref", "HEAD", "refs/heads/pinned"]);
   // 링크 모양을 원본과 같게
   let origin = "";
@@ -112,6 +114,11 @@ function metrics(rows: Row[], ks = [1, 3, 8]) {
   };
 }
 
+/** expect 하나 — "a|b"면 대안 중 하나라도 있으면 맞음 */
+function matches(text: string, expect: string): boolean {
+  return expect.split("|").some((alternative) => text.includes(alternative));
+}
+
 function hitText(hit: any): string {
   return [hit.repo, hit.ref, hit.title, ...(hit.files ?? [])].join(" ").toLowerCase();
 }
@@ -124,10 +131,10 @@ async function runQuestions(core: Core, db: any, questions: Question[], detail: 
     const start = process.hrtime.bigint();
     const result = core.search.search(db, question.q, { limit: 8 });
     const ms = Number(process.hrtime.bigint() - start) / 1e6;
-    const index = result.hits.findIndex((hit: any) => expect.every((item) => hitText(hit).includes(item)));
+    const index = result.hits.findIndex((hit: any) => expect.every((item) => matches(hitText(hit), item)));
     const response = JSON.stringify(await core.tools.callTool(context, "search_memory", { query: question.q, ...(detail ? { detail } : {}) }));
     const text = response.toLowerCase();
-    const evidence = expect.every((item) => text.includes(item));
+    const evidence = expect.every((item) => matches(text, item));
     const keys = (question.key ?? []).map((item) => item.toLowerCase());
     rows.push({
       id: question.id,
@@ -209,9 +216,9 @@ function compare(fileA: string, fileB: string): void {
   console.log(`chars        ${a.label}=${chars(pairs.map(([x]) => x))}  ${b.label}=${chars(pairs.map(([, y]) => y))}`);
 }
 
-function readQuestions(file: string): { corpus: { path: string; sha: string }[]; questions: Question[] } {
+function readQuestions(file: string): { corpus: { path: string; sha: string; tips?: string[] }[]; questions: Question[] } {
   const spec = JSON.parse(fs.readFileSync(file, "utf8")) as {
-    corpus?: { path: string; sha: string }[];
+    corpus?: { path: string; sha: string; tips?: string[] }[];
     questions?: Question[];
     include?: string[];
   };
@@ -253,10 +260,10 @@ async function main(): Promise<number> {
   const pinned = (values.repo?.length
     ? values.repo.map((dir) => {
         const source = path.resolve(expandHome(dir));
-        return { source, sha: git(source, ["rev-parse", "HEAD"]).trim() };
+        return { source, sha: git(source, ["rev-parse", "HEAD"]).trim(), tips: [] as string[] };
       })
-    : spec.corpus.map((item) => ({ source: path.resolve(expandHome(item.path)), sha: item.sha }))
-  ).map((item) => ({ ...item, dir: pin(item.source, item.sha, path.join(work, "repos")) }));
+    : spec.corpus.map((item) => ({ source: path.resolve(expandHome(item.path)), sha: item.sha, tips: item.tips ?? [] }))
+  ).map((item) => ({ ...item, dir: pin(item.source, item.sha, path.join(work, "repos"), item.tips) }));
   if (pinned.length === 0) throw new Error("코퍼스가 없습니다 (설정 파일의 corpus 또는 --repo)");
 
   const db = core.db.openDb(path.join(work, "eval.db"));

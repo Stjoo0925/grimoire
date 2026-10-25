@@ -73,12 +73,36 @@ function cachePath(env: Env): string {
   return path.join(grimoireHome(env), "update.json");
 }
 
+/**
+ * 릴리스 버전 문자열 (`0.3.0`, `1.0.0-rc.1`). 이 값은 `npm install -g 패키지@버전`·`git merge 태그`의 인자가 되고
+ * Windows에서는 셸을 거치므로, 위조된 응답이나 변조된 캐시가 옵션·명령을 끼워 넣지 못하게 이 형식만 받는다.
+ */
+const RELEASE_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$/;
+
+export function isReleaseVersion(value: unknown): value is string {
+  return typeof value === "string" && RELEASE_VERSION.test(value);
+}
+
+/** 캐시를 읽는다. 형식이 틀린 버전·태그·링크는 버린다(파일이 변조됐을 수 있다). */
 export function readUpdateCache(env: Env = process.env): UpdateCache | null {
+  let raw: Partial<UpdateCache>;
   try {
-    return JSON.parse(fs.readFileSync(cachePath(env), "utf8")) as UpdateCache;
+    raw = JSON.parse(fs.readFileSync(cachePath(env), "utf8")) as Partial<UpdateCache>;
   } catch {
     return null;
   }
+  if (!raw || typeof raw.checkedAt !== "string") return null;
+  const cache: UpdateCache = { checkedAt: raw.checkedAt };
+  if (isReleaseVersion(raw.latest) && (raw.tag === undefined || raw.tag === `v${raw.latest}` || raw.tag === raw.latest)) {
+    cache.latest = raw.latest;
+    if (raw.tag !== undefined) cache.tag = raw.tag;
+    if (isReleaseUrl(raw.url)) cache.url = raw.url;
+  }
+  return cache;
+}
+
+function isReleaseUrl(value: unknown): value is string {
+  return typeof value === "string" && (value === RELEASES_URL || value.startsWith(`${RELEASES_URL}/`)) && !/\s/.test(value);
 }
 
 /** "0.10.0" > "0.9.1". 앞의 v와 -prerelease는 무시한다. */
@@ -121,17 +145,19 @@ export async function refreshUpdateCache(options: RefreshOptions = {}): Promise<
     });
     if (res.ok) {
       const body = (await res.json()) as { tag_name?: string; html_url?: string };
-      if (body.tag_name) {
+      const latest = typeof body.tag_name === "string" ? body.tag_name.replace(/^v/, "") : "";
+      // 형식이 틀리면 무시하고 알던 버전을 남긴다
+      if (isReleaseVersion(latest)) {
         next.tag = body.tag_name;
-        next.latest = body.tag_name.replace(/^v/, "");
-        next.url = body.html_url ?? RELEASES_URL;
+        next.latest = latest;
+        next.url = isReleaseUrl(body.html_url) ? body.html_url : RELEASES_URL;
       }
     }
   } catch {
     // 오프라인·타임아웃 — 다음 날 다시 묻는다
   }
   try {
-    fs.mkdirSync(grimoireHome(env), { recursive: true });
+    fs.mkdirSync(grimoireHome(env), { recursive: true, mode: 0o700 });
     fs.writeFileSync(cachePath(env), JSON.stringify(next, null, 2));
   } catch {
     // 캐시를 못 써도 기능에는 지장 없다

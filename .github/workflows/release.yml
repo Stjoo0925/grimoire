@@ -18,6 +18,12 @@
 #
 # npm 배포는 Trusted Publishing(OIDC) — 토큰 시크릿이 없고 2FA 계정에서도 동작하며 provenance가 붙는다.
 # npmjs.com의 패키지 Settings → Trusted Publisher에 이 레포와 이 파일(release.yml)이 등록돼 있어야 한다.
+#
+# 공급망 방어:
+#  - 권한은 job마다 필요한 만큼만 준다. 배포 권한(id-token)은 publish job에만 있고 외부 액션(release-please)에는 없다.
+#  - 액션은 커밋 SHA로, npm은 정확한 버전으로 고정한다 (태그가 옮겨져도 다른 코드가 돌지 않게).
+#  - checkout 토큰을 .git/config에 남기지 않는다 — `npm ci`의 설치 스크립트가 쓰기 토큰을 읽지 못하게.
+#    태그는 git push 대신 GitHub API로 만든다.
 name: Release
 
 on:
@@ -25,10 +31,7 @@ on:
     branches: [main]
   workflow_dispatch:
 
-permissions:
-  contents: write # 태그·릴리스, 릴리스 PR 브랜치
-  pull-requests: write # 릴리스 PR
-  id-token: write # npm Trusted Publishing
+permissions: {}
 
 concurrency:
   group: release
@@ -37,13 +40,18 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # 태그·릴리스
+      pull-requests: write # 릴리스 PR 라벨 정리
+      id-token: write # npm Trusted Publishing
     env:
       GRIMOIRE_UPDATE_CHECK: "0"
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: 무엇이 남았나 (태그·npm·GitHub 릴리스)
         id: state
@@ -82,9 +90,11 @@ jobs:
 
       - name: 기준 커밋으로
         if: steps.state.outputs.run == 'true'
-        run: git checkout --detach "${{ steps.state.outputs.base }}"
+        env:
+          BASE: ${{ steps.state.outputs.base }}
+        run: git checkout --detach "$BASE"
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         if: steps.state.outputs.run == 'true'
         with:
           node-version: 24
@@ -92,7 +102,7 @@ jobs:
           cache: npm
       # Trusted Publishing은 npm 11.5.1 이상이 필요하다
       - if: steps.state.outputs.run == 'true'
-        run: npm install -g npm@latest
+        run: npm install -g npm@11.21.1
       - if: steps.state.outputs.run == 'true'
         run: npm ci
       - if: steps.state.outputs.run == 'true'
@@ -107,16 +117,15 @@ jobs:
         env:
           TAG: ${{ steps.state.outputs.tag }}
           BASE: ${{ steps.state.outputs.base }}
-        run: |
-          git tag "$TAG" "$BASE"
-          git push origin "$TAG"
+        run: gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$BASE" >/dev/null
 
       - name: GitHub 릴리스
         if: steps.state.outputs.run == 'true' && steps.state.outputs.need_release == 'true'
         env:
           TAG: ${{ steps.state.outputs.tag }}
+          VERSION: ${{ steps.state.outputs.version }}
         run: |
-          node .github/scripts/release-notes.mjs "${{ steps.state.outputs.version }}" > "$RUNNER_TEMP/notes.md"
+          node .github/scripts/release-notes.mjs "$VERSION" > "$RUNNER_TEMP/notes.md"
           gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
 
       - name: 릴리스 PR 표시 정리 (release-please가 다음 PR을 열 수 있게)
@@ -130,8 +139,11 @@ jobs:
   release-pr:
     needs: publish
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # 릴리스 PR 브랜치
+      pull-requests: write # 릴리스 PR
     steps:
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
         with:
           # 기본 토큰으로 연 PR에서는 CI가 돌지 않아, main 보호(필수 체크) 아래에서 머지할 수 없다.
           # RELEASE_PLEASE_TOKEN(fine-grained PAT)이 있으면 그것으로 PR을 열어 CI가 돌게 한다.

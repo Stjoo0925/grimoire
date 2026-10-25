@@ -130,7 +130,7 @@ const MIGRATIONS: string[] = [
 ];
 
 export function openDb(file: string): DB {
-  if (file !== ":memory:") fs.mkdirSync(path.dirname(file), { recursive: true });
+  if (file !== ":memory:") makePrivate(file);
   const Database = loadSqlite();
   const db = new Database(file);
   db.pragma("journal_mode = WAL");
@@ -138,6 +138,24 @@ export function openDb(file: string): DB {
   db.pragma("busy_timeout = 5000");
   migrate(db);
   return db;
+}
+
+/**
+ * DB에는 비공개 레포의 커밋 메시지·코드 심볼·경로가 들어 있으므로 나만 읽게 한다 — 폴더 0700, 파일 0600.
+ * 폴더는 새로 만들 때만 권한을 정한다(GRIMOIRE_HOME으로 고른 기존 폴더는 건드리지 않는다).
+ * 파일은 SQLite보다 먼저 0600으로 만들어 둔다 — SQLite는 -wal·-shm을 DB 파일과 같은 권한으로 만든다.
+ * 이전 버전이 0644로 만든 파일도 열 때 고친다. Windows에서는 chmod가 의미 없어 실패해도 넘어간다.
+ */
+function makePrivate(file: string): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.closeSync(fs.openSync(file, "a", 0o600));
+  for (const target of [file, `${file}-wal`, `${file}-shm`]) {
+    try {
+      if (fs.statSync(target).mode & 0o077) fs.chmodSync(target, 0o600);
+    } catch {
+      // 없거나 권한을 바꿀 수 없음
+    }
+  }
 }
 
 function migrate(db: DB): void {

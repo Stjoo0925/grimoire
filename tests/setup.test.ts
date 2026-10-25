@@ -66,9 +66,12 @@ test("install: 설정 파일을 만들고, 백업하고, 두 번째는 그대로
   // 기존 설정이 있는 cursor — 다른 서버 보존 + .bak
   const cursorFile = path.join(home, ".cursor", "mcp.json");
   fs.mkdirSync(path.dirname(cursorFile), { recursive: true });
-  fs.writeFileSync(cursorFile, JSON.stringify({ mcpServers: { other: { command: "x" } } }));
+  fs.writeFileSync(cursorFile, JSON.stringify({ mcpServers: { other: { command: "x" } } }), { mode: 0o600 });
   const cursor = await install("cursor", { cliPath, env: {}, home });
   assert.equal(cursor.backup, `${cursorFile}.bak`);
+  // 권한 보존 (rename으로 갈아 끼워도 600 유지)
+  assert.equal(fs.statSync(cursorFile).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(cursor.backup!).mode & 0o777, 0o600);
   const merged = JSON.parse(fs.readFileSync(cursorFile, "utf8"));
   assert.deepEqual(Object.keys(merged.mcpServers).sort(), ["grimoire", "other"]);
 

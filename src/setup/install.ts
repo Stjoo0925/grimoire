@@ -145,13 +145,17 @@ export async function install(client: ClientName, options: InstallOptions): Prom
   }
 
   fs.mkdirSync(path.dirname(file), { recursive: true });
+  // rename은 새 파일을 만드는 것이라 권한을 따로 옮겨야 한다 (설정 파일은 보통 600)
+  const mode = raw !== null ? fs.statSync(file).mode & 0o777 : 0o600;
   let backup: string | null = null;
   if (raw !== null) {
     backup = `${file}.bak`;
-    fs.writeFileSync(backup, raw);
+    fs.writeFileSync(backup, raw, { mode });
+    fs.chmodSync(backup, mode);
   }
   const temp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(temp, text);
+  fs.writeFileSync(temp, text, { mode });
+  fs.chmodSync(temp, mode);
   fs.renameSync(temp, file);
   return { client, file, backup, unchanged: false, next, spec };
 }

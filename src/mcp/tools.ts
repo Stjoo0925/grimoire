@@ -21,6 +21,7 @@ import { addNote } from "../core/notes";
 import { commitDetail, repoOverview, repoSummaries } from "../core/overview";
 import { search } from "../core/search";
 import { slimCommit, slimOverview, slimRepos, slimSearch } from "./format";
+import { waitForWorkspace, type Workspace } from "./workspace";
 
 export interface ToolContext {
   db: DB;
@@ -30,11 +31,24 @@ export interface ToolContext {
   cwd: string;
   /** 새 버전 안내 — 세션에 한 번만 문자열을 돌려준다 (서버가 채움) */
   updateHint?: () => string | undefined;
+  /** 작업 중인 프로젝트 (서버가 채움, workspace.ts) */
+  workspace?: Workspace;
 }
+
+/** 새 작업 레포의 첫 인덱싱을 검색이 기다려 주는 상한 */
+const WORKSPACE_WAIT_MS = 15_000;
 
 /** 레포가 없을 때 AI가 사용자에게 전할 안내. 레포가 있으면 undefined. */
 export function emptyHint(context: ToolContext): string | undefined {
-  if (listRepos(context.db).length > 0) return undefined;
+  const repos = listRepos(context.db);
+  const root = context.workspace?.root;
+  if (repos.length > 0) {
+    // 자동 등록을 끈 채 작업 중인 레포가 빠져 있으면 알린다 — 말하지 않으면 AI도 모른다
+    if (root && !repos.some((repo) => repo.path === root)) {
+      return `지금 작업 중인 레포(${root})는 Grimoire에 등록돼 있지 않아 검색에서 빠집니다 — add_repo {"path": "${root}"}로 등록할 수 있습니다.`;
+    }
+    return undefined;
+  }
   const cwdIsRepo = fs.existsSync(path.join(context.cwd, ".git"));
   return [
     "아직 인덱싱된 레포가 없습니다.",
@@ -133,6 +147,8 @@ const SEARCH_LIMIT = 8;
 /** 도구를 실행하고 JSON 직렬화 가능한(간결한) 결과를 돌려준다. 잘못된 인자는 ToolError. */
 export async function callTool(context: ToolContext, name: string, args: Args = {}): Promise<unknown> {
   const { db, me } = context;
+  // 새 작업 레포가 첫 인덱싱 중이면 (상한 안에서) 기다렸다가 답한다
+  const current = await waitForWorkspace(context.workspace, WORKSPACE_WAIT_MS);
   const withHint = <T extends object>(result: T): T & { hint?: string } => {
     const hint = [emptyHint(context), context.updateHint?.()].filter(Boolean).join(" ");
     return hint ? { ...result, hint } : result;
@@ -162,8 +178,9 @@ export async function callTool(context: ToolContext, name: string, args: Args = 
         until: str(args.until),
         kind,
         limit: num(args.limit) ?? SEARCH_LIMIT,
+        preferRepoId: current?.id,
       });
-      return withHint(slimSearch(result, me));
+      return withHint({ ...(current ? { current: current.name } : {}), ...slimSearch(result, me) });
     }
     case "show_commit": {
       const sha = str(args.sha);
@@ -187,7 +204,7 @@ export async function callTool(context: ToolContext, name: string, args: Args = 
       return slimOverview(repoOverview(db, repo, me));
     }
     case "list_repos":
-      return withHint({ me, repos: slimRepos(repoSummaries(db, me)) });
+      return withHint({ me, ...(current ? { current: current.name } : {}), repos: slimRepos(repoSummaries(db, me)) });
     case "add_repo": {
       const target = str(args.path);
       if (!target) throw new ToolError("path가 필요합니다");

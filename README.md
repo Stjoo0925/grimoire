@@ -57,11 +57,21 @@ To run from source, clone it and run `npm install && npm run build && npm link`.
 Checks the Grimoire version (whether a new release is out), the node version and SQLite module, git, the DB and registered repos, your email, Ollama, and the config
 each client has (whether the node path exists, matches the current node, and points at the same DB), and tells you the command to fix it.
 
+### The project you're working in is registered automatically
+
+Claude Code and Cursor start the MCP server in the open project folder. If that folder is in a git repo that isn't
+registered yet, Grimoire **registers it on startup and syncs it before any other repo**. Your first search waits
+(up to 15 seconds) for that first index, so you never need `add_repo` for the project you have open.
+
+- Results from the current repo are **ranked first** (other repos still show up), and responses include `current: "<repo>"`.
+- Set `GRIMOIRE_AUTO_ADD=0` to turn this off. Then, if the current repo isn't registered, the `hint` says so instead of staying silent.
+- Skipped when the repo root is your home directory or `/` (dotfile repos and the like).
+- Claude Desktop has no project folder (it starts the server in `/`), so register repos there as described below.
+
 ### Registering repos mid-conversation
 
 With no repos yet, results carry a `hint`, so the AI suggests registering first.
 The `add_repo` tool registers right from the conversation ("remember every repo under ~/work-dir" → `scan: true`).
-In Claude Code, if the open project folder is a git repo, that path is suggested.
 
 ### Tools
 

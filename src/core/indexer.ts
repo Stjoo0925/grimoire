@@ -126,7 +126,27 @@ export function discoverRepos(root: string, maxDepth = 4): string[] {
   return found;
 }
 
-export async function syncRepo(db: DB, repo: RepoRow): Promise<SyncResult> {
+/**
+ * 같은 레포의 동기화는 한 번에 하나만 — 기동 시 자동 동기화·작업 레포 등록·add_repo가 겹치면
+ * 둘 다 같은 "새 sha"를 읽어 commit_files에 중복 행을 넣는다. 레포 경로별로 줄을 세운다.
+ */
+const syncing = new Map<string, Promise<SyncResult>>();
+
+export function syncRepo(db: DB, repo: RepoRow): Promise<SyncResult> {
+  const previous = syncing.get(repo.path) ?? Promise.resolve(null);
+  const next = previous.then(
+    () => syncRepoNow(db, repo),
+    () => syncRepoNow(db, repo),
+  );
+  syncing.set(repo.path, next);
+  const clear = () => {
+    if (syncing.get(repo.path) === next) syncing.delete(repo.path);
+  };
+  next.then(clear, clear);
+  return next;
+}
+
+async function syncRepoNow(db: DB, repo: RepoRow): Promise<SyncResult> {
   if (!fs.existsSync(repo.path)) {
     throw new Error(`레포 경로가 사라졌습니다: ${repo.path} (grimoire remove로 정리하세요)`);
   }

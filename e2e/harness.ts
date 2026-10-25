@@ -64,12 +64,18 @@ interface Session {
   close: () => Promise<void>;
 }
 
-async function connect(spec: ServerSpec, sandbox: { home: string; data: string }, extraEnv: Record<string, string> = {}): Promise<Session> {
+async function connect(
+  spec: ServerSpec,
+  sandbox: { home: string; data: string },
+  extraEnv: Record<string, string> = {},
+  /** 서버를 띄울 폴더 — Claude Desktop은 "/", Claude Code·Cursor는 열린 프로젝트 폴더 */
+  cwd = "/",
+): Promise<Session> {
   let stderr = "";
   const transport = new StdioClientTransport({
     command: spec.command,
     args: spec.args,
-    cwd: "/",
+    cwd,
     // 설정에 적힌 env는 살리되 DB·HOME·"나"는 샌드박스 값으로 덮는다
     env: {
       ...(spec.env ?? {}),
@@ -264,6 +270,30 @@ async function runScenario(spec: ServerSpec): Promise<StepResult[]> {
       if (found.json.hits.length > 0) return `${SYNC_WAIT_MS - (deadline - Date.now())}ms 만에 반영`;
       if (Date.now() > deadline) throw new Check(`${SYNC_WAIT_MS}ms 안에 새 커밋이 검색되지 않았습니다`);
       await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+  });
+
+  await step("프로젝트 폴더에서 뜨면 그 레포를 자동 등록하고 current로 우선", async () => {
+    // Claude Code처럼 프로젝트(하위 폴더) 안에서, 빈 DB로 띄운다 — add_repo 없이 바로 검색돼야 한다
+    const fresh = { home: sandbox.home, data: tempDir("grimoire-e2e-ws-") };
+    const projectSession = await connect(spec, fresh, {}, path.join(fixture.web, "src"));
+    try {
+      const found = await call(projectSession, "search_memory", { query: "장바구니" });
+      expect(found.json.current === "shop-web", `current: ${found.json.current}`);
+      expect(found.json.hits.length > 0 && found.json.hint === undefined, `자동 등록 안 됨: ${found.text}`);
+      expect(projectSession.stderr().includes("작업 중인 프로젝트를 등록합니다"), "등록 로그가 없습니다");
+    } finally {
+      await projectSession.close();
+    }
+    // 끄면 등록하지 않는다
+    const off = { home: sandbox.home, data: tempDir("grimoire-e2e-ws-off-") };
+    const offSession = await connect(spec, off, { GRIMOIRE_AUTO_ADD: "0" }, fixture.web);
+    try {
+      const listed = await call(offSession, "list_repos");
+      expect(listed.json.repos.length === 0 && listed.json.current === undefined, `꺼도 등록됨: ${listed.text}`);
+    } finally {
+      await offSession.close();
+      for (const dir of [fresh.data, off.data]) fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 

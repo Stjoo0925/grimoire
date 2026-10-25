@@ -23,6 +23,8 @@ const SEMANTIC_MIN = 0.45;
 export const RRF_K = 60;
 /** 개념이 코드 파일 이름에 들어 있을 때 곱하는 가중치 */
 const FILE_NAME_BONUS = 1.6;
+/** 현재 작업 레포 결과에 곱하는 가중치 */
+const CURRENT_REPO_BOOST = 1.5;
 /** 이보다 많은 파일을 건드린 커밋은 "대량 커밋"으로 보고 순위를 낮춘다 */
 const BULK_COMMIT_FILES = 40;
 /** 재정렬 전에 bm25로 넉넉히 뽑아 둘 배수 */
@@ -173,6 +175,11 @@ export interface SearchFilters {
 
 export interface SearchOptions extends SearchFilters {
   limit?: number;
+  /**
+   * 지금 작업 중인 레포(repos.id) — 그 레포의 결과를 앞으로 당긴다.
+   * 개발 중 질문은 대개 현재 프로젝트에 대한 것이다. 다른 레포를 지우지는 않는다(repoId 필터와 다름).
+   */
+  preferRepoId?: number;
   /** false면 임베딩이 있어도 키워드만 */
   semantic?: boolean;
   env?: Env;
@@ -255,7 +262,7 @@ export async function search(db: DB, query: string, options: SearchOptions = {})
     }
   }
 
-  const fused = fuse(keyword, semantic);
+  const fused = preferRepo(db, fuse(keyword, semantic), options.preferRepoId);
   const terms = queryTerms(query);
   const hits = fused.slice(0, limit).map((item) => toHit(db, item.docId, item.score, item.matchedBy, item.snippet, terms));
   return {
@@ -321,6 +328,23 @@ function semanticCandidates(
     .sort((a, b) => b.similarity - a.similarity)
     .slice(0, pool)
     .map((row) => ({ docId: row.docId }));
+}
+
+/** 현재 레포 결과의 점수를 키워 다시 줄 세운다 */
+function preferRepo<T extends { docId: number; score: number }>(db: DB, items: T[], repoId: number | undefined): T[] {
+  if (repoId === undefined || items.length === 0) return items;
+  const ids = items.map((item) => item.docId);
+  const inRepo = new Set(
+    (
+      db.prepare(`SELECT id FROM docs WHERE repo_id = ? AND id IN (${ids.map(() => "?").join(", ")})`).all(repoId, ...ids) as {
+        id: number;
+      }[]
+    ).map((row) => row.id),
+  );
+  if (inRepo.size === 0) return items;
+  return items
+    .map((item) => (inRepo.has(item.docId) ? { ...item, score: item.score * CURRENT_REPO_BOOST } : item))
+    .sort((a, b) => b.score - a.score);
 }
 
 /** Reciprocal Rank Fusion — 순위만 쓰므로 bm25와 코사인의 척도 차이를 신경 쓰지 않는다. */

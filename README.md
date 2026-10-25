@@ -78,15 +78,15 @@ The `add_repo` tool registers right from the conversation ("remember every repo 
 | Tool | What it does |
 |---|---|
 | `search_memory` | Searches current code files, commits and notes at once. Filters: `repo`, `author` (`me`), `since`, `until`, `kind` (`file`, `commit`, `note`), `limit` (default 8). `detail`: `index` (default, a compact list), `summary` (on request: the top 3 commits also carry their full message and the functions they changed), `full` (also the top commit's diff) |
-| `show_commit` | Message, changed files and diff of one commit (read straight from the local repo). The diff defaults to 120 lines; `paths` narrows it to specific files |
+| `show_commit` | Message, changed files and diff of a commit (read straight from the local repo). The diff defaults to 120 lines; `paths` narrows it to specific files. `shas` (up to 5) returns several commits in one call, 40 diff lines each by default |
 | `get_repo_overview` | Tech stack (from manifests), quarterly activity, most-touched directories, top authors, recent notable commits |
 | `list_repos` | Indexed repos |
 | `add_repo` | Register + index a repo (or, with `scan: true`, every repo under a folder). Scanning `/` or your whole home goes through `grimoire scan` in the terminal |
 | `record_note` | Save something learned or decided as a note → searchable afterwards |
 
 Responses are minimal to save tokens: 10-char shas, dates to the day, `me` for your own commits, and the commit link prefix per repo (`links`) sent only once.
-Fields the answer doesn't need (local paths, scores, emails) are dropped. Tool descriptions only say *when* to use each tool, since tool definitions ride along with every request in every session where the server is on.
-What piles up in the conversation context is the cost. The "response size budget" step in `npm run e2e` (260 chars per search hit, 2600 chars of tool definitions) keeps the format from growing back.
+Fields the answer doesn't need (local paths, scores, emails) are dropped. Tool descriptions are short English and only say *when* to use each tool, since tool definitions ride along with every request in every session where the server is on. Read-only tools carry `readOnlyHint`, and `add_repo` carries `idempotentHint`, so clients can tell which calls are safe.
+What piles up in the conversation context is the cost. The "response size budget" step in `npm run e2e` (260 chars per search hit, 2600 chars of tool definitions, 420 chars of description text) keeps the format from growing back.
 The CLI shows the full, unslimmed results.
 
 ### Current code index

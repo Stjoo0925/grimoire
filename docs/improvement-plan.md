@@ -294,3 +294,103 @@ Claude Code는 기본으로 **도구 이름 + 서버 instructions만** 먼저 �
 - **판정: 미채택.** 89문항의 Acc@1 순증 7문항(p=0.039)은 새 질문에서 재현되지 않았다. 89문항에 맞춘 효과였다.
 - 의도 규칙은 89문항에서 오분류 0이었지만, 새 질문에서는 이력 질문 2개를 위치로 잘못 봤다("어느 커밋이었지", "~어쩌고 하는 함수로 … 한 커밋"). 위치 질문은 15개 중 10개를 잡았지만 위치 Acc@1은 그대로였다.
 - 교훈: 평가 질문을 보며 규칙을 다듬는 개선은 반드시 따로 떼어 둔 질문으로 확인한다. `bench/eval-holdout.local.json`은 앞으로도 규칙을 다듬는 데 보지 않고, 최종 확인에만 쓴다.
+
+## 9. 유사 프로젝트 조사와 다음 방향 (2026-10-25)
+
+> §7~8에서 병목이 "형식"이 아니라 "찾기"로 확인됐다. 같은 문제를 푸는 프로젝트 약 20개를 네 갈래로 살펴, 임베딩·LLM·데몬 없음 원칙 안에서 가져올 수 있는 기법을 골랐다.
+
+### 9-1. 지도
+
+| 갈래 | 대표 | 접근 | Grimoire와 다른 점 |
+|---|---|---|---|
+| 세션 메모리 | claude-mem, Engram, agentmemory, KeepGoing, EARS | Claude Code 훅으로 대화·도구 사용을 자동 캡처, SQLite FTS5(+벡터), search→timeline→get 3단계 공개 | 기억의 원천이 **대화**다. git 이력은 보지 않는다 |
+| 코드 검색 인덱스 | claude-context, anyindex-mcp, codesearch(Rust), codebase-memory-mcp, Serena, codanna | tree-sitter 청킹 + 임베딩 + BM25를 RRF로 융합, 호출·import 그래프, LSP 심볼 | **현재 코드**만 본다. 커밋·"왜"는 없다 |
+| git 질의 래퍼 | pastcode, git-insight-mcp, git-summary-mcp | 색인 없이 blame·pickaxe(`-S`)·`-L`·bisect·공변경(co-change)을 git 명령으로 즉답 | 정확하지만 **자연어 검색이 없다** |
+| 커밋 의미 검색 | spelungit, qdrant-mcp-server, semcode | 커밋 메시지·diff를 임베딩(MiniLM·Ollama)해 자연어로 검색, SQLite/Qdrant | 가장 가깝다. 모델 다운로드·Python 의존 |
+
+"색인된 다중 레포 git 이력 + 현재 코드 + 근거 + 임베딩 없음 + 한국어" 조합을 하는 프로젝트는 찾지 못했다. 이 자리는 비어 있다.
+
+### 9-2. 공통 패턴에서 보이는 빈칸
+
+| 패턴 | 누가 | Grimoire 현재 | 관련 지표 |
+|---|---|---|---|
+| 어간·동의어 처리한 BM25 | agentmemory(stemmed BM25 + synonym) | 한→영 사전만, 영어 어간 없음 ("rendering"≠"render") | 영어 Acc@1 0.125 |
+| 이름 정확 일치를 별도 1급 신호로 | Serena·codanna(심볼 테이블), LocAgent ablation, git `-S`/`-L` | 식별자도 접두 OR 토큰 중 하나 | 식별자 Acc@1 0.375 (4번 실험에서 0.625까지 가능) |
+| 관계 신호(참조·공변경) | aider repo map(정의·참조 그래프 PageRank), git-insight `co_change`, RepoGraph 1-hop | 없음. `commit_files`는 이미 있어 공변경은 무료 | 위치 Acc@1 0.21 |
+| "왜"의 자동 캡처 | 세션 메모리 도구 전부(훅) | `record_note` 수동 | 이력 Acc@1 0.225 — 커밋 제목이 빈약한 경우 |
+| 점진 공개 3단계 | claude-mem, Engram | index/summary/full로 이미 있음 | §7: 형식은 병목 아님 → 후순위 |
+
+### 9-3. 방향 (우선순위 순)
+
+채택 기준은 §8과 같다: Acc@1 순증 3문항 이상 · 짝 맥니마 p < 0.1 · 어느 유형도 2문항 이상 순손실 없음 · 지연 p50 1.5배 이내. 통과해도 홀드아웃 48문항(`bench/eval-holdout.local.json`)에서 다시 확인한 뒤 채택한다. 단, 1·5·6번은 정확도 기준이 아니라 각자의 기준으로 판단한다.
+
+| # | 내용 | 빌려온 곳 | 기대 효과 | 비용·위험 |
+|---|---|---|---|---|
+| 1 | **FTS5 `porter unicode61` 토크나이저**로 영어 어간 처리. 질의 쪽 영어 낱말도 같은 토크나이저를 거친다 | agentmemory, SQLite 내장 | 영어 8문항, 한→영 확장이 변형("validate"→"validation")에 닿는 경우 | 의존성 0. FTS 테이블 재생성 마이그레이션 1회. 한글 토큰은 porter가 건드리지 않는지 테스트 필요 |
+| 2 | **식별자 정확 일치 경로.** 질의 토큰이 camelCase·snake_case이거나 `code_files.symbols`에 정확히 있으면 BM25와 별개로 그 심볼을 가진 파일과 `docs_fts.code`에 그 이름이 있는 커밋을 먼저 올린다. 결과가 없을 때만 `git log -S <이름>`(pickaxe) fallback으로 "지워진 함수"를 잡는다 | Serena·codanna, LocAgent, pastcode·git-summary-mcp의 pickaxe | 식별자 Acc@1 0.375→0.6대 (4번 실험 수준)를 본문 색인 없이 재현 | pickaxe는 레포 크기에 비례해 느리다 — fallback에만, 상한 시간을 둔다 |
+| 3 | **공변경·import 관계.** `commit_files`에서 레포별 "함께 바뀐 파일 상위 N"을 집계해 파일 결과에 `related` 3개를 붙이고, 재정렬에서 많이 참조되는 파일에 작은 가산. import 그래프는 정규식(`from './x'`, `import x`)으로 파일 단위만 | git-insight `co_change`, aider repo map, RepoGraph | 위치 질문에서 1-hop 확장. "A 옆에 있는 B" 질문 | tree-sitter는 계속 보류. 가산 크기는 §8의 2번처럼 과적합 주의 — 새 질문으로 확인 |
+| 4 | **커밋에 "내 말"을 자동으로 묶는다.** Claude Code 훅(Stop 또는 커밋 뒤 PostToolUse)에서 그 세션의 **사용자 프롬프트 원문**을 다음 커밋 sha에 노트로 연결해 색인한다. LLM 요약이 아니라 원문이라 결정론적이고, 나중에 검색할 때 쓰는 말이 그때 썼던 말이라 어휘 불일치가 사라진다. `grimoire install claude-code`가 훅까지 쓴다 | claude-mem·EARS·KeepGoing(훅 캡처)을 LLM 없이 | 이력 질문에서 커밋 제목이 빈약한 경우를 정면으로 메움. **Grimoire만의 차별점** | 프라이버시: `<private>` 류 제외 규칙과 끄는 스위치 필요. 평가 셋에는 프롬프트가 없어 효과는 새 코퍼스(내 레포의 앞으로의 커밋)에서만 잴 수 있다 |
+| 5 | **평가 셋을 남의 레포로.** 공개 레포(oh-my-zsh 등)의 이슈 제목→수정 커밋, PR 본문→변경 파일 쌍을 `gh api`로 긁어 작성자가 다른 수백 문항을 기계적으로 만든다 | arXiv 2502.07067, LocAgent의 표준 방식 | 검정력 확보(§8: 순증 2~5문항은 89문항의 검정력 아래). 2·3번 조합처럼 89문항에 맞춘 효과를 홀드아웃 48문항과 함께 걸러낸다 | 영어 코퍼스라 한국어 성능은 못 잰다 — 손 질문 89개는 그대로 유지 |
+| 6 | **도구 표면.** 설명·instructions 영어화, 읽기 도구 `readOnlyHint`, `search_memory`만 alwaysLoad, `show_commit`에 `shas: []` | §3-3, claude-mem(배치 조회) | 모든 세션의 토큰 비용 | 정확도와 무관. e2e 응답 예산으로 판단 |
+
+즉시 할 것(기준 없이): **squash 머지 커밋과 브랜치 커밋이 같은 제목으로 1·2위를 함께 차지하는 중복 제거**. 제목·변경 파일 집합이 같은 커밋은 한 결과로 접고 sha를 함께 싣는다. 응답 토큰에서 확실한 이득이고, 실제 DB에서 확인된 현상이다.
+
+### 9-4. 하지 않을 것 (조사로 다시 확인)
+
+- **임베딩**: spelungit·qdrant-mcp-server·semcode가 모두 임베딩인데, 모델 다운로드와 Python/Ollama 의존이 따른다. §1-6의 결정을 뒤집을 근거는 조사에서도 없었다.
+- **한국어 형태소 분석기**: kiwi-nlp(npm, WASM)는 있지만 사전이 수십 MB다. JS 경량판은 없다. §1-3의 음절 바이그램이 맞다.
+- **세션 메모리의 4계층·망각 곡선·지식 그래프**(agentmemory): 대화 기억의 문제이고 git 이력 검색의 문제가 아니다.
+- **점진 공개 3단계의 확대**: §7에서 형식이 병목이 아님을 확인했다. 6번의 배치 조회 정도만.
+
+### 9-5. 출처
+
+- 세션 메모리: [claude-mem](https://github.com/thedotmack/claude-mem) · [Engram](https://github.com/Gentleman-Programming/engram) · [agentmemory](https://github.com/rohitg00/agentmemory) · [KeepGoing](https://github.com/keepgoing-dev/mcp-server) · [EARS](https://github.com/huangy22/ears) · [메모리 MCP 비교 2026](https://mnemoverse.com/docs/library/memory-mcp-servers-compared) · [Memory MCP 벤치 비교](https://getunblocked.com/blog/memory-mcp-servers-compared/)
+- 코드 검색 인덱스: [claude-context](https://github.com/zilliztech/claude-context) · [anyindex-mcp](https://github.com/officialalexeev/anyindex-mcp) · [codesearch](https://github.com/flupkede/codesearch) · [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) · [Serena](https://github.com/oraios/serena) · [codanna](https://docs.rs/crate/codanna/0.2.0) · [aider repo map](https://aider.chat/docs/repomap.html)
+- git 질의 래퍼: [pastcode](https://github.com/muhcen/pastcode) · [git-insight-mcp](https://github.com/flaviomartil/git-insight-mcp) · [git-summary-mcp](https://github.com/yifanyifan897645/git-summary-mcp) · [git pickaxe/-L 가이드](https://braindetox.kr/en/posts/git_history_commands_guide_2026.html)
+- 커밋 의미 검색: [spelungit](https://github.com/haacked/spelungit) · [qdrant-mcp-server](https://github.com/mhalder/qdrant-mcp-server) · [semcode](https://mcpservers.org/servers/goodbyeplanet/semcode)
+- 한국어 검색: [FTS5 한국어 검색 사례](https://dev.to/riversea/fts5-on-cloudflare-d1-cut-my-korean-keyword-search-from-220ms-to-22ms-heres-what-almost-broke-it-3l9p) · [lindera-sqlite](https://docs.rs/lindera-sqlite)
+
+## 10. 1차 배치 결과 (2026-10-25)
+
+유사 프로젝트 조사에서 임베딩 없이 가져올 수 있는 레버 중 넷을 차례로 쟀다. 채택 기준은 §8과 같다(결과를 보기 전에 정함):
+89문항 Acc@1 순증 3문항 이상 · 짝 맥니마 p < 0.1 · 어느 유형도 2문항 이상 순손실 없음 · 지연 p50 1.5배 이내 · 통과해도 홀드아웃 48문항에서 다시 확인.
+0번(중복 접기)은 기준 없이 채택, 3번(도구 표면)은 정확도가 아니라 `npm run e2e`와 도구 정의 길이로 판정한다.
+비교는 모두 바로 앞 채택 상태와 짝지었다(0번은 기준선, 1·2번은 0번 적용 상태 — 0번은 Acc@1·Acc@3을 바꾸지 않아 기준선과 비교해도 같다).
+
+| 단계 | 내용 | Acc@1 | Acc@3 | Acc@8 | evidence | 지연 p50 | 얻음/잃음 (Acc@1) | p | 판정 |
+|---|---|---|---|---|---|---|---|---|---|
+| 기준 | 변경 전 (`ccb11a5`) | 0.225 | 0.382 | 0.494 | 0.483 | 46ms | — | — | — |
+| 0 | 같은 변경의 커밋 접기 (squash 머지 ↔ 브랜치 원본) | 0.225 | 0.382 | 0.506 | 0.494 | 47ms | 0 / 0 (Acc@8 1 / 0) | 1.0 | **채택** (기준 없음) |
+| 1 | FTS5 `porter unicode61` 토크나이저 | 0.213 | 0.382 | 0.494 | 0.483 | 49ms | 0 / 1 | 1.0 | 미채택 |
+| 2 | 식별자 정확 일치 단계 + `git log -S` 대체 경로 (첫 구현) | 0.258 | 0.427 | 0.539 | 0.517 | 56ms | 5 / 2 | 0.45 | — (구현 결함, 아래) |
+| 2′ | 2번에서 커밋 단계를 이름 원형 일치로 고침 | 0.270 | 0.427 | 0.539 | 0.517 | 54ms | 5 / 1 | 0.22 | 미채택 |
+| 3 | 도구 설명·instructions 영어화, annotations, `show_commit shas` | (검색 불변) 0.225 | 0.382 | 0.506 | 0.494 | 47ms | — | — | **채택** (e2e 18/18) |
+
+### 0번: 같은 변경의 커밋 접기 — 채택
+
+- 같은 레포에서 제목(PR 번호 접미 `(#N)` 제거)과 변경 파일 집합이 같은 커밋은 한 결과로 접는다. 대표는 날짜가 늦은 쪽(대개 머지 커밋), 접힌 sha는 `also`로 싣는다(index 응답에는 8자). limit 전에 접어 빈자리는 다음 후보가 채운다.
+- 한계(의도): 제목과 파일 집합이 정확히 같을 때만 접으므로, 커밋 여러 개를 squash한 PR(파일 집합이 어느 단일 커밋과도 다름)은 접히지 않는다.
+- 89문항: 잃은 질문 없음, 영어 질문 하나(gr-en-docker-ci-conflict)가 8위 안으로 들어왔다. 홀드아웃: Acc@1·Acc@3 그대로(0.375 · 0.438), Acc@8 0.521 → 0.542(1 / 0), 지연 46 → 44ms.
+
+### 1번: porter 어간 — 미채택
+
+- 기존 단계는 고치지 않고 마이그레이션 6을 덧붙여 `docs_fts`를 새로 만들고 옮기는 방식(5번과 같음, rowid·code 컬럼 유지)으로 구현했다. 옛 DB에서 올라오는 경로는 테스트로 확인했다.
+- 89문항 Acc@1 1 / 0 손실(session-ttl 1 → 2위), 식별자 질문 하나(cp-id-ait-query-param)가 8위 밖으로. **영어 8문항은 Acc@1·Acc@3·Acc@8·evidence 모두 변화 없음.**
+- 한 → 영 확장은 오히려 넓어졌다: "만료" → `expire`*가 어간 `expir`*로 바뀌어 `expired`·`expiry`까지 닿으면서, 위치 질문 두 개의 정답이 한 칸씩 밀렸다.
+- 접두 질의와의 상호작용: `"validation"*`은 어간 `valid`*로 넓어지지만, 잘린 꼴 `"validat"*`은 어간이 그대로라 `valid`에 닿지 않는다(색인은 `valid`). 질의 낱말은 대개 온전한 낱말이라 실제 영향은 작지만, 사전·질의에 잘린 접두를 쓰는 길은 막힌다. 한글 토큰과 `splitIdentifier` 낱말(소문자 원형 `ratelimit`, 쪼갠 `rate`·`limit`)은 porter와 상관없이 그대로 만난다.
+
+### 2번: 식별자 정확 일치 — 미채택
+
+- 질의 낱말이 식별자 꼴(camelCase·PascalCase·snake_case, `.`·`/`가 든 경로 조각, 또는 대소문자가 섞였고 `code_files.symbols`에 정확히 있는 이름)이면 bm25와 별개로 (a) 그 심볼을 가진 파일, (b) diff 이름(`docs_fts.code`)에 그 이름이 든 커밋을 맨 앞에 세웠다(파일·커밋 각 3개, 여러 식별자에 걸린 것 → 현재 레포 → bm25 순). 기술 이름(GitHub·GraphQL·Next.js)은 뺐다. (c) 둘 다 0건이고 코드 이름 꼴인데 색인 어디에도 그 낱말이 없으면 `git log -S<이름> --format=%H -n 20`(기본 ref만, 레포당 1.5초·전체 3초 상한)으로 넣거나 뺀 커밋을 찾았다.
+- 첫 구현은 (b)를 FTS 구문 일치로 해서 `UNIFORM_BENTO`가 `uniform_bento_grid_class`에도 걸렸다(unicode61이 밑줄에서 쪼갬). 원형 일치로 고친 2′에서 pf-id-bento 손실이 사라졌다.
+- 2′, 89문항: 식별자 Acc@1 0.375 → 0.75, 위치 +1, 이력·영어 변화 없음. 잃은 것은 cp-id-basic-auth 하나(질의의 `timingSafeEqual`이 다른 레포 커밋의 diff 이름에 정확히 있어 그 커밋이 정답 파일 앞에 섰다 — 정답 파일의 심볼은 `assertBasicAuthHeader`라 정확 일치에 걸리지 않음). 순증 4문항이지만 p = 0.22로 기준(0.1) 미달.
+- **홀드아웃(참고, 규칙 고정 뒤 한 번)**: Acc@1 0.375 → 0.313(0 / 3), 식별자 유형 0.5 → 0.167(2문항 순손실 — 유형 기준도 위반), Acc@8·evidence 그대로. 89문항의 식별자 이득은 새 질문에서 재현되지 않았다.
+- 지연: 전체 p50은 1.2배였지만 `git log -S` 대체 경로가 도는 질의는 1.0 ~ 2.4초(레포 5개를 차례로 훑음, 고정 코퍼스의 shared clone 기준). 식별자 유형 p50이 2ms → 960ms. 검색이 동기 함수라 그동안 MCP 서버의 이벤트 루프도 막힌다.
+- 다음에 다시 한다면: 정답 파일이 부분 이름(`assertBasicAuth` ⊂ `assertBasicAuthHeader`)만 가질 때와, 흔한 라이브러리 이름(`timingSafeEqual`)이 다른 레포 커밋에 있을 때를 구분해야 한다. 대체 경로는 현재 레포 하나로 좁히거나 비동기로 돌려야 한다.
+
+### 3번: 도구 표면 — 채택
+
+- `TOOLS` description과 서버 `instructions`를 영어로. 설명 글(도구·인자 description) 392 → 414자(show_commit 설명을 뜻이 잡히게 고친 뒤). instructions는 264자이고 첫 300자 안에 트리거 문구("where is the code that…", "how did I solve…", past commits, notes)와 주입 방지 문장이 있다(e2e가 확인).
+- 읽기 도구 4개(`search_memory`·`show_commit`·`get_repo_overview`·`list_repos`)에 `readOnlyHint: true`, `add_repo`에 `idempotentHint: true`, `record_note`는 부를 때마다 노트가 생겨 MCP 기본값(`idempotentHint` 없음 = false) 그대로.
+- `show_commit`에 `shas`(최대 5개): 한 호출로 여러 커밋, 커밋당 diff 기본 40줄. 없는 sha는 그 자리에 `error`.
+- 도구 정의 JSON 전체는 1745 → 1974자 — annotations(+177자)와 `shas` 인자 같은 구조가 늘었다. 글자 수로는 늘었지만, 한글(196자)이 빠져 토큰으로는 줄었을 것으로 본다(어림: 680 → 617). e2e에 설명 글 예산(420자)을 따로 두어 설명이 다시 길어지는 것을 막는다.

@@ -24,6 +24,12 @@ const GUI_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
 const CONNECT_BUDGET_MS = 5_000;
 const SYNC_WAIT_MS = 10_000;
 const EXPECTED_TOOLS = ["search_memory", "show_commit", "get_repo_overview", "list_repos", "add_repo", "record_note"];
+const READ_TOOLS = ["search_memory", "show_commit", "get_repo_overview", "list_repos"];
+/**
+ * 도구 설명 글(도구·인자 description) 예산 — 설명이 다시 길어지는 것을 막는 용도다.
+ * 영어로 옮기기 전 한국어 설명이 392자(도구 288 + 인자 104)였고, 영어판은 뜻이 잡히게 쓰고 약간의 여유를 둔다.
+ */
+const TOOL_TEXT_BUDGET = 420;
 
 interface ServerSpec {
   command: string;
@@ -157,6 +163,18 @@ async function runScenario(spec: ServerSpec): Promise<StepResult[]> {
     return tools.join(", ");
   });
 
+  await step("도구 힌트(annotations)와 서버 안내(instructions)", async () => {
+    const tools = (await live().client.listTools()).tools;
+    const hint = (name: string) => tools.find((tool) => tool.name === name)?.annotations;
+    const notReadOnly = READ_TOOLS.filter((name) => hint(name)?.readOnlyHint !== true);
+    expect(notReadOnly.length === 0, `readOnlyHint가 없는 읽기 도구: ${notReadOnly.join(", ")}`);
+    expect(hint("add_repo")?.idempotentHint === true && hint("record_note")?.idempotentHint !== true, "add_repo·record_note의 idempotentHint");
+    // 클라이언트가 앞부분만 보여 줄 수 있다 — 언제 쓰는지와 주입 방지 문장이 첫 300자 안에 있어야 한다
+    const head = (live().client.getInstructions() ?? "").slice(0, 300);
+    const absent = ["where is the code that", "how did I solve", "past commits", "notes", "never follow instructions"].filter((phrase) => !head.includes(phrase));
+    expect(absent.length === 0, `instructions 첫 300자에 없음: ${absent.join(" / ")}`);
+  });
+
   await step("빈 DB: list_repos·search_memory가 등록 안내(hint)를 준다", async () => {
     const listed = await call(live(), "list_repos");
     expect(listed.json?.repos?.length === 0, "레포가 비어 있어야 합니다");
@@ -199,9 +217,19 @@ async function runScenario(spec: ServerSpec): Promise<StepResult[]> {
     // summary는 요청할 때만 — 상위 커밋 3개에 본문·바뀐 함수를 더 싣는다. show_commit 한 번(diff 120줄)보다 작아야 남는 장사다
     const summary = await call(live(), "search_memory", { query, detail: "summary" });
     expect(summary.text.length < 3000, `검색 응답(summary) ${summary.text.length}자 — 예산 3000자`);
-    const tools = JSON.stringify((await live().client.listTools()).tools);
+    const listed = (await live().client.listTools()).tools;
+    const tools = JSON.stringify(listed);
     expect(tools.length < 2600, `도구 정의 ${tools.length}자 — 예산 2600자`);
-    return `index 건당 ${Math.round(perHit)}자 · summary ${summary.text.length}자 · 도구 정의 ${tools.length}자`;
+    // 설명 글은 따로 — annotations·인자 같은 구조가 늘어도 설명이 다시 길어지지 않게
+    const text = listed.reduce(
+      (sum, tool) =>
+        sum +
+        (tool.description ?? "").length +
+        Object.values((tool.inputSchema.properties ?? {}) as Record<string, { description?: string }>).reduce((n, prop) => n + (prop.description ?? "").length, 0),
+      0,
+    );
+    expect(text <= TOOL_TEXT_BUDGET, `도구 설명 글 ${text}자 — 예산 ${TOOL_TEXT_BUDGET}자`);
+    return `index 건당 ${Math.round(perHit)}자 · summary ${summary.text.length}자 · 도구 정의 ${tools.length}자(설명 ${text}자)`;
   });
 
   await step("search_memory: author=me 필터", async () => {
@@ -230,6 +258,21 @@ async function runScenario(spec: ServerSpec): Promise<StepResult[]> {
     expect(picked.json.diff?.includes("package.json"), "고른 파일 diff가 없습니다");
     const none = await call(live(), "show_commit", { sha, paths: ["nope.ts"] });
     expect(!none.json.diff && /일치하는 파일이 없습니다/.test(none.json.note ?? ""), `없는 경로 응답: ${none.text}`);
+  });
+
+  await step("show_commit shas: 여러 커밋을 한 번에", async () => {
+    const api = await call(live(), "search_memory", { query: "프로젝트 시작" });
+    const start = api.json.hits.find((hit: { title: string }) => hit.title === "feat: 프로젝트 시작")?.sha;
+    const both = await call(live(), "show_commit", { shas: [topSha, start, "0000000000"] });
+    expect(!both.isError, both.text);
+    const commits = both.json.commits as { sha: string; error?: string; diff?: string }[];
+    expect(commits.length === 3, `커밋 ${commits.length}개`);
+    expect(commits[0].sha === topSha && commits[1].sha === start, "순서대로");
+    expect(typeof commits[2].error === "string", "없는 sha는 그 자리에 error");
+    const many = await call(live(), "show_commit", { shas: ["a1", "a2", "a3", "a4", "a5", "a6"] });
+    expect(many.isError === true, "6개 이상은 거절");
+    const none = await call(live(), "show_commit", {});
+    expect(none.isError === true, "sha도 shas도 없으면 거절");
   });
 
   await step("get_repo_overview: 기술 스택과 디렉터리", async () => {

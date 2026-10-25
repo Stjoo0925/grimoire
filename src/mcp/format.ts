@@ -12,6 +12,8 @@ import type { CommitDetail, RepoOverview, RepoSummary } from "../core/overview";
 import type { SearchHit, SearchResult } from "../core/search";
 
 const SHA = 10;
+/** 접힌 같은 변경의 sha — show_commit으로 열 수 있을 만큼만 */
+const ALSO_SHA = 8;
 const FILES_PER_HIT = 4;
 const SNIPPET_CHARS = 140;
 /**
@@ -82,6 +84,7 @@ export function slimSearch(result: SearchResult, me: string[], detail: Detail = 
         by: who(hit.author, me),
         title: hit.title,
         files: [...hit.files.slice(0, shown), ...(more > 0 ? [`+${more}`] : [])],
+        ...(hit.also?.length ? { also: hit.also.map((sha) => sha.slice(0, ALSO_SHA)) } : {}),
         ...(changed.length > 0 ? { changed } : {}),
         body: snippet(hit.body || hit.snippet, SUMMARY_BODY_CHARS),
       };
@@ -93,6 +96,7 @@ export function slimSearch(result: SearchResult, me: string[], detail: Detail = 
       by: who(hit.author, me),
       title: hit.title,
       files: [...hit.files.slice(0, FILES_PER_HIT), ...(more > 0 ? [`+${more}`] : [])],
+      ...(hit.also?.length ? { also: hit.also.map((sha) => sha.slice(0, ALSO_SHA)) } : {}),
       body: snippet(hit.snippet),
     };
   });

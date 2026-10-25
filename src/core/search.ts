@@ -205,6 +205,8 @@ export interface SearchHit {
   lastCommit?: { sha: string; date: string; title: string } | null;
   /** kind='commit'일 때: 커밋 본문 전체 (snippet은 발췌) */
   body?: string;
+  /** kind='commit'일 때: 같은 변경으로 접힌 다른 커밋 sha (squash 머지의 브랜치 원본 등) */
+  also?: string[];
   /** kind='commit'일 때: diff에서 바뀐 선언 — 파일별 이름 (diffs.ts가 뒤에서 채운다, 아직이면 빈 배열) */
   touched?: { file: string; names: string[] }[];
 }
@@ -260,7 +262,10 @@ export function search(db: DB, query: string, options: SearchOptions = {}): Sear
     options.preferRepoId,
   );
   const terms = queryTerms(query);
-  const hits = ranked.slice(0, limit).map((item) => toHit(db, item.docId, item.score, item.snippet, terms));
+  const hits = foldDuplicates(db, ranked, limit).map((item) => {
+    const hit = toHit(db, item.docId, item.score, item.snippet, terms);
+    return hit && item.also.length > 0 ? { ...hit, also: item.also } : hit;
+  });
   return {
     query,
     hits: hits.filter((hit): hit is SearchHit => hit !== null),
@@ -313,6 +318,42 @@ function preferRepo<T extends { docId: number; score: number }>(db: DB, items: T
   return items
     .map((item) => (inRepo.has(item.docId) ? { ...item, score: item.score * CURRENT_REPO_BOOST } : item))
     .sort((a, b) => b.score - a.score);
+}
+
+/**
+ * 같은 변경이 커밋 둘로 남은 것을 한 결과로 접는다 — squash 머지 커밋과 브랜치의 원본 커밋이 같은 제목으로
+ * 1·2위를 함께 차지하면 자리만 먹는다. 같은 레포에서 제목(PR 번호 접미 "(#N)" 제거)과 변경 파일 집합이 같으면
+ * 같은 변경으로 본다. 대표는 날짜가 늦은 쪽(대개 머지 커밋)이고 자리는 먼저 나온 쪽의 것, 접힌 sha는 also에 싣는다.
+ * limit 전에 접으므로 빈자리는 다음 후보가 채운다.
+ * 한계(의도): 제목과 파일 집합이 정확히 같을 때만 접으므로, 커밋 여러 개를 squash한 PR(파일 집합이 어느 단일 커밋과도 다름)은 접히지 않는다.
+ * 파일 목록은 후보마다 group_concat으로 이어 붙인다 — 지금 규모에선 충분하고, 파일 수가 큰 커밋이 문제가 되면 해시로 바꿀 수 있다.
+ */
+function foldDuplicates<T extends { docId: number }>(db: DB, items: T[], limit: number): (T & { also: string[] })[] {
+  const info = db.prepare(
+    `SELECT d.kind, d.repo_id AS repoId, d.ref, d.at, c.subject,
+            (SELECT group_concat(path, char(10)) FROM (SELECT path FROM commit_files f WHERE f.repo_id = d.repo_id AND f.sha = d.ref ORDER BY path)) AS files
+       FROM docs d LEFT JOIN commits c ON d.kind = 'commit' AND c.repo_id = d.repo_id AND c.sha = d.ref
+      WHERE d.id = ?`,
+  );
+  const out: (T & { also: string[]; at: string; ref: string })[] = [];
+  const byKey = new Map<string, number>();
+  for (const item of items) {
+    if (out.length >= limit) break;
+    const row = info.get(item.docId) as { kind: string; repoId: number; ref: string; at: string; subject: string | null; files: string | null } | undefined;
+    const subject = row?.subject?.replace(/\s*\(#\d+\)\s*$/, "").trim();
+    const key = row?.kind === "commit" && subject && row.files ? `${row.repoId}\0${subject}\0${row.files}` : null;
+    const index = key === null ? undefined : byKey.get(key);
+    if (row && index !== undefined) {
+      const kept = out[index];
+      // 늦은 쪽을 대표로, 자리는 그대로 (날짜는 작성 시각대가 달라 문자열로 비교하지 않는다)
+      if (Date.parse(row.at) > Date.parse(kept.at)) out[index] = { ...item, also: [kept.ref, ...kept.also], at: row.at, ref: row.ref };
+      else kept.also.push(row.ref);
+      continue;
+    }
+    if (key !== null) byKey.set(key, out.length);
+    out.push({ ...item, also: [], at: row?.at ?? "", ref: row?.ref ?? "" });
+  }
+  return out.map(({ at: _at, ref: _ref, ...rest }) => rest as unknown as T & { also: string[] });
 }
 
 /** 변경 파일 중 답에 쓸 만한 것 — 잠금 파일·문서·설정보다 소스를 앞에 */

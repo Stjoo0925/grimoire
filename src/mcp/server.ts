@@ -28,10 +28,7 @@ export async function runMcpServer(env = process.env): Promise<void> {
     { name: SERVER_NAME, version: SERVER_VERSION },
     {
       capabilities: { tools: {} },
-      instructions:
-        "Grimoire는 이 개발자의 로컬 git 이력(커밋·변경 파일·diff)과 노트를 검색합니다. " +
-        "과거에 비슷한 것을 구현·해결한 적이 있는지 궁금할 때 search_memory로 찾고, show_commit으로 실제 diff를 확인한 뒤 " +
-        "답변에 레포와 커밋 sha(또는 링크)를 근거로 밝히세요.",
+      instructions: "이 개발자의 로컬 git 이력·노트 검색. 답에는 레포와 커밋 sha를 근거로 밝힐 것.",
     },
   );
 
@@ -39,7 +36,7 @@ export async function runMcpServer(env = process.env): Promise<void> {
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     try {
       const result = await callTool(context, request.params.name, request.params.arguments ?? {});
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (!(error instanceof ToolError)) console.error(`[grimoire] ${request.params.name} 실패`, error);

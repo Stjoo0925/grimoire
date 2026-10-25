@@ -176,30 +176,56 @@ async function runScenario(spec: ServerSpec): Promise<StepResult[]> {
     expect(top, "결과가 없습니다");
     expect(top.title === "feat(auth): JWT 리프레시 토큰 회전", `1위가 다릅니다: ${top.title}`);
     expect(top.files?.includes("src/auth/refresh.ts"), "변경 파일이 없습니다");
-    expect(/^https:\/\/github\.com\/someone\/shop-api\/commit\/[0-9a-f]{40}$/.test(top.url ?? ""), `링크 형식: ${top.url}`);
-    topSha = top.ref;
-    return `${top.repo} ${top.ref.slice(0, 8)}`;
+    expect(top.by === "me", `작성자 표기: ${top.by}`);
+    const link = `${result.json.links?.[top.repo] ?? ""}${top.sha}`;
+    expect(/^https:\/\/github\.com\/someone\/shop-api\/commit\/[0-9a-f]{10}$/.test(link), `링크 형식: ${link}`);
+    topSha = top.sha;
+    return `${top.repo} ${top.sha}`;
+  });
+
+  await step("응답 크기 예산 (토큰 = 비용)", async () => {
+    // 응답은 대화 컨텍스트에 쌓여 매 턴 다시 읽힌다. 형식이 다시 부풀면 여기서 잡는다.
+    const search = await call(live(), "search_memory", { query: "토큰 동시성 장바구니 시작" });
+    const perHit = search.text.length / Math.max(1, search.json.hits.length);
+    expect(perHit < 260, `검색 결과 건당 ${Math.round(perHit)}자 — 예산 260자`);
+    const tools = JSON.stringify((await live().client.listTools()).tools);
+    expect(tools.length < 2600, `도구 정의 ${tools.length}자 — 예산 2600자`);
+    return `검색 건당 ${Math.round(perHit)}자 · 도구 정의 ${tools.length}자`;
   });
 
   await step("search_memory: author=me 필터", async () => {
     const all = await call(live(), "search_memory", { query: "동시성" });
     const mine = await call(live(), "search_memory", { query: "동시성", author: "me" });
-    expect(all.json.hits.length === 1, `전체 검색 ${all.json.hits.length}건`);
-    expect(mine.json.hits.length === 0, "동료 커밋이 '나'로 걸렸습니다");
+    // 전체 검색은 동료 커밋 + 현재 파일(lock.ts)까지, '나'로 좁히면 이력만 보고 동료 커밋은 빠진다
+    const commits = all.json.hits.filter((hit: { sha?: string }) => hit.sha);
+    expect(commits.length === 1, `전체 검색의 커밋 ${commits.length}건`);
+    expect(mine.json.hits.length === 0, "동료 커밋이나 파일이 '나'로 걸렸습니다");
   });
 
   await step("show_commit: 로컬 레포에서 diff 읽기", async () => {
     const detail = await call(live(), "show_commit", { sha: topSha.slice(0, 8) });
     expect(!detail.isError, detail.text);
-    expect(detail.json.patch?.includes("+  return 'rotated';"), "diff에 기대한 줄이 없습니다");
+    expect(detail.json.diff?.includes("+  return 'rotated';"), "diff에 기대한 줄이 없습니다");
     expect(detail.json.body.includes("refresh token"), "커밋 본문이 없습니다");
+    expect(detail.json.files?.[0] === "src/auth/refresh.ts +3 -0", `파일 표기: ${detail.json.files?.[0]}`);
+    expect(!detail.json.diff.startsWith("commit "), "git show 헤더가 중복으로 들어 있습니다");
+  });
+
+  await step("show_commit paths: 고른 파일의 diff만", async () => {
+    const api = await call(live(), "search_memory", { query: "프로젝트 시작" });
+    const sha = api.json.hits.find((hit: { title: string }) => hit.title === "feat: 프로젝트 시작")?.sha;
+    expect(sha, "프로젝트 시작 커밋을 못 찾았습니다");
+    const picked = await call(live(), "show_commit", { sha, paths: ["package"] });
+    expect(picked.json.diff?.includes("package.json"), "고른 파일 diff가 없습니다");
+    const none = await call(live(), "show_commit", { sha, paths: ["nope.ts"] });
+    expect(!none.json.diff && /일치하는 파일이 없습니다/.test(none.json.note ?? ""), `없는 경로 응답: ${none.text}`);
   });
 
   await step("get_repo_overview: 기술 스택과 디렉터리", async () => {
     const overview = await call(live(), "get_repo_overview", { repo: "shop-api" });
-    const tech = overview.json.tech.flatMap((group: { items: string[] }) => group.items);
-    expect(tech.some((item: string) => item.toLowerCase().includes("express")), `기술: ${tech}`);
-    expect(overview.json.topDirectories.some((dir: { path: string }) => dir.path === "src/auth"), "src/auth가 없습니다");
+    const tech = Object.values(overview.json.tech as Record<string, string>).join(", ");
+    expect(/express/i.test(tech), `기술: ${tech}`);
+    expect(/(^| )src\/auth\(/.test(overview.json.dirs), `디렉터리: ${overview.json.dirs}`);
     // 픽스처 3개 중 동료 커밋 1개를 뺀 2개가 "나"
     expect(overview.json.commits === 3 && overview.json.mine === 2, `커밋 ${overview.json.commits} / 내 커밋 ${overview.json.mine}`);
   });

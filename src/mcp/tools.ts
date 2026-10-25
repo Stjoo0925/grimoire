@@ -19,6 +19,7 @@ import { addRepo, discoverRepos, findRepo, listRepos, syncRepo } from "../core/i
 import { addNote } from "../core/notes";
 import { commitDetail, repoOverview, repoSummaries } from "../core/overview";
 import { search } from "../core/search";
+import { slimCommit, slimOverview, slimRepos, slimSearch } from "./format";
 
 export interface ToolContext {
   db: DB;
@@ -41,85 +42,71 @@ export function emptyHint(context: ToolContext): string | undefined {
   ].join(" ");
 }
 
-const DATE_HINT = "ISO 날짜 (예: 2024-01-01)";
-
+/**
+ * 도구 정의는 이 서버가 켜진 모든 세션의 매 요청에 실린다(사용자 범위 설치면 모든 프로젝트).
+ * 설명은 "언제 쓰는지"만 짧게 — 길어지면 Grimoire를 안 쓰는 대화까지 비용을 문다.
+ */
 export const TOOLS = [
   {
     name: "search_memory",
     description:
-      "개발자의 과거 git 커밋과 노트를 검색합니다. '예전에 X를 어떻게 구현/해결했지?', '어느 레포에서 Y를 썼지?' 같은 질문에 쓰세요. " +
-      "결과는 근거(레포·sha·날짜·작성자·변경 파일·커밋 링크)이며, 자세한 내용은 show_commit으로 diff를 보세요. " +
-      "키워드는 기술명·파일명·한국어/영어 단어 모두 됩니다.",
+      "내 코드의 핀포인트 검색: 현재 코드 파일(심볼:줄)·과거 커밋·노트를 한 번에. \"X 어디 있지?\" \"예전에 X 어떻게 했지?\" 둘 다. 결과의 파일:줄·sha를 근거로 인용.",
     inputSchema: {
       type: "object",
       properties: {
-        query: { type: "string", description: "찾을 내용 (예: 'jwt refresh token', '동시성 락')" },
-        repo: { type: "string", description: "레포 이름으로 좁히기 (부분 일치)" },
-        author: { type: "string", description: "'me'(기본: 전체) 또는 이메일. 내 작업만 보려면 'me'" },
-        since: { type: "string", description: `이 날짜 이후 — ${DATE_HINT}` },
-        until: { type: "string", description: `이 날짜 이전 — ${DATE_HINT}` },
-        kind: { type: "string", enum: ["commit", "note"], description: "문서 종류" },
-        limit: { type: "number", description: "결과 수 (기본 10, 최대 50)" },
+        query: { type: "string" },
+        repo: { type: "string" },
+        author: { type: "string", description: "me | 이메일" },
+        since: { type: "string", description: "YYYY-MM-DD" },
+        until: { type: "string", description: "YYYY-MM-DD" },
+        kind: { type: "string", enum: ["file", "commit", "note"] },
+        limit: { type: "number", description: "기본 8" },
       },
       required: ["query"],
     },
   },
   {
     name: "show_commit",
-    description:
-      "커밋 하나의 전체 메시지, 변경 파일, diff를 로컬 레포에서 읽어 옵니다. search_memory 결과의 sha를 넘기세요.",
+    description: "커밋의 메시지·변경 파일·diff. diff는 앞부분만 — 특정 파일은 paths로.",
     inputSchema: {
       type: "object",
       properties: {
-        sha: { type: "string", description: "커밋 sha (7자 이상 접두 가능)" },
-        repo: { type: "string", description: "같은 sha가 여러 레포에 있을 때 레포 이름" },
-        max_diff_lines: { type: "number", description: "diff 최대 줄 수 (기본 400, 최대 3000)" },
+        sha: { type: "string" },
+        repo: { type: "string" },
+        paths: { type: "array", items: { type: "string" }, description: "파일 경로 일부" },
+        max_diff_lines: { type: "number", description: "기본 120" },
       },
       required: ["sha"],
     },
   },
   {
     name: "get_repo_overview",
-    description:
-      "레포 하나의 개요: 기술 스택(매니페스트 기준), 분기별 활동, 많이 건드린 디렉터리, 주요 작성자, 최근 주요 커밋.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        repo: { type: "string", description: "레포 이름 또는 경로 (부분 일치)" },
-      },
-      required: ["repo"],
-    },
+    description: "레포 개요: 기술 스택·활동 기간·많이 건드린 곳·최근 주요 커밋.",
+    inputSchema: { type: "object", properties: { repo: { type: "string" } }, required: ["repo"] },
   },
   {
     name: "list_repos",
-    description: "인덱싱된 레포 목록과 커밋 수·기간을 돌려줍니다.",
+    description: "인덱싱된 레포 목록.",
     inputSchema: { type: "object", properties: {} },
   },
   {
     name: "add_repo",
-    description:
-      "로컬 git 레포를 Grimoire에 등록하고 인덱싱합니다. scan: true면 그 폴더 아래의 git 레포를 모두 찾아 등록합니다. " +
-      "이미 등록된 레포는 새 커밋만 반영합니다. 사용자가 원하는 폴더일 때만 쓰세요.",
+    description: "사용자가 원하는 로컬 git 레포 등록·인덱싱. scan: true면 폴더 아래 레포 전부.",
     inputSchema: {
       type: "object",
-      properties: {
-        path: { type: "string", description: "레포(또는 scan할 폴더) 경로. 상대 경로는 서버 작업 디렉터리 기준" },
-        scan: { type: "boolean", description: "하위 폴더의 레포를 모두 찾아 등록 (기본 false)" },
-      },
+      properties: { path: { type: "string" }, scan: { type: "boolean" } },
       required: ["path"],
     },
   },
   {
     name: "record_note",
-    description:
-      "대화 중 알게 된 것·내린 결정·해결 방법을 노트로 남깁니다. 이후 search_memory에서 커밋과 함께 검색됩니다. " +
-      "사용자가 기억해 두라고 하거나 중요한 결정을 내렸을 때 쓰세요.",
+    description: "배운 것·결정을 노트로 저장 (이후 검색됨). 사용자가 기억해 두라고 할 때.",
     inputSchema: {
       type: "object",
       properties: {
-        text: { type: "string", description: "노트 내용 (첫 줄이 제목)" },
-        repo: { type: "string", description: "관련 레포 이름 (선택)" },
-        tags: { type: "array", items: { type: "string" }, description: "태그 (선택)" },
+        text: { type: "string", description: "첫 줄이 제목" },
+        repo: { type: "string" },
+        tags: { type: "array", items: { type: "string" } },
       },
       required: ["text"],
     },
@@ -137,7 +124,10 @@ const num = (value: unknown): number | undefined =>
 
 export class ToolError extends Error {}
 
-/** 도구를 실행하고 JSON 직렬화 가능한 결과를 돌려준다. 잘못된 인자는 ToolError. */
+/** 검색 결과 기본 개수 — 응답 토큰을 아끼려고 코어 기본값(10)보다 작게 */
+const SEARCH_LIMIT = 8;
+
+/** 도구를 실행하고 JSON 직렬화 가능한(간결한) 결과를 돌려준다. 잘못된 인자는 ToolError. */
 export async function callTool(context: ToolContext, name: string, args: Args = {}): Promise<unknown> {
   const { db, me } = context;
   const withHint = <T extends object>(result: T): T & { hint?: string } => {
@@ -157,37 +147,44 @@ export async function callTool(context: ToolContext, name: string, args: Args = 
     case "search_memory": {
       const query = str(args.query);
       if (!query) throw new ToolError("query가 필요합니다");
-      const kind = args.kind === "commit" || args.kind === "note" ? args.kind : undefined;
+      const kind = args.kind === "commit" || args.kind === "note" || args.kind === "file" ? args.kind : undefined;
       const authors = resolveAuthors(str(args.author), me);
       if (authors && authors.length === 0) {
         throw new ToolError("내 이메일을 알 수 없습니다. GRIMOIRE_ME 또는 git config user.email을 설정하세요.");
       }
-      return withHint(
-        await search(db, query, {
-          repoId: repoFilter(args.repo)?.id,
-          authors,
-          since: str(args.since),
-          until: str(args.until),
-          kind,
-          limit: num(args.limit),
-        }),
-      );
+      const result = await search(db, query, {
+        repoId: repoFilter(args.repo)?.id,
+        authors,
+        since: str(args.since),
+        until: str(args.until),
+        kind,
+        limit: num(args.limit) ?? SEARCH_LIMIT,
+      });
+      return withHint(slimSearch(result, me));
     }
     case "show_commit": {
       const sha = str(args.sha);
       if (!sha) throw new ToolError("sha가 필요합니다");
-      return commitDetail(db, sha, {
+      const paths = Array.isArray(args.paths)
+        ? args.paths.filter((item): item is string => typeof item === "string")
+        : typeof args.paths === "string"
+          ? [args.paths]
+          : [];
+      const detail = await commitDetail(db, sha, {
         repoId: repoFilter(args.repo)?.id,
         maxDiffLines: num(args.max_diff_lines),
+        paths,
       });
+      if ("error" in detail) throw new ToolError([detail.error, ...(detail.candidates ?? [])].join("\n"));
+      return slimCommit(detail, me);
     }
     case "get_repo_overview": {
       const repo = repoFilter(args.repo);
       if (!repo) throw new ToolError("repo가 필요합니다");
-      return repoOverview(db, repo, me);
+      return slimOverview(repoOverview(db, repo, me));
     }
     case "list_repos":
-      return withHint({ me, repos: repoSummaries(db, me) });
+      return withHint({ me, repos: slimRepos(repoSummaries(db, me)) });
     case "add_repo": {
       const target = str(args.path);
       if (!target) throw new ToolError("path가 필요합니다");

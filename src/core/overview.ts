@@ -10,7 +10,8 @@ import { displayName } from "./tech/canonical";
 
 const RECENT_COMMITS = 15;
 const TOP_DIRS = 12;
-const DEFAULT_DIFF_LINES = 400;
+/** diff 기본 줄 수 — 전체가 필요하면 파일을 지정해 다시 부른다 (응답 토큰을 아끼기 위해 작게) */
+const DEFAULT_DIFF_LINES = 120;
 const MAX_DIFF_LINES = 3000;
 
 export interface RepoSummary {
@@ -147,6 +148,10 @@ export interface CommitDetail {
   patch: string | null;
   patchTruncated: boolean;
   patchNote?: string;
+  /** 잘리기 전 diff 전체 줄 수 */
+  patchLines: number;
+  /** paths로 좁혔을 때 실제로 고른 파일 */
+  selectedFiles?: string[];
 }
 
 /** sha 접두(7자 이상)로 커밋을 찾는다. 여러 레포에 있으면 repoId로 좁힌다. */
@@ -177,7 +182,7 @@ export function findCommits(db: DB, shaPrefix: string, repoId?: number) {
 export async function commitDetail(
   db: DB,
   shaPrefix: string,
-  options: { repoId?: number; maxDiffLines?: number } = {},
+  options: { repoId?: number; maxDiffLines?: number; paths?: string[] } = {},
 ): Promise<CommitDetail | { error: string; candidates?: string[] }> {
   const matches = findCommits(db, shaPrefix, options.repoId);
   if (matches.length === 0) return { error: `커밋을 찾지 못했습니다: ${shaPrefix}` };
@@ -196,11 +201,38 @@ export async function commitDetail(
   let patch: string | null = null;
   let patchTruncated = false;
   let patchNote: string | undefined;
+  let patchLines = 0;
+
+  // 경로는 커밋의 변경 파일 중에서 일부 일치로 고른다 ("route.ts" → src/app/api/github/route.ts)
+  let selectedFiles: string[] | undefined;
+  const wanted = (options.paths ?? []).map((item) => item.trim().toLowerCase()).filter(Boolean);
+  if (wanted.length > 0) {
+    selectedFiles = files.map((file) => file.path).filter((file) => wanted.some((want) => file.toLowerCase().includes(want)));
+    if (selectedFiles.length === 0) {
+      return {
+        repo: row.repo,
+        sha: row.sha,
+        url: commitWebUrl(row.remote_url, row.sha),
+        author: `${row.author_name} <${row.author_email}>`,
+        date: row.authored_at,
+        subject: row.subject,
+        body: row.body,
+        files,
+        patch: null,
+        patchTruncated: false,
+        patchLines: 0,
+        selectedFiles,
+        patchNote: `이 커밋에서 '${wanted.join(", ")}'와 일치하는 파일이 없습니다`,
+      };
+    }
+  }
+
   if (!fs.existsSync(row.repo_path)) {
     patchNote = `로컬 레포가 없어 diff를 읽지 못했습니다: ${row.repo_path}`;
   } else {
     try {
-      const lines = (await showCommit(row.repo_path, row.sha)).split("\n");
+      const lines = (await showCommit(row.repo_path, row.sha, selectedFiles)).replace(/^\n+/, "").split("\n");
+      patchLines = lines.length;
       patchTruncated = lines.length > maxLines;
       patch = lines.slice(0, maxLines).join("\n");
     } catch (error) {
@@ -219,6 +251,8 @@ export async function commitDetail(
     files,
     patch,
     patchTruncated,
+    patchLines,
+    selectedFiles,
     patchNote,
   };
 }

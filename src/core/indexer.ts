@@ -9,7 +9,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { upsertDoc, pruneOrphanFts, type DB } from "./db";
+import { extractSymbols, headerComment, listHeadFiles, readBlobs, splitIdentifier } from "./code";
+import { deleteDoc, upsertDoc, pruneOrphanFts, type DB } from "./db";
 import {
   listFiles,
   listShas,
@@ -52,6 +53,8 @@ export interface SyncResult {
   added: number;
   total: number;
   tech: number;
+  /** 다시 읽은 코드 파일 수 (바뀐 것만) */
+  files: number;
 }
 
 export async function addRepo(db: DB, dir: string): Promise<RepoRow> {
@@ -141,6 +144,7 @@ export async function syncRepo(db: DB, repo: RepoRow): Promise<SyncResult> {
   }
   const tech = await readTechStack(repo.path);
   const remote = await remoteUrl(repo.path);
+  const code = await readChangedCode(db, repo);
 
   db.transaction(() => {
     for (const commit of commits) insertCommit(db, repo, commit);
@@ -152,6 +156,8 @@ export async function syncRepo(db: DB, repo: RepoRow): Promise<SyncResult> {
     for (const item of tech) {
       insertTech.run(repo.id, item.tech, item.category, item.manifestPath, item.dev ? 1 : 0);
     }
+
+    applyCode(db, repo, code);
 
     db.prepare("UPDATE repos SET synced_at = ?, remote_url = ? WHERE id = ?").run(
       new Date().toISOString(),
@@ -165,7 +171,61 @@ export async function syncRepo(db: DB, repo: RepoRow): Promise<SyncResult> {
     added: commits.length,
     total: known.size + commits.length,
     tech: new Set(tech.map((item) => item.tech)).size,
+    files: code.changed.length,
   };
+}
+
+interface CodeChanges {
+  changed: { path: string; blob: string; content: string }[];
+  removed: string[];
+}
+
+/** HEAD의 파일 중 blob이 바뀐 것만 읽는다 (트랜잭션 밖 — git 호출이 느릴 수 있어서) */
+async function readChangedCode(db: DB, repo: RepoRow): Promise<CodeChanges> {
+  const head = await listHeadFiles(repo.path);
+  const known = new Map(
+    (db.prepare("SELECT path, blob FROM code_files WHERE repo_id = ?").all(repo.id) as { path: string; blob: string }[]).map(
+      (row) => [row.path, row.blob],
+    ),
+  );
+  const stale = head.filter((file) => known.get(file.path) !== file.blob);
+  const contents = await readBlobs(repo.path, [...new Set(stale.map((file) => file.blob))]);
+  const present = new Set(head.map((file) => file.path));
+  return {
+    changed: stale.map((file) => ({ path: file.path, blob: file.blob, content: contents.get(file.blob) ?? "" })),
+    removed: [...known.keys()].filter((file) => !present.has(file)),
+  };
+}
+
+function applyCode(db: DB, repo: RepoRow, code: CodeChanges): void {
+  const upsert = db.prepare(
+    `INSERT INTO code_files (repo_id, path, blob, lines, symbols, header) VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT (repo_id, path) DO UPDATE SET blob = excluded.blob, lines = excluded.lines,
+       symbols = excluded.symbols, header = excluded.header`,
+  );
+  const now = new Date().toISOString();
+  for (const file of code.changed) {
+    const symbols = extractSymbols(file.content);
+    const header = headerComment(file.content);
+    upsert.run(repo.id, file.path, file.blob, file.content.split("\n").length, JSON.stringify(symbols), header);
+    upsertDoc(db, {
+      kind: "file",
+      ref: file.path,
+      repoId: repo.id,
+      at: now,
+      title: file.path,
+      // 심볼 원형 + 낱말로 쪼갠 형태를 함께 넣어 "rate limit"·"ratelimit" 둘 다 걸리게 한다
+      body: [repo.name, header, symbols.map((symbol) => `${symbol.name} ${splitIdentifier(symbol.name)}`).join(" ")]
+        .filter(Boolean)
+        .join("\n"),
+      paths: `${file.path} ${splitIdentifier(file.path)}`,
+    });
+  }
+  const remove = db.prepare("DELETE FROM code_files WHERE repo_id = ? AND path = ?");
+  for (const file of code.removed) {
+    remove.run(repo.id, file);
+    deleteDoc(db, "file", file, repo.id);
+  }
 }
 
 function insertCommit(db: DB, repo: RepoRow, commit: GitCommit): void {

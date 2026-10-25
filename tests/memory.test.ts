@@ -90,8 +90,8 @@ test("search: 키워드로 근거(sha·파일·링크)를 찾고 필터가 먹�
   assert.match(top.url ?? "", /^https:\/\/github\.com\/someone\/shop-api\/commit\/[0-9a-f]{40}$/);
   assert.equal(top.author, "me <me@example.com>");
 
-  // 파일 경로로도 걸린다
-  assert.equal((await search(db, "lock.ts", { semantic: false })).hits[0]?.title.startsWith("fix:"), true);
+  // 파일 경로로도 걸린다 (커밋 이력 쪽)
+  assert.equal((await search(db, "lock.ts", { semantic: false, kind: "commit" })).hits[0]?.title.startsWith("fix:"), true);
 
   // 작성자 필터
   const mine = await search(db, "동시성", { authors: ["me@example.com"], semantic: false });
@@ -163,7 +163,7 @@ test("embed + hybrid: 임베딩이 있으면 키워드에 없는 표현도 걸�
 
   const embedded = await embedPending(db, { fetchImpl: fakeFetch });
   assert.equal(embedded.ok, true);
-  assert.equal(embedded.embedded, 3); // chore 커밋은 제외
+  assert.equal(embedded.embedded, 5); // 의미 있는 커밋 3 + 코드 파일 2 (chore 커밋은 제외)
   assert.equal((await embedPending(db, { fetchImpl: fakeFetch })).embedded, 0); // 이미 있으면 건너뜀
 
   const result = await search(db, "race condition", { fetchImpl: fakeFetch });

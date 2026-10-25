@@ -39,7 +39,7 @@ const HELP = `grimoire — 로컬 git 이력을 AI 코딩 도구의 기억으로
   grimoire sync [repo]            증분 동기화 (새 커밋만)
   grimoire repos                  등록된 레포 목록
   grimoire search <query>         검색  [--repo r] [--author me|email] [--since d] [--until d] [--limit n] [--json]
-  grimoire show <sha>             커밋 상세 + diff  [--repo r] [--lines n]
+  grimoire show <sha>             커밋 상세 + diff  [--repo r] [--lines n] [--path p ...]
   grimoire overview <repo>        레포 개요  [--json]
   grimoire note <text>            노트 남기기  [--repo r] [--tag t ...]
   grimoire embed                  로컬 임베딩 채우기 (Ollama ${embedModel()})
@@ -77,6 +77,7 @@ async function main(argv: string[]): Promise<number> {
       lines: { type: "string" },
       depth: { type: "string" },
       tag: { type: "string", multiple: true },
+      path: { type: "string", multiple: true },
       json: { type: "boolean" },
       project: { type: "string" },
       "dry-run": { type: "boolean" },
@@ -110,6 +111,7 @@ async function main(argv: string[]): Promise<number> {
         const detail = await commitDetail(db, need(positionals[0], "sha"), {
           repoId: values.repo ? requireRepo(db, values.repo).id : undefined,
           maxDiffLines: toInt(values.lines),
+          paths: values.path,
         });
         if ("error" in detail) {
           console.error(detail.error);
@@ -117,8 +119,13 @@ async function main(argv: string[]): Promise<number> {
           return 1;
         }
         print(`${detail.repo} ${detail.sha}${detail.url ? `\n${detail.url}` : ""}`);
+        print(`${detail.author}  ${detail.date}\n\n    ${detail.subject}${detail.body ? `\n\n    ${detail.body.split("\n").join("\n    ")}` : ""}\n`);
+        for (const file of detail.files) print(`  ${file.path}  +${file.insertions ?? "-"} -${file.deletions ?? "-"}`);
+        print("");
         print(detail.patch ?? detail.patchNote ?? "");
-        if (detail.patchTruncated) print("… (diff 일부만 표시 — --lines로 늘릴 수 있음)");
+        if (detail.patchTruncated) {
+          print(`… (diff ${detail.patchLines}줄 중 일부만 표시 — --lines로 늘리거나 --path로 파일을 고르세요)`);
+        }
         return 0;
       }
       case "overview": {
@@ -266,6 +273,13 @@ async function cmdSearch(
   if (result.semanticNote) console.error(`(${result.semanticNote})`);
   if (result.hits.length === 0) print("결과 없음");
   for (const hit of result.hits) {
+    // 코드 파일: ref가 경로이고 date는 색인 시각이라 커밋과 다르게 보여 준다
+    if (hit.kind === "file") {
+      print(`${hit.repo}  ${hit.ref}${hit.lines ? `  (${hit.lines}줄)` : ""}`);
+      if (hit.symbols && hit.symbols.length > 0) print(`    ${hit.symbols.join("  ")}`);
+      if (hit.lastCommit) print(`    최근 변경: ${day(hit.lastCommit.date)} ${hit.lastCommit.sha.slice(0, 8)} ${hit.lastCommit.title}`);
+      continue;
+    }
     const where = hit.kind === "note" ? `note #${hit.ref}` : `${hit.repo} ${hit.ref.slice(0, 8)}`;
     print(`${day(hit.date)}  ${where}  ${hit.title}`);
     if (hit.files.length > 0) print(`    ${hit.files.slice(0, 4).join("  ")}${hit.files.length > 4 ? " …" : ""}`);

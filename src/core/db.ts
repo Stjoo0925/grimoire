@@ -111,6 +111,18 @@ const MIGRATIONS: string[] = [
     PRIMARY KEY (doc_id, model)
   );
   `,
+  // 2: 현재 코드 색인 (HEAD의 파일별 심볼) — docs kind='file', ref=경로
+  `
+  CREATE TABLE code_files (
+    repo_id  INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    path     TEXT NOT NULL,
+    blob     TEXT NOT NULL,
+    lines    INTEGER NOT NULL,
+    symbols  TEXT NOT NULL,
+    header   TEXT NOT NULL,
+    PRIMARY KEY (repo_id, path)
+  );
+  `,
 ];
 
 export function openDb(file: string): DB {
@@ -141,7 +153,7 @@ function migrate(db: DB): void {
 export function upsertDoc(
   db: DB,
   doc: {
-    kind: "commit" | "note";
+    kind: "commit" | "note" | "file";
     ref: string;
     repoId: number | null;
     at: string;
@@ -173,6 +185,15 @@ export function upsertDoc(
     "INSERT INTO docs_fts (rowid, title, body, paths) VALUES (?, ?, ?, ?)",
   ).run(id, doc.title, doc.body, doc.paths);
   return id;
+}
+
+export function deleteDoc(db: DB, kind: string, ref: string, repoId: number | null): void {
+  const existing = db
+    .prepare("SELECT id FROM docs WHERE kind = ? AND ref = ? AND repo_id IS ?")
+    .get(kind, ref, repoId) as { id: number } | undefined;
+  if (!existing) return;
+  db.prepare("DELETE FROM docs_fts WHERE rowid = ?").run(existing.id);
+  db.prepare("DELETE FROM docs WHERE id = ?").run(existing.id);
 }
 
 /** 레포를 지우면 docs는 CASCADE로 지워지지만 FTS 가상 테이블은 따로 정리해야 한다. */

@@ -4,11 +4,15 @@
  * 결과는 항상 **근거** 단위다: 커밋(레포·sha·날짜·작성자·변경 파일·링크) 또는 노트.
  * 해석은 호출한 쪽(AI 클라이언트)이 한다.
  */
+import path from "node:path";
+
+import { splitIdentifier } from "./code";
 import { embedModel, type Env } from "./config";
 import type { DB } from "./db";
 import { cosine, embedTexts, fromBlob, hasEmbeddings, QUERY_PREFIX, type FetchLike } from "./embed";
 import { commitWebUrl } from "./git";
 import { canonicalTech } from "./tech/canonical";
+import { expandKorean, isFiller } from "./terms";
 
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 50;
@@ -17,6 +21,10 @@ const POOL_FACTOR = 5;
 /** 이보다 안 닮은 문서는 시맨틱 후보로 올리지 않는다 */
 const SEMANTIC_MIN = 0.45;
 export const RRF_K = 60;
+/** 개념이 코드 파일 이름에 들어 있을 때 곱하는 가중치 */
+const FILE_NAME_BONUS = 1.6;
+/** 재정렬 전에 bm25로 넉넉히 뽑아 둘 배수 */
+const RERANK_FACTOR = 4;
 /** 결과에 붙이는 변경 파일 수 */
 const FILES_PER_HIT = 8;
 
@@ -40,27 +48,101 @@ export function stripParticle(word: string): string | null {
  * 질의 → FTS5 MATCH 식. 토큰마다 원형·조사 뗀 형태·기술 정규명을 접두 일치로 OR한다.
  * 사용자 입력은 따옴표로 감싸 FTS 연산자로 해석되지 않게 한다.
  */
-export function buildMatchExpression(query: string): string | null {
+/**
+ * 질의 → 개념 묶음. 낱말 하나가 개념 하나이고, 그 변형(조사 뗀 꼴·영어 확장·기술 정규명)이 묶음 안에 든다.
+ * "어느 파일에 있어" 같은 질문 군더더기(isFiller)는 개념에서 뺀다.
+ */
+export function queryConcepts(query: string): string[][] {
   const words = query
     .toLowerCase()
     .split(/[\s,;:!?()[\]{}<>"'`|]+/)
     .map((word) => word.replace(/^[.\-/]+|[.\-/]+$/g, ""))
     .filter((word) => word.length > 0);
 
-  const terms = new Set<string>();
+  const concepts: string[][] = [];
+  const seen = new Set<string>();
   for (const word of words) {
-    terms.add(word);
     const stripped = stripParticle(word);
-    if (stripped) terms.add(stripped);
+    if (isFiller(word) || (stripped && isFiller(stripped))) continue;
+    const variants = new Set<string>([word]);
+    if (stripped) variants.add(stripped);
+    for (const english of [...expandKorean(word), ...(stripped ? expandKorean(stripped) : [])]) variants.add(english);
     const canon = canonicalTech(word);
-    if (canon && canon !== word) terms.add(canon);
+    if (canon && canon !== word) variants.add(canon);
+    const terms = [...variants]
+      .map((term) => term.replace(/"/g, ""))
+      .filter((term) => /[\p{L}\p{N}]/u.test(term));
+    const key = terms.join("|");
+    if (terms.length > 0 && !seen.has(key)) {
+      seen.add(key);
+      concepts.push(terms);
+    }
   }
-  const parts = [...terms]
-    // FTS5 unicode61 토크나이저가 다시 쪼갤 것이므로 구문 접두 질의로 넣는다 ("react.js" → "react js"*)
-    .map((term) => term.replace(/"/g, ""))
-    .filter((term) => /[\p{L}\p{N}]/u.test(term))
-    .map((term) => `"${term}"*`);
-  return parts.length > 0 ? parts.join(" OR ") : null;
+  return concepts;
+}
+
+/** 개념 묶음 하나 → FTS5 식 (FTS5 unicode61이 다시 쪼개므로 구문 접두 질의: "react.js" → "react js"*) */
+function conceptExpression(terms: string[]): string {
+  return terms.map((term) => `"${term}"*`).join(" OR ");
+}
+
+export function buildMatchExpression(query: string): string | null {
+  const concepts = queryConcepts(query);
+  if (concepts.length === 0) return null;
+  return [...new Set(concepts.flat())].map((term) => `"${term}"*`).join(" OR ");
+}
+
+/**
+ * 키워드 후보 재정렬 — 질의 개념을 **얼마나 많이, 얼마나 드문 것으로** 덮었나.
+ *
+ * bm25만으로는 "선택·코드" 같은 흔한 낱말 여럿에 걸린 문서가, 결정적인 드문 낱말("충돌")
+ * 하나에 걸린 문서를 이긴다(긴 문서는 길이 보정으로 더 밀린다). 개념마다 IDF²를 매겨(드문 개념이
+ * 흔한 개념 여럿보다 무겁게) 덮은 개념의 합으로 다시 줄 세운다. 같으면 bm25 순서를 지킨다.
+ * 코드 파일은 개념이 **파일 이름**에 들어 있으면 가산한다 — 위치 질문에서 가장 강한 신호다.
+ * 테스트 파일은 구현 파일보다 살짝 뒤로 보낸다(핀포인트는 보통 구현이다).
+ */
+function rerankByCoverage(db: DB, concepts: string[][], candidates: Candidate[]): Candidate[] {
+  if (concepts.length < 2 || candidates.length < 2) return candidates;
+  const total = (db.prepare("SELECT COUNT(*) AS n FROM docs").get() as { n: number }).n || 1;
+  const ids = candidates.map((candidate) => candidate.docId);
+  const placeholders = ids.map(() => "?").join(", ");
+  const score = new Map<number, number>(ids.map((id) => [id, 0]));
+
+  // 코드 파일의 이름 낱말 ("services/api/rate-limit.ts" → rate, limit)
+  const fileNames = new Map(
+    (db.prepare(`SELECT id, ref FROM docs WHERE kind = 'file' AND id IN (${placeholders})`).all(...ids) as { id: number; ref: string }[]).map(
+      (row) => [row.id, splitIdentifier(path.posix.basename(row.ref).replace(/\.[^.]+$/, "")).split(" ")],
+    ),
+  );
+
+  for (const terms of concepts) {
+    const expr = conceptExpression(terms);
+    const df = (db.prepare("SELECT COUNT(*) AS n FROM docs_fts WHERE docs_fts MATCH ?").get(expr) as { n: number }).n;
+    if (df === 0) continue;
+    const weight = Math.log(1 + total / df) ** 2;
+    const matched = db
+      .prepare(`SELECT rowid AS id FROM docs_fts WHERE docs_fts MATCH ? AND rowid IN (${placeholders})`)
+      .all(expr, ...ids) as { id: number }[];
+    for (const row of matched) {
+      const nameWords = fileNames.get(row.id);
+      const inName = nameWords?.some((word) => terms.some((term) => word.startsWith(term.toLowerCase())));
+      score.set(row.id, (score.get(row.id) ?? 0) + weight * (inName ? FILE_NAME_BONUS : 1));
+    }
+  }
+
+  const testPenalty = new Set(
+    (
+      db
+        .prepare(`SELECT id FROM docs WHERE kind = 'file' AND id IN (${placeholders}) AND (ref LIKE '%.test.%' OR ref LIKE '%.spec.%' OR ref LIKE '%/__tests__/%' OR ref LIKE 'test/%' OR ref LIKE 'tests/%' OR ref LIKE '%/test_%')`)
+        .all(...ids) as { id: number }[]
+    ).map((row) => row.id),
+  );
+  const order = new Map(ids.map((id, index) => [id, index]));
+  return [...candidates].sort((a, b) => {
+    const sa = (score.get(a.docId) ?? 0) * (testPenalty.has(a.docId) ? 0.85 : 1);
+    const sb = (score.get(b.docId) ?? 0) * (testPenalty.has(b.docId) ? 0.85 : 1);
+    return sb - sa || (order.get(a.docId) ?? 0) - (order.get(b.docId) ?? 0);
+  });
 }
 
 export interface SearchFilters {
@@ -72,7 +154,7 @@ export interface SearchFilters {
   since?: string;
   /** ISO 날짜 미만 */
   until?: string;
-  kind?: "commit" | "note";
+  kind?: "commit" | "note" | "file";
 }
 
 export interface SearchOptions extends SearchFilters {
@@ -84,7 +166,7 @@ export interface SearchOptions extends SearchFilters {
 }
 
 export interface SearchHit {
-  kind: "commit" | "note";
+  kind: "commit" | "note" | "file";
   repo: string | null;
   repoPath: string | null;
   /** 커밋 sha 또는 note id */
@@ -99,6 +181,12 @@ export interface SearchHit {
   url: string | null;
   score: number;
   matchedBy: ("keyword" | "semantic")[];
+  /** kind='file'일 때: 질의와 맞는 심볼 "이름:줄" (없으면 앞쪽 심볼) */
+  symbols?: string[];
+  /** kind='file'일 때: 파일 줄 수 */
+  lines?: number;
+  /** kind='file'일 때: 이 파일을 마지막으로 건드린 커밋 */
+  lastCommit?: { sha: string; date: string; title: string } | null;
 }
 
 export interface SearchResult {
@@ -120,6 +208,7 @@ export async function search(db: DB, query: string, options: SearchOptions = {})
   const { where, params } = filterSql(options);
 
   const keyword: Candidate[] = [];
+  const concepts = queryConcepts(query);
   const match = buildMatchExpression(query);
   if (match) {
     const rows = db
@@ -132,8 +221,8 @@ export async function search(db: DB, query: string, options: SearchOptions = {})
           ORDER BY bm25(docs_fts, 4.0, 1.0, 1.5)
           LIMIT ?`,
       )
-      .all(match, ...params, pool) as Candidate[];
-    keyword.push(...rows);
+      .all(match, ...params, pool * RERANK_FACTOR) as Candidate[];
+    keyword.push(...rerankByCoverage(db, concepts, rows).slice(0, pool));
   }
 
   let semantic: Candidate[] = [];
@@ -153,7 +242,8 @@ export async function search(db: DB, query: string, options: SearchOptions = {})
   }
 
   const fused = fuse(keyword, semantic);
-  const hits = fused.slice(0, limit).map((item) => toHit(db, item.docId, item.score, item.matchedBy, item.snippet));
+  const terms = queryTerms(query);
+  const hits = fused.slice(0, limit).map((item) => toHit(db, item.docId, item.score, item.matchedBy, item.snippet, terms));
   return {
     query,
     mode: semantic.length > 0 ? "hybrid" : "keyword",
@@ -172,6 +262,10 @@ function filterSql(filters: SearchFilters): { where: string; params: (string | n
   if (filters.kind) {
     clauses.push("d.kind = ?");
     params.push(filters.kind);
+  }
+  // 작성자·기간은 이력에 대한 질문이다 — 시점·작성자가 없는 현재 코드 파일은 뺀다
+  if (filters.since || filters.until || (filters.authors && filters.authors.length > 0)) {
+    clauses.push("d.kind <> 'file'");
   }
   if (filters.since) {
     clauses.push("d.at >= ?");
@@ -235,12 +329,29 @@ export function fuse(
   return [...merged.values()].sort((a, b) => b.score - a.score);
 }
 
+/** 심볼 매칭에 쓰는 질의 낱말 (조사 제거·한영 확장 포함, 소문자) */
+function queryTerms(query: string): string[] {
+  const out = new Set<string>();
+  for (const raw of query.toLowerCase().split(/[\s,;:!?()[\]{}<>"'`|]+/)) {
+    const word = raw.replace(/^[.\-/]+|[.\-/]+$/g, "");
+    if (!word) continue;
+    const stripped = stripParticle(word);
+    for (const term of [word, stripped, ...expandKorean(word), ...(stripped ? expandKorean(stripped) : [])]) {
+      if (term && term.length >= 3) out.add(term);
+    }
+  }
+  return [...out];
+}
+
+const SYMBOLS_PER_FILE = 5;
+
 function toHit(
   db: DB,
   docId: number,
   score: number,
   matchedBy: ("keyword" | "semantic")[],
   snippet: string | undefined,
+  terms: string[] = [],
 ): SearchHit | null {
   const doc = db
     .prepare(
@@ -253,7 +364,7 @@ function toHit(
     )
     .get(docId) as
     | {
-        kind: "commit" | "note";
+        kind: "commit" | "note" | "file";
         ref: string;
         at: string;
         repo_id: number | null;
@@ -276,6 +387,36 @@ function toHit(
     score: Number(score.toFixed(5)),
     matchedBy,
   };
+
+  if (doc.kind === "file") {
+    const file = db
+      .prepare("SELECT lines, symbols FROM code_files WHERE repo_id = ? AND path = ?")
+      .get(doc.repo_id, doc.ref) as { lines: number; symbols: string } | undefined;
+    const all = file ? (JSON.parse(file.symbols) as { name: string; line: number }[]) : [];
+    const matched = all.filter((symbol) => {
+      const name = symbol.name.toLowerCase();
+      return terms.some((term) => name.includes(term));
+    });
+    const picked = (matched.length > 0 ? matched : all).slice(0, SYMBOLS_PER_FILE);
+    const last = db
+      .prepare(
+        `SELECT c.sha, c.authored_at AS date, c.subject AS title FROM commit_files f
+           JOIN commits c ON c.repo_id = f.repo_id AND c.sha = f.sha
+          WHERE f.repo_id = ? AND f.path = ? ORDER BY c.authored_at DESC LIMIT 1`,
+      )
+      .get(doc.repo_id, doc.ref) as { sha: string; date: string; title: string } | undefined;
+    return {
+      ...base,
+      author: null,
+      snippet: "",
+      files: [doc.ref],
+      filesChanged: null,
+      url: null,
+      symbols: picked.map((symbol) => `${symbol.name}:${symbol.line}`),
+      lines: file?.lines,
+      lastCommit: last ?? null,
+    };
+  }
 
   if (doc.kind === "note") {
     return {

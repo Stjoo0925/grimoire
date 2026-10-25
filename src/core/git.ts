@@ -157,9 +157,12 @@ export function renamedTarget(raw: string): string {
   return plain.length === 2 ? plain[1] : raw;
 }
 
-/** 커밋 하나의 패치 (통계 포함). 레포가 사라졌으면 호출부에서 처리한다. */
-export function showCommit(dir: string, sha: string): Promise<string> {
-  return runGit(dir, ["show", "--stat", "--patch", "--format=fuller", "--no-color", sha]);
+/**
+ * 커밋 하나의 패치. 메타데이터(작성자·메시지)는 DB에 있으므로 헤더 없이 diff만 뽑는다.
+ * paths를 주면 그 경로의 변경만. 레포가 사라졌으면 호출부에서 처리한다.
+ */
+export function showCommit(dir: string, sha: string, paths: string[] = []): Promise<string> {
+  return runGit(dir, ["show", "--format=", "--patch", "--no-color", sha, "--", ...paths]);
 }
 
 /** HEAD에 있는 파일 경로 전체 */

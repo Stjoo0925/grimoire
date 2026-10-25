@@ -111,7 +111,7 @@ export async function embedPending(db: DB, options: EmbedOptions & { limit?: num
          FROM docs d
          JOIN docs_fts f ON f.rowid = d.id
          LEFT JOIN commits c ON d.kind = 'commit' AND c.repo_id = d.repo_id AND c.sha = d.ref
-        WHERE (d.kind = 'note' OR c.meaningful = 1)
+        WHERE (d.kind <> 'commit' OR c.meaningful = 1)
           AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.doc_id = d.id AND e.model = ?)
         ORDER BY d.at DESC
         LIMIT ?`,

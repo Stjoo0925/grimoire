@@ -2,7 +2,7 @@
  * MCP 도구 정의와 실행 (SDK 배선과 분리).
  *
  *   search_memory      — 과거 커밋·노트 검색 (근거 목록)
- *   show_commit        — 커밋 하나의 메시지·파일·diff
+ *   show_commit        — 커밋(sha 하나 또는 shas 최대 5개)의 메시지·파일·diff
  *   get_repo_overview  — 레포의 기술 스택·활동·많이 건드린 곳·최근 주요 커밋
  *   list_repos         — 인덱싱된 레포 목록
  *   add_repo           — 레포(또는 디렉터리 아래 레포 전부) 등록 + 인덱싱
@@ -67,72 +67,80 @@ export function emptyHint(context: ToolContext): string | undefined {
 /**
  * 도구 정의는 이 서버가 켜진 모든 세션의 매 요청에 실린다(사용자 범위 설치면 모든 프로젝트).
  * 설명은 "언제 쓰는지"만 짧게 — 길어지면 Grimoire를 안 쓰는 대화까지 비용을 문다.
+ * 영어로 쓴다: 같은 뜻이면 토큰이 적고, 영어로 묻는 세션에서도 도구를 고르게. annotations는 클라이언트가
+ * 확인 없이 불러도 되는지 판단하는 힌트다(읽기 도구는 readOnlyHint, add_repo는 같은 경로면 다시 불러도 같다).
  */
 export const TOOLS = [
   {
     name: "search_memory",
     description:
-      "내 코드의 핀포인트 검색: 현재 코드 파일(심볼:줄)·과거 커밋·노트를 한 번에. \"X 어디 있지?\" \"예전에 X 어떻게 했지?\" 둘 다. 결과의 파일:줄·sha를 근거로 인용.",
+      "Find code (file symbol:line), past commits, notes. 'Where is X?' 'How did I do X?' Cite file:line/sha.",
     inputSchema: {
       type: "object",
       properties: {
         query: { type: "string" },
         repo: { type: "string" },
-        author: { type: "string", description: "me | 이메일" },
-        since: { type: "string", description: "YYYY-MM-DD" },
-        until: { type: "string", description: "YYYY-MM-DD" },
+        author: { type: "string", description: "me | email" },
+        since: { type: "string", format: "date" },
+        until: { type: "string", format: "date" },
         kind: { type: "string", enum: ["file", "commit", "note"] },
-        limit: { type: "number", description: "기본 8" },
-        detail: { type: "string", enum: ["index", "summary", "full"], description: "기본 index. summary=상위 커밋 본문·바뀐 함수, full=1위 커밋 diff까지" },
+        limit: { type: "number", description: "default 8" },
+        detail: { type: "string", enum: ["index", "summary", "full"], description: "summary: +bodies, changed fns; full: +diff" },
       },
       required: ["query"],
     },
+    annotations: { readOnlyHint: true },
   },
   {
     name: "show_commit",
-    description: "커밋의 메시지·변경 파일·diff. diff는 앞부분만 — 특정 파일은 paths로.",
+    description: "Commit message, files, diff head; paths filters.",
     inputSchema: {
       type: "object",
       properties: {
         sha: { type: "string" },
+        shas: { type: "array", items: { type: "string" }, description: "up to 5" },
         repo: { type: "string" },
-        paths: { type: "array", items: { type: "string" }, description: "파일 경로 일부" },
-        max_diff_lines: { type: "number", description: "기본 120" },
+        paths: { type: "array", items: { type: "string" } },
+        max_diff_lines: { type: "number", description: "120; 40 per sha" },
       },
-      required: ["sha"],
     },
+    annotations: { readOnlyHint: true },
   },
   {
     name: "get_repo_overview",
-    description: "레포 개요: 기술 스택·활동 기간·많이 건드린 곳·최근 주요 커밋.",
+    description: "Repo stack, activity, hotspots, key commits.",
     inputSchema: { type: "object", properties: { repo: { type: "string" } }, required: ["repo"] },
+    annotations: { readOnlyHint: true },
   },
   {
     name: "list_repos",
-    description: "인덱싱된 레포 목록.",
+    description: "Indexed repos.",
     inputSchema: { type: "object", properties: {} },
+    annotations: { readOnlyHint: true },
   },
   {
     name: "add_repo",
-    description: "사용자가 원하는 로컬 git 레포 등록·인덱싱. scan: true면 폴더 아래 레포 전부.",
+    description: "Index a repo the user names; scan: all inside.",
     inputSchema: {
       type: "object",
       properties: { path: { type: "string" }, scan: { type: "boolean" } },
       required: ["path"],
     },
+    annotations: { idempotentHint: true },
   },
   {
     name: "record_note",
-    description: "배운 것·결정을 노트로 저장 (이후 검색됨). 사용자가 기억해 두라고 할 때.",
+    description: "Save a note the user asks to keep.",
     inputSchema: {
       type: "object",
       properties: {
-        text: { type: "string", description: "첫 줄이 제목" },
+        text: { type: "string", description: "line 1 = title" },
         repo: { type: "string" },
         tags: { type: "array", items: { type: "string" } },
       },
       required: ["text"],
     },
+    annotations: { idempotentHint: false },
   },
 ] as const;
 
@@ -168,6 +176,10 @@ const num = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isFinite(value) ? value : undefined;
 
 export class ToolError extends Error {}
+
+/** show_commit shas: 한 번에 받는 커밋 수와 커밋당 기본 diff 줄 수 */
+const MAX_SHAS = 5;
+const MULTI_DIFF_LINES = 40;
 
 /** 검색 결과 기본 개수 — 응답 토큰을 아끼려고 코어 기본값(10)보다 작게 */
 const SEARCH_LIMIT = 8;
@@ -219,19 +231,30 @@ export async function callTool(context: ToolContext, name: string, args: Args = 
     }
     case "show_commit": {
       const sha = str(args.sha);
-      if (!sha) throw new ToolError("sha가 필요합니다");
+      const listed = Array.isArray(args.shas) ? args.shas.map(str).filter((item): item is string => item !== undefined) : [];
+      // sha와 shas를 함께 주면 합친다
+      const shas = listed.length > 0 ? [...new Set([...(sha ? [sha] : []), ...listed])] : [];
+      if (!sha && shas.length === 0) throw new ToolError("sha 또는 shas가 필요합니다");
+      if (shas.length > MAX_SHAS) throw new ToolError(`shas는 ${MAX_SHAS}개까지입니다`);
       const paths = Array.isArray(args.paths)
         ? args.paths.filter((item): item is string => typeof item === "string")
         : typeof args.paths === "string"
           ? [args.paths]
           : [];
-      const detail = await commitDetail(db, sha, {
-        repoId: repoFilter(args.repo)?.id,
-        maxDiffLines: num(args.max_diff_lines),
-        paths,
-      });
-      if ("error" in detail) throw new ToolError([detail.error, ...(detail.candidates ?? [])].join("\n"));
-      return slimCommit(detail, me);
+      const repoId = repoFilter(args.repo)?.id;
+      if (shas.length === 0) {
+        const detail = await commitDetail(db, sha!, { repoId, maxDiffLines: num(args.max_diff_lines), paths });
+        if ("error" in detail) throw new ToolError([detail.error, ...(detail.candidates ?? [])].join("\n"));
+        return slimCommit(detail, me);
+      }
+      // 여러 커밋 한 번에 — 검색 결과 상위 몇 개를 왕복 없이 비교할 때. 응답이 커지지 않게 커밋당 diff를 줄인다
+      const commits = await Promise.all(
+        shas.map(async (item) => {
+          const detail = await commitDetail(db, item, { repoId, maxDiffLines: num(args.max_diff_lines) ?? MULTI_DIFF_LINES, paths });
+          return "error" in detail ? { sha: item, error: [detail.error, ...(detail.candidates ?? [])].join("\n") } : slimCommit(detail, me);
+        }),
+      );
+      return { commits };
     }
     case "get_repo_overview": {
       const repo = repoFilter(args.repo);

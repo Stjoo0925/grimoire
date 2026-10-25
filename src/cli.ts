@@ -10,7 +10,6 @@
  *   grimoire show <sha>         커밋 상세 + diff
  *   grimoire overview <repo>    레포 개요
  *   grimoire note <text>        노트 남기기
- *   grimoire embed              로컬 임베딩 채우기 (선택, Ollama)
  *   grimoire remove <repo>      레포와 색인 삭제
  *   grimoire install <client>   MCP 클라이언트 설정 자동 작성
  *   grimoire doctor             연결 문제 진단
@@ -20,9 +19,8 @@
 import path from "node:path";
 import { parseArgs } from "node:util";
 
-import { dbPath, embedModel } from "./core/config";
+import { dbPath } from "./core/config";
 import { openDb, type DB } from "./core/db";
-import { embedPending } from "./core/embed";
 import { myEmails, resolveAuthors } from "./core/identity";
 import { addRepo, discoverRepos, findRepo, listRepos, removeRepo, syncRepo, type RepoRow } from "./core/indexer";
 import { addNote } from "./core/notes";
@@ -45,7 +43,6 @@ const HELP = `grimoire — 로컬 git 이력을 AI 코딩 도구의 기억으로
   grimoire show <sha>             커밋 상세 + diff  [--repo r] [--lines n] [--path p ...]
   grimoire overview <repo>        레포 개요  [--json]
   grimoire note <text>            노트 남기기  [--repo r] [--tag t ...]
-  grimoire embed                  로컬 임베딩 채우기 (Ollama ${embedModel()})
   grimoire remove <repo>          레포와 색인 삭제
 
 MCP 연결:
@@ -161,19 +158,6 @@ async function main(argv: string[]): Promise<number> {
         print(`노트 #${note.id} 저장`);
         return 0;
       }
-      case "embed": {
-        print(`임베딩 중 (${embedModel()})…`);
-        const result = await embedPending(db);
-        if (!result.ok) {
-          console.error(
-            `임베딩 실패: ${result.reason}\n` +
-              `  Ollama가 떠 있는지, 'ollama pull ${result.model}'을 했는지 확인하세요. (${result.embedded}개는 저장됨)`,
-          );
-          return 1;
-        }
-        print(`문서 ${result.embedded}개 임베딩 완료`);
-        return 0;
-      }
       case "remove": {
         const repo = requireRepo(db, need(positionals[0], "repo"));
         removeRepo(db, repo);
@@ -282,7 +266,6 @@ async function cmdSearch(
     limit: toInt(values.limit),
   });
   if (values.json) return printJson(result);
-  if (result.semanticNote) console.error(`(${result.semanticNote})`);
   if (result.hits.length === 0) print("결과 없음");
   for (const hit of result.hits) {
     // 코드 파일: ref가 경로이고 date는 색인 시각이라 커밋과 다르게 보여 준다
@@ -327,7 +310,7 @@ const printJson = (value: unknown) => {
 };
 
 /** 끝나고 새 버전을 알려 줄 명령 — mcp(stdout이 통신로)·doctor·update는 따로 다룬다 */
-const NOTICE_COMMANDS = new Set(["add", "scan", "sync", "repos", "search", "show", "overview", "note", "embed", "remove"]);
+const NOTICE_COMMANDS = new Set(["add", "scan", "sync", "repos", "search", "show", "overview", "note", "remove"]);
 
 /** 명령과 나란히 하루 한 번 업데이트를 확인하고, 새 버전이 있으면 stderr로 한 줄 알린다 */
 async function runWithUpdateNotice(argv: string[]): Promise<number> {

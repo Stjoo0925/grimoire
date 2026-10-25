@@ -5,7 +5,7 @@
  */
 import fs from "node:fs";
 
-import { dbPath, embedModel, grimoireHome, ollamaHost, type Env } from "../core/config";
+import { dbPath, grimoireHome, type Env } from "../core/config";
 import { loadSqlite, openDb } from "../core/db";
 import { runGit } from "../core/git";
 import { myEmails } from "../core/identity";
@@ -27,11 +27,9 @@ export interface DoctorOptions {
   cliPath: string;
   env?: Env;
   home?: string;
-  /** Ollama 점검에 쓰는 fetch (테스트 주입용) */
+  /** 업데이트 확인에 쓰는 fetch (테스트 주입용) */
   fetchImpl?: typeof fetch;
 }
-
-const OLLAMA_TIMEOUT_MS = 1_500;
 
 export async function doctor(options: DoctorOptions): Promise<Check[]> {
   const env = options.env ?? process.env;
@@ -100,8 +98,6 @@ export async function doctor(options: DoctorOptions): Promise<Check[]> {
             checks.push({ level: "warn", title: `한 번도 동기화되지 않은 레포 ${neverSynced.length}개`, fix: "grimoire sync" });
           }
         }
-        const embedded = (db.prepare("SELECT COUNT(*) AS n FROM embeddings WHERE model = ?").get(embedModel(env)) as { n: number }).n;
-        checks.push(await ollamaCheck(env, embedded, options.fetchImpl));
       } finally {
         db.close();
       }
@@ -141,29 +137,6 @@ async function versionCheck(env: Env, fetchImpl?: typeof fetch): Promise<Check> 
     return { level: "warn", title: `${title} — 새 버전 ${cache.latest}이 있습니다`, detail: cache.url, fix: "grimoire update" };
   }
   return { level: "ok", title: `${title} (최신)` };
-}
-
-async function ollamaCheck(env: Env, embedded: number, fetchImpl: typeof fetch = fetch): Promise<Check> {
-  const host = ollamaHost(env);
-  const model = embedModel(env);
-  try {
-    const res = await fetchImpl(`${host}/api/tags`, { signal: AbortSignal.timeout(OLLAMA_TIMEOUT_MS) });
-    const body = (await res.json()) as { models?: { name?: string }[] };
-    const installed = (body.models ?? []).some((item) => item.name === model || item.name?.startsWith(`${model}:`));
-    if (!installed) {
-      return { level: "warn", title: `시맨틱 검색 꺼짐 — Ollama에 ${model}이 없습니다 (선택)`, fix: `ollama pull ${model} && grimoire embed` };
-    }
-    return embedded > 0
-      ? { level: "ok", title: "시맨틱 검색", detail: `${model}, 임베딩 ${embedded}개` }
-      : { level: "warn", title: "시맨틱 검색 준비됨 — 아직 임베딩이 없습니다 (선택)", fix: "grimoire embed" };
-  } catch {
-    return {
-      level: "warn",
-      title: "시맨틱 검색 꺼짐 — 로컬 Ollama에 닿지 않습니다 (선택, 키워드 검색은 정상)",
-      detail: host,
-      fix: `Ollama 설치 후 ollama pull ${model} && grimoire embed`,
-    };
-  }
 }
 
 async function clientChecks(options: DoctorOptions, env: Env): Promise<Check[]> {

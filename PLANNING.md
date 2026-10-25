@@ -31,7 +31,7 @@ Grimoire는 내 컴퓨터에 있는 git 레포를 인덱싱해, Claude Code·Cur
             └───────┬───────┘        └───────┬───────┘
                     └────────┬───────────────┘
                      src/core (단일 코어)
-          git.ts · indexer.ts · search.ts · overview.ts · notes.ts · embed.ts
+          git.ts · indexer.ts · code.ts · search.ts · terms.ts · overview.ts · notes.ts
                              │
               ~/.grimoire/grimoire.db  (SQLite, WAL)
                              │  diff는 필요할 때 로컬 레포에서 직접
@@ -40,7 +40,7 @@ Grimoire는 내 컴퓨터에 있는 git 레포를 인덱싱해, Claude Code·Cur
 
 - **원칙 1**: 코어는 `src/core` 하나. CLI와 MCP는 얇은 진입점이다.
 - **원칙 2**: DB가 유일한 상태. WAL이라 CLI 동기화와 MCP 질의가 동시에 돌아도 안전하다.
-- **원칙 3**: 외부 API 호출 없음. 임베딩은 선택이며 로컬 Ollama(`nomic-embed-text`)만 쓴다.
+- **원칙 3**: LLM·임베딩 없음. 검색은 키워드(FTS5)와 결정론적 재정렬이고, 해석은 호출한 AI가 한다.
 
 ## 3. 데이터 모델
 
@@ -52,15 +52,14 @@ Grimoire는 내 컴퓨터에 있는 git 레포를 인덱싱해, Claude Code·Cur
 | `repo_tech` | 매니페스트(package.json·go.mod 등)에서 뽑은 기술 스택 (정규화 이름·분류) |
 | `notes` | 대화 중 기록한 노트 (MCP `record_note`, CLI `note`) |
 | `docs` + `docs_fts` | 검색 단위(커밋·노트)와 FTS5 색인 |
-| `embeddings` | 선택. 문서별 로컬 임베딩 벡터 |
+| `code_files` | HEAD의 소스 파일별 심볼(줄 번호)·머리 주석 — 현재 코드 핀포인트 |
 
 ## 4. 검색
 
 1. **키워드**: FTS5 bm25. 질의 토큰은 접두 일치(`auth*`)로, 한글 조사는 떼서(`인증을`→`인증`)
    기술 별칭은 정규화해서(`React.js`→`react`) 넣는다.
-2. **시맨틱(선택)**: 임베딩이 있으면 질의를 로컬 모델로 벡터화해 코사인 순위를 만든다.
-3. 두 순위를 **RRF**로 융합. 모델이 없으면 키워드만으로 조용히 폴백.
-4. 필터: 레포, 작성자(`me` = 설정된 내 이메일), 기간, 문서 종류.
+2. **재정렬**: 질의 개념별 IDF²로 커버리지를 매기고, 파일 이름 일치는 가산, 테스트 파일·대량 커밋은 감점, 현재 레포는 우선.
+3. 필터: 레포, 작성자(`me` = 설정된 내 이메일), 기간, 문서 종류.
 
 ## 5. MCP 도구
 
@@ -78,7 +77,7 @@ Grimoire는 내 컴퓨터에 있는 git 레포를 인덱싱해, Claude Code·Cur
 
 ## 6. 로드맵
 
-1. **M1 (이번)**: 로컬 git 인덱서 + SQLite/FTS5 + 검색 + MCP 5종 + CLI + 선택 임베딩
+1. **M1**: 로컬 git 인덱서 + SQLite/FTS5 + 현재 코드 색인 + 검색 + MCP + CLI (시맨틱 검색은 써 보고 뺌 — 키워드로 충분)
 2. **M2**: GitHub PR·이슈 본문 수집 (`gh` CLI/GitHub App 읽기 전용) → 커밋과 연결
 3. **M3**: git `post-commit` 훅 설치 명령, 검색 품질 eval 셋(질문→기대 근거)과 CI
 4. **M4**: 원격 MCP(HTTP + OAuth), 필요해지면 팀 단위 인덱스

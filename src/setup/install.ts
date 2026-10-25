@@ -19,7 +19,7 @@ export const CLIENTS = ["claude-code", "claude-desktop", "cursor"] as const;
 export type ClientName = (typeof CLIENTS)[number];
 
 /** 설정에 함께 옮겨 적는 환경 변수 — CLI와 MCP가 같은 DB·같은 "나"·같은 업데이트 설정을 보게 한다. */
-const FORWARDED_ENV = ["GRIMOIRE_HOME", "GRIMOIRE_ME", "OLLAMA_HOST", "OLLAMA_EMBED_MODEL", "GRIMOIRE_UPDATE_CHECK"] as const;
+const FORWARDED_ENV = ["GRIMOIRE_HOME", "GRIMOIRE_ME", "GRIMOIRE_AUTO_ADD", "GRIMOIRE_UPDATE_CHECK"] as const;
 
 export interface ServerSpec {
   command: string;

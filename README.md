@@ -15,7 +15,7 @@ The goal is to let the AI point at the right file and commit with a single searc
 - **Incremental sync**: only new commits and changed files are read. Syncs in the background when the MCP server starts
 - Korean queries reach English identifiers: common dev terms are expanded to English ("충돌" → `conflict`, "횟수 제한" → `rate limit`)
 - Responses are kept minimal, because whatever lands in the conversation context is what you pay for
-- No external API calls. Semantic search is optional and uses local Ollama only
+- No LLM, no embedding model, no GPU: search is keyword-based (SQLite FTS5) and the AI you already use does the reading
 
 See [PLANNING.md](./PLANNING.md) (Korean) for the design and what changed from earlier versions.
 
@@ -46,7 +46,7 @@ To run from source, clone it and run `npm install && npm run build && npm link`.
 - The config contains the **absolute path of the node currently running**. GUI apps like Claude Desktop and Cursor
   don't see your shell's PATH, so `"command": "node"` fails with `spawn node ENOENT`. The SQLite module also only
   loads under the node it was built with. If you switch node versions, run `install` again.
-- If `GRIMOIRE_HOME`, `GRIMOIRE_ME`, `OLLAMA_HOST`, `OLLAMA_EMBED_MODEL` or `GRIMOIRE_UPDATE_CHECK` are set, they are written too,
+- If `GRIMOIRE_HOME`, `GRIMOIRE_ME`, `GRIMOIRE_AUTO_ADD` or `GRIMOIRE_UPDATE_CHECK` are set, they are written too,
   so the CLI and MCP server see the same DB.
 - Other server entries are left alone; only the `grimoire` entry is added. The existing file is backed up as `.bak`,
   and if its JSON is broken Grimoire stops without touching it. Add `--dry-run` to preview what would be written.
@@ -54,7 +54,7 @@ To run from source, clone it and run `npm install && npm run build && npm link`.
 
 ### When it won't connect — `grimoire doctor`
 
-Checks the Grimoire version (whether a new release is out), the node version and SQLite module, git, the DB and registered repos, your email, Ollama, and the config
+Checks the Grimoire version (whether a new release is out), the node version and SQLite module, git, the DB and registered repos, your email, and the config
 each client has (whether the node path exists, matches the current node, and points at the same DB), and tells you the command to fix it.
 
 ### The project you're working in is registered automatically
@@ -131,19 +131,13 @@ If you commit with both work and personal emails, list them all (then run `grimo
 export GRIMOIRE_ME="me@gmail.com,me@company.com"
 ```
 
-## Semantic search (optional)
+## Why there's no semantic search
 
-To find wording that isn't in the keywords ("race condition" → a "동시성 락" commit), turn on local embeddings.
-
-```bash
-ollama pull nomic-embed-text
-grimoire embed          # embed meaningful commits and notes (resumes if interrupted)
-```
-
-Even without embeddings, Korean queries get English words added from a dictionary of common dev terms (`src/core/terms.ts`).
-With embeddings on, search fuses keyword (FTS5 bm25) and cosine rankings with RRF. If the model can't be reached it quietly
-falls back to keywords. Run `grimoire embed` again after new commits come in.
-Change the address and model with `OLLAMA_HOST` and `OLLAMA_EMBED_MODEL`.
+Earlier versions could embed commits with a local model (Ollama) so that differently-worded questions still matched.
+It was removed: the one writing the search queries is the AI, and when a search misses, it rewords and searches again
+by itself. Korean–English mismatches are covered by the term dictionary (`src/core/terms.ts`), and the pinpoint
+benchmark scored 6/6 with keyword search alone. Dropping it removed a second install (Ollama + model), a DB about
+3× larger, and slower searches.
 
 ## Updating
 
@@ -248,10 +242,10 @@ Versioning and publishing are handled by the [release workflow](.github/workflow
 1. Write commit messages as [Conventional Commits](https://www.conventionalcommits.org/) (`feat: …`, `fix(search): …`, `feat!: …` for breaking changes).
 2. On every push to main, [release-please](https://github.com/googleapis/release-please) collects the commits since the last release and keeps a `chore: release vX.Y.Z` PR open and up to date. That PR bumps the `package.json` version and `CHANGELOG.md`.
    - Before 1.0: `feat` → minor, `fix` and `perf` → patch, breaking changes → minor as well. Only `docs`, `chore`, `ci`, `test` or `refactor` commits produce no release.
-3. When it's time to ship, merge that PR. It then goes out in this order: tests and e2e → `vX.Y.Z` tag → npm publish → GitHub release (notes taken from the CHANGELOG).
+3. When it's time to ship, merge that PR. It then goes out in this order: tests and e2e → npm publish → `vX.Y.Z` tag → GitHub release (notes taken from the CHANGELOG).
 
 The update check looks at GitHub releases, and `grimoire update` installs that version from npm or fast-forwards to the tag, so the release is created last, once the tag and npm are ready.
-If something fails midway, re-run it from Actions. Steps that already finished (tag, npm, release) are skipped.
+If something fails midway, re-run it from Actions. The tag, the npm version and the GitHub release are each checked separately and only the missing ones are created, always from the tagged commit (or the merge commit before the tag exists), so npm content matches the tag. npm goes before the tag, so a failed publish leaves nothing behind.
 
 **One-time setup**
 - On npmjs.com → `@stjoo0925/grimoire` → Settings → Trusted Publisher → GitHub Actions, register `Stjoo0925` / `grimoire` / `release.yml`. Publishing then uses OIDC without a token (works with a 2FA account) and adds provenance.
@@ -275,7 +269,7 @@ The [CI workflow](.github/workflows/ci.yml) runs typecheck, tests, the end-to-en
 src/
   cli.ts            CLI entry point
   mcp/              MCP server (stdio), tool definitions, response slimming (format)
-  core/             the single core — db · git · indexer · code · search · terms · embed · overview · notes · identity · update
+  core/             the single core — db · git · indexer · code · search · terms · overview · notes · identity · update
     tech/           manifest parsers and tech name normalization dictionary
   setup/            install · doctor · update commands
 e2e/                end-to-end harness · agent harness · bench · shared fixture and claude runner

@@ -120,7 +120,24 @@ grimoire embed          # 의미 있는 커밋과 노트를 임베딩 (중간에
 ```bash
 npm run typecheck
 npm test            # 임시 git 레포로 인덱싱·검색·MCP 도구 검증 (네트워크 없음)
+npm run e2e         # MCP 종단 하네스 (아래)
 ```
+
+### MCP 종단 하네스 (`e2e/harness.ts`)
+
+실제 클라이언트처럼 서버를 **별도 프로세스로 띄워 stdio로** 붙고, 고정 픽스처 레포로 시나리오 12단계를 검증합니다.
+GUI 앱 환경(최소 PATH, cwd `/`)에서 연결 → 빈 DB 안내 → `add_repo` scan → 한국어 검색과 근거 → 작성자 필터 →
+diff → 개요 → 노트 → 오류 처리 → 재시작 시 백그라운드 동기화 → stdout 오염 여부.
+
+```bash
+npm run e2e                                    # 빌드한 dist/cli.js
+npm run e2e -- --config "$HOME/Library/Application Support/Claude/claude_desktop_config.json"   # 설치된 설정 그대로
+npm run e2e -- --json                          # 결과 JSON
+```
+
+- `--config`는 클라이언트 설정에 적힌 `command`·`args`를 그대로 실행하므로, `grimoire install`이 쓴 설정이 실제로 뜨는지 확인할 수 있습니다.
+- DB·HOME은 항상 임시 폴더로 바꿔 실행합니다. 실제 `~/.grimoire`와 내 레포는 건드리지 않습니다.
+- 실패하면 종료 코드가 1입니다. 연결이 안 되면 거기서 멈추고, 서버 stderr를 함께 보여 줍니다.
 
 ```
 src/

@@ -1,0 +1,160 @@
+/**
+ * SQLite 저장소 — 스키마와 연결.
+ *
+ * WAL 모드라 CLI 동기화(쓰기)와 MCP 질의(읽기)가 동시에 돌아도 서로 막지 않는다.
+ * 쓰기는 전부 트랜잭션 안에서 하므로 중간에 죽어도 반쯤 쓴 상태가 남지 않는다.
+ */
+import fs from "node:fs";
+import path from "node:path";
+
+import Database from "better-sqlite3";
+
+export type DB = Database.Database;
+
+/** 스키마 버전 — 바꾸면 MIGRATIONS에 한 단계를 덧붙인다. */
+const MIGRATIONS: string[] = [
+  `
+  CREATE TABLE repos (
+    id          INTEGER PRIMARY KEY,
+    path        TEXT NOT NULL UNIQUE,
+    name        TEXT NOT NULL,
+    remote_url  TEXT,
+    added_at    TEXT NOT NULL,
+    synced_at   TEXT
+  );
+
+  CREATE TABLE commits (
+    sha            TEXT NOT NULL,
+    repo_id        INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    author_name    TEXT NOT NULL,
+    author_email   TEXT NOT NULL,
+    authored_at    TEXT NOT NULL,
+    subject        TEXT NOT NULL,
+    body           TEXT NOT NULL,
+    files_changed  INTEGER NOT NULL,
+    insertions     INTEGER NOT NULL,
+    deletions      INTEGER NOT NULL,
+    meaningful     INTEGER NOT NULL,
+    PRIMARY KEY (repo_id, sha)
+  );
+  CREATE INDEX commits_time ON commits(repo_id, authored_at);
+  CREATE INDEX commits_sha ON commits(sha);
+  CREATE INDEX commits_author ON commits(author_email);
+
+  CREATE TABLE commit_files (
+    repo_id     INTEGER NOT NULL,
+    sha         TEXT NOT NULL,
+    path        TEXT NOT NULL,
+    insertions  INTEGER,
+    deletions   INTEGER,
+    FOREIGN KEY (repo_id, sha) REFERENCES commits(repo_id, sha) ON DELETE CASCADE
+  );
+  CREATE INDEX commit_files_commit ON commit_files(repo_id, sha);
+
+  CREATE TABLE repo_tech (
+    repo_id        INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    tech           TEXT NOT NULL,
+    category       TEXT NOT NULL,
+    manifest_path  TEXT NOT NULL,
+    dev            INTEGER NOT NULL,
+    PRIMARY KEY (repo_id, tech, manifest_path)
+  );
+
+  CREATE TABLE notes (
+    id          INTEGER PRIMARY KEY,
+    repo_id     INTEGER REFERENCES repos(id) ON DELETE SET NULL,
+    text        TEXT NOT NULL,
+    tags        TEXT NOT NULL DEFAULT '',
+    source      TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+  );
+
+  -- 검색 단위. kind='commit'이면 ref=sha, kind='note'면 ref=notes.id
+  CREATE TABLE docs (
+    id       INTEGER PRIMARY KEY,
+    kind     TEXT NOT NULL,
+    ref      TEXT NOT NULL,
+    repo_id  INTEGER REFERENCES repos(id) ON DELETE CASCADE,
+    at       TEXT NOT NULL,
+    UNIQUE (kind, repo_id, ref)
+  );
+
+  CREATE VIRTUAL TABLE docs_fts USING fts5(
+    title, body, paths,
+    tokenize = 'unicode61 remove_diacritics 2'
+  );
+
+  CREATE TABLE embeddings (
+    doc_id  INTEGER NOT NULL REFERENCES docs(id) ON DELETE CASCADE,
+    model   TEXT NOT NULL,
+    vector  BLOB NOT NULL,
+    PRIMARY KEY (doc_id, model)
+  );
+  `,
+];
+
+export function openDb(file: string): DB {
+  if (file !== ":memory:") fs.mkdirSync(path.dirname(file), { recursive: true });
+  const db = new Database(file);
+  db.pragma("journal_mode = WAL");
+  db.pragma("foreign_keys = ON");
+  db.pragma("busy_timeout = 5000");
+  migrate(db);
+  return db;
+}
+
+function migrate(db: DB): void {
+  const current = db.pragma("user_version", { simple: true }) as number;
+  for (let version = current; version < MIGRATIONS.length; version++) {
+    db.transaction(() => {
+      db.exec(MIGRATIONS[version]);
+      db.pragma(`user_version = ${version + 1}`);
+    })();
+  }
+}
+
+/**
+ * 문서 하나를 색인에 넣거나 갈아 끼운다. FTS 행 id는 docs.id와 같게 맞춘다.
+ * 내용이 바뀌면 옛 임베딩은 더 이상 맞지 않으므로 지운다.
+ */
+export function upsertDoc(
+  db: DB,
+  doc: {
+    kind: "commit" | "note";
+    ref: string;
+    repoId: number | null;
+    at: string;
+    title: string;
+    body: string;
+    paths: string;
+  },
+): number {
+  const existing = db
+    .prepare(
+      "SELECT id FROM docs WHERE kind = ? AND ref = ? AND repo_id IS ?",
+    )
+    .get(doc.kind, doc.ref, doc.repoId) as { id: number } | undefined;
+
+  let id: number;
+  if (existing) {
+    id = existing.id;
+    db.prepare("UPDATE docs SET at = ? WHERE id = ?").run(doc.at, id);
+    db.prepare("DELETE FROM docs_fts WHERE rowid = ?").run(id);
+    db.prepare("DELETE FROM embeddings WHERE doc_id = ?").run(id);
+  } else {
+    id = Number(
+      db
+        .prepare("INSERT INTO docs (kind, ref, repo_id, at) VALUES (?, ?, ?, ?)")
+        .run(doc.kind, doc.ref, doc.repoId, doc.at).lastInsertRowid,
+    );
+  }
+  db.prepare(
+    "INSERT INTO docs_fts (rowid, title, body, paths) VALUES (?, ?, ?, ?)",
+  ).run(id, doc.title, doc.body, doc.paths);
+  return id;
+}
+
+/** 레포를 지우면 docs는 CASCADE로 지워지지만 FTS 가상 테이블은 따로 정리해야 한다. */
+export function pruneOrphanFts(db: DB): void {
+  db.exec("DELETE FROM docs_fts WHERE rowid NOT IN (SELECT id FROM docs)");
+}

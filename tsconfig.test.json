@@ -1,19 +1,8 @@
 {
-  // 유닛 테스트 전용 — src/lib과 tests를 CommonJS로 트랜스파일해 node --test로 돌린다.
-  // (Next 런타임과 무관한 순수 로직만 대상으로 한다)
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "noEmit": false,
     "outDir": ".test-out",
-    "rootDir": ".",
-    "module": "nodenext",
-    "moduleResolution": "nodenext",
-    "target": "ES2022",
-    "incremental": false,
-    "jsx": "react-jsx",
-    "types": ["node"]
+    "rootDir": "."
   },
-  "include": ["src/lib/**/*.ts", "src/mcp/**/*.ts", "tests/**/*.ts"],
-  // MCP SDK에 의존하는 배선 파일은 테스트 대상이 아니다 (순수 로직만 돌린다).
-  "exclude": ["node_modules", "src/mcp/server.ts", "src/mcp/http.ts"]
+  "include": ["src/**/*.ts", "tests/**/*.ts"]
 }

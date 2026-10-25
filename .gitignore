@@ -1,51 +1,9 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
-
-# dependencies
 /node_modules
-/.pnp
-.pnp.*
-.yarn/*
-!.yarn/patches
-!.yarn/plugins
-!.yarn/releases
-!.yarn/versions
-
-# testing
-/coverage
-# 유닛 테스트 트랜스파일 산출물 (npm run test)
+/dist
 /.test-out
-
-# next.js
-/.next/
-/out/
-
-# production
-/build
-# MCP 서버 트랜스파일 산출물 (npm run mcp:build)
-/dist-mcp
-# CLI 그래프 재빌드 트랜스파일 산출물 (npm run graph:rebuild)
-/.rebuild-out
-
-# misc
 .DS_Store
-*.pem
-
-# debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-
-# env files (can opt-in for committing if needed)
-.env*
-!.env.example
-
-# 수집기 로컬 저장소 (raw GitHub 데이터 / 생성된 그래프)
-/data
-
-# vercel
-.vercel
-
-# typescript
 *.tsbuildinfo
-next-env.d.ts
+npm-debug.log*
+.env*
+# 로컬 DB는 기본적으로 ~/.grimoire 에 생기지만, GRIMOIRE_HOME을 레포 안으로 잡았을 때 대비
+/.grimoire

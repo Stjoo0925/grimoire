@@ -241,10 +241,10 @@ npm run bench -- --questions bench/questions.local.json --modes grimoire --only 
 1. 커밋 메시지는 [Conventional Commits](https://www.conventionalcommits.org/ko/)로 씁니다(`feat: …`, `fix(search): …`, 깨지는 변경은 `feat!: …`).
 2. main에 push될 때마다 [release-please](https://github.com/googleapis/release-please)가 지난 릴리스 이후 커밋을 모아 `chore: release vX.Y.Z` PR을 열어 두고 갱신합니다. 이 PR이 `package.json` 버전과 `CHANGELOG.md`를 올립니다.
    - 1.0 전에는 `feat` → minor, `fix`·`perf` → patch, 깨지는 변경도 minor입니다. `docs`·`chore`·`ci`·`test`·`refactor`만 있으면 릴리스하지 않습니다.
-3. 내보낼 때가 되면 그 PR을 머지합니다. 그러면 테스트·e2e → `vX.Y.Z` 태그 → npm 배포 → GitHub 릴리스(노트는 CHANGELOG에서) 순서로 나갑니다.
+3. 내보낼 때가 되면 그 PR을 머지합니다. 그러면 테스트·e2e → npm 배포 → `vX.Y.Z` 태그 → GitHub 릴리스(노트는 CHANGELOG에서) 순서로 나갑니다.
 
 업데이트 확인은 GitHub 릴리스를 보고 `grimoire update`는 그 버전을 npm에서 받거나 태그로 fast-forward하므로, 릴리스는 태그와 npm이 준비된 뒤에 맨 마지막으로 만듭니다.
-도중에 실패하면 Actions에서 다시 실행하세요. 이미 끝난 단계(태그·npm·릴리스)는 건너뜁니다.
+도중에 실패하면 Actions에서 다시 실행하세요. 태그·npm 버전·GitHub 릴리스를 각각 확인해 없는 것만 만들고, 항상 태그가 가리키는 커밋(태그 전이면 머지 커밋)에서 만들어 npm 내용이 태그와 같습니다. npm을 태그보다 먼저 내므로 배포가 실패해도 아무것도 남지 않습니다.
 
 **처음 한 번 해 둘 것**
 - npmjs.com → `@stjoo0925/grimoire` → Settings → Trusted Publisher → GitHub Actions에 `Stjoo0925` / `grimoire` / `release.yml`을 등록합니다. 토큰 없이 OIDC로 배포하고(2FA 계정에서도 동작) provenance가 붙습니다.

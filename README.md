@@ -85,8 +85,8 @@ The `add_repo` tool registers right from the conversation ("remember every repo 
 | `record_note` | Save something learned or decided as a note → searchable afterwards |
 
 Responses are minimal to save tokens: 10-char shas, dates to the day, `me` for your own commits, and the commit link prefix per repo (`links`) sent only once.
-Fields the answer doesn't need (local paths, scores, emails) are dropped. Tool descriptions are short English and only say *when* to use each tool, since tool definitions ride along with every request in every session where the server is on. Read-only tools carry `readOnlyHint`, and `add_repo`/`record_note` carry `idempotentHint`, so clients can tell which calls are safe.
-What piles up in the conversation context is the cost. The "response size budget" step in `npm run e2e` (260 chars per search hit, 2600 chars of tool definitions, 392 chars of description text) keeps the format from growing back.
+Fields the answer doesn't need (local paths, scores, emails) are dropped. Tool descriptions are short English and only say *when* to use each tool, since tool definitions ride along with every request in every session where the server is on. Read-only tools carry `readOnlyHint`, and `add_repo` carries `idempotentHint`, so clients can tell which calls are safe.
+What piles up in the conversation context is the cost. The "response size budget" step in `npm run e2e` (260 chars per search hit, 2600 chars of tool definitions, 420 chars of description text) keeps the format from growing back.
 The CLI shows the full, unslimmed results.
 
 ### Current code index

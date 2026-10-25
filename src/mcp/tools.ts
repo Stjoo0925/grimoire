@@ -68,7 +68,7 @@ export function emptyHint(context: ToolContext): string | undefined {
  * 도구 정의는 이 서버가 켜진 모든 세션의 매 요청에 실린다(사용자 범위 설치면 모든 프로젝트).
  * 설명은 "언제 쓰는지"만 짧게 — 길어지면 Grimoire를 안 쓰는 대화까지 비용을 문다.
  * 영어로 쓴다: 같은 뜻이면 토큰이 적고, 영어로 묻는 세션에서도 도구를 고르게. annotations는 클라이언트가
- * 확인 없이 불러도 되는지 판단하는 힌트다(읽기 도구는 readOnlyHint, add_repo는 같은 경로면 다시 불러도 같다).
+ * 확인 없이 불러도 되는지 판단하는 힌트다(읽기 도구는 readOnlyHint, add_repo는 같은 경로면 다시 불러도 같다. record_note는 부를 때마다 노트가 생겨 MCP 기본값(idempotentHint 없음 = false) 그대로 둔다).
  */
 export const TOOLS = [
   {
@@ -93,7 +93,7 @@ export const TOOLS = [
   },
   {
     name: "show_commit",
-    description: "Commit message, files, diff head; paths filters.",
+    description: "Message, files, diff of a commit (sha) or up to 5 (shas); paths narrows diff.",
     inputSchema: {
       type: "object",
       properties: {
@@ -140,7 +140,6 @@ export const TOOLS = [
       },
       required: ["text"],
     },
-    annotations: { idempotentHint: false },
   },
 ] as const;
 

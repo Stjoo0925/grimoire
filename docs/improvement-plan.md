@@ -314,6 +314,7 @@ Claude Code는 기본으로 **도구 이름 + 서버 instructions만** 먼저 �
 ### 0번: 같은 변경의 커밋 접기 — 채택
 
 - 같은 레포에서 제목(PR 번호 접미 `(#N)` 제거)과 변경 파일 집합이 같은 커밋은 한 결과로 접는다. 대표는 날짜가 늦은 쪽(대개 머지 커밋), 접힌 sha는 `also`로 싣는다(index 응답에는 8자). limit 전에 접어 빈자리는 다음 후보가 채운다.
+- 한계(의도): 제목과 파일 집합이 정확히 같을 때만 접으므로, 커밋 여러 개를 squash한 PR(파일 집합이 어느 단일 커밋과도 다름)은 접히지 않는다.
 - 89문항: 잃은 질문 없음, 영어 질문 하나(gr-en-docker-ci-conflict)가 8위 안으로 들어왔다. 홀드아웃: Acc@1·Acc@3 그대로(0.375 · 0.438), Acc@8 0.521 → 0.542(1 / 0), 지연 46 → 44ms.
 
 ### 1번: porter 어간 — 미채택
@@ -334,7 +335,7 @@ Claude Code는 기본으로 **도구 이름 + 서버 instructions만** 먼저 �
 
 ### 3번: 도구 표면 — 채택
 
-- `TOOLS` description과 서버 `instructions`를 영어로. 설명 글(도구·인자 description) 392 → 385자. instructions는 264자이고 첫 300자 안에 트리거 문구("where is the code that…", "how did I solve…", past commits, notes)와 주입 방지 문장이 있다(e2e가 확인).
-- 읽기 도구 4개(`search_memory`·`show_commit`·`get_repo_overview`·`list_repos`)에 `readOnlyHint: true`, `add_repo`에 `idempotentHint: true`, `record_note`에 `idempotentHint: false`.
+- `TOOLS` description과 서버 `instructions`를 영어로. 설명 글(도구·인자 description) 392 → 414자(show_commit 설명을 뜻이 잡히게 고친 뒤). instructions는 264자이고 첫 300자 안에 트리거 문구("where is the code that…", "how did I solve…", past commits, notes)와 주입 방지 문장이 있다(e2e가 확인).
+- 읽기 도구 4개(`search_memory`·`show_commit`·`get_repo_overview`·`list_repos`)에 `readOnlyHint: true`, `add_repo`에 `idempotentHint: true`, `record_note`는 부를 때마다 노트가 생겨 MCP 기본값(`idempotentHint` 없음 = false) 그대로.
 - `show_commit`에 `shas`(최대 5개): 한 호출로 여러 커밋, 커밋당 diff 기본 40줄. 없는 sha는 그 자리에 `error`.
-- 도구 정의 JSON 전체는 1745 → 1984자 — annotations(+215자)와 `shas` 인자 같은 구조가 늘었고 설명 글은 줄었다. 글자 수로는 늘었지만, 한글(196자)이 빠져 토큰으로는 줄었을 것으로 본다(어림: 680 → 620). e2e에 설명 글 예산(392자)을 따로 두어 설명이 다시 길어지는 것을 막는다.
+- 도구 정의 JSON 전체는 1745 → 1974자 — annotations(+177자)와 `shas` 인자 같은 구조가 늘었다. 글자 수로는 늘었지만, 한글(196자)이 빠져 토큰으로는 줄었을 것으로 본다(어림: 680 → 617). e2e에 설명 글 예산(420자)을 따로 두어 설명이 다시 길어지는 것을 막는다.

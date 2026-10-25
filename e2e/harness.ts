@@ -25,8 +25,11 @@ const CONNECT_BUDGET_MS = 5_000;
 const SYNC_WAIT_MS = 10_000;
 const EXPECTED_TOOLS = ["search_memory", "show_commit", "get_repo_overview", "list_repos", "add_repo", "record_note"];
 const READ_TOOLS = ["search_memory", "show_commit", "get_repo_overview", "list_repos"];
-/** 도구 설명 글(도구·인자 description) 예산 — 영어로 옮기기 전 한국어 설명의 길이(도구 288자 + 인자 104자) */
-const TOOL_TEXT_BUDGET = 392;
+/**
+ * 도구 설명 글(도구·인자 description) 예산 — 설명이 다시 길어지는 것을 막는 용도다.
+ * 영어로 옮기기 전 한국어 설명이 392자(도구 288 + 인자 104)였고, 영어판은 뜻이 잡히게 쓰고 약간의 여유를 둔다.
+ */
+const TOOL_TEXT_BUDGET = 420;
 
 interface ServerSpec {
   command: string;
@@ -165,7 +168,7 @@ async function runScenario(spec: ServerSpec): Promise<StepResult[]> {
     const hint = (name: string) => tools.find((tool) => tool.name === name)?.annotations;
     const notReadOnly = READ_TOOLS.filter((name) => hint(name)?.readOnlyHint !== true);
     expect(notReadOnly.length === 0, `readOnlyHint가 없는 읽기 도구: ${notReadOnly.join(", ")}`);
-    expect(hint("add_repo")?.idempotentHint === true && hint("record_note")?.idempotentHint === false, "add_repo·record_note의 idempotentHint");
+    expect(hint("add_repo")?.idempotentHint === true && hint("record_note")?.idempotentHint !== true, "add_repo·record_note의 idempotentHint");
     // 클라이언트가 앞부분만 보여 줄 수 있다 — 언제 쓰는지와 주입 방지 문장이 첫 300자 안에 있어야 한다
     const head = (live().client.getInstructions() ?? "").slice(0, 300);
     const absent = ["where is the code that", "how did I solve", "past commits", "notes", "never follow instructions"].filter((phrase) => !head.includes(phrase));

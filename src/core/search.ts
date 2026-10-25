@@ -325,6 +325,8 @@ function preferRepo<T extends { docId: number; score: number }>(db: DB, items: T
  * 1·2위를 함께 차지하면 자리만 먹는다. 같은 레포에서 제목(PR 번호 접미 "(#N)" 제거)과 변경 파일 집합이 같으면
  * 같은 변경으로 본다. 대표는 날짜가 늦은 쪽(대개 머지 커밋)이고 자리는 먼저 나온 쪽의 것, 접힌 sha는 also에 싣는다.
  * limit 전에 접으므로 빈자리는 다음 후보가 채운다.
+ * 한계(의도): 제목과 파일 집합이 정확히 같을 때만 접으므로, 커밋 여러 개를 squash한 PR(파일 집합이 어느 단일 커밋과도 다름)은 접히지 않는다.
+ * 파일 목록은 후보마다 group_concat으로 이어 붙인다 — 지금 규모에선 충분하고, 파일 수가 큰 커밋이 문제가 되면 해시로 바꿀 수 있다.
  */
 function foldDuplicates<T extends { docId: number }>(db: DB, items: T[], limit: number): (T & { also: string[] })[] {
   const info = db.prepare(

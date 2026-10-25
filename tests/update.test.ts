@@ -114,6 +114,22 @@ test("grimoire update: 태그로 fast-forward하고 npm install·build를 돌린
   assert.match(log.join("\n"), /다시 시작하세요/);
 });
 
+test("grimoire update: npm 설치본이면 npm install -g로 그 버전을 깐다", async () => {
+  const root = path.join(tempDir(), "lib", "node_modules", "@stjoo0925", "grimoire");
+  fs.mkdirSync(root, { recursive: true });
+  const { exec, npm } = recordingExec();
+  const code = await runUpdate({
+    env: envAt(tempDir()),
+    root,
+    current: "0.2.0",
+    fetchImpl: fakeRelease("v0.3.0").impl,
+    exec,
+    log: () => {},
+  });
+  assert.equal(code, 0);
+  assert.deepEqual(npm, ["install -g @stjoo0925/grimoire@0.3.0"]);
+});
+
 test("grimoire update: --check·최신·로컬 변경이면 설치본을 건드리지 않는다", async () => {
   const { clone } = installedClone();
   const { exec, npm } = recordingExec();

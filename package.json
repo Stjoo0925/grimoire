@@ -1,9 +1,25 @@
 {
-  "name": "grimoire",
+  "name": "@stjoo0925/grimoire",
   "version": "0.2.0",
   "description": "로컬 git 이력을 인덱싱해 AI 코딩 도구가 MCP로 내 과거 작업을 근거와 함께 찾게 해 주는 개발 메모리",
-  "private": true,
-  "license": "UNLICENSED",
+  "keywords": [
+    "mcp",
+    "git",
+    "memory",
+    "claude",
+    "cursor",
+    "developer-tools",
+    "sqlite"
+  ],
+  "homepage": "https://github.com/Stjoo0925/grimoire#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Stjoo0925/grimoire.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Stjoo0925/grimoire/issues"
+  },
+  "license": "MIT",
   "bin": {
     "grimoire": "dist/cli.js"
   },
@@ -13,6 +29,9 @@
   "engines": {
     "node": ">=20"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -21,7 +40,8 @@
     "mcp": "npm run build --silent && node dist/cli.js mcp",
     "e2e": "npm run build --silent && tsc -p tsconfig.test.json && node .test-out/e2e/harness.js",
     "e2e:agent": "npm run build --silent && tsc -p tsconfig.test.json && node .test-out/e2e/agent.js",
-    "bench": "npm run build --silent && tsc -p tsconfig.test.json && node .test-out/e2e/bench.js"
+    "bench": "npm run build --silent && tsc -p tsconfig.test.json && node .test-out/e2e/bench.js",
+    "prepublishOnly": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && npm run build && npm test"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

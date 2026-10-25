@@ -1,17 +1,18 @@
 /**
- * `grimoire update` — GitHub 릴리스의 최신 태그로 설치본을 올리고 다시 빌드한다.
+ * `grimoire update` — 최신 GitHub 릴리스 버전으로 설치본을 올린다.
  *
- * 설치본은 git clone이라고 본다(배포 채널이 GitHub 릴리스). 순서:
- *   git fetch --tags origin → git merge --ff-only <태그> → npm install → npm run build
- * 로컬에서 고친 파일이 있거나 fast-forward가 안 되면 건드리지 않고 멈춘다.
- * MCP 설정에는 dist/cli.js의 절대경로가 들어 있으므로, 같은 자리에서 다시 빌드하면 설정은 그대로 둬도 된다.
+ * npm 설치본(node_modules 안):  npm install -g @stjoo0925/grimoire@<버전>
+ * git clone 설치본:              git fetch --tags origin → git merge --ff-only <태그> → npm install → npm run build
+ * clone에서 고친 파일이 있거나 fast-forward가 안 되면 건드리지 않고 멈춘다.
+ * MCP 설정에는 dist/cli.js의 절대경로가 들어 있고 두 방식 모두 같은 자리를 갈아 끼우므로, 설정은 그대로 둬도 된다.
  */
 import { execFile } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import type { Env } from "../core/config";
-import { compareVersions, INSTALL_ROOT, RELEASES_URL, refreshUpdateCache, VERSION } from "../core/update";
+import { compareVersions, INSTALL_ROOT, isNpmInstall, PACKAGE_NAME, RELEASES_URL, refreshUpdateCache, VERSION } from "../core/update";
 
 export type Exec = (command: string, args: string[], cwd: string) => Promise<string>;
 
@@ -29,6 +30,10 @@ export interface UpdateOptions {
 }
 
 const STEP_TIMEOUT_MS = 10 * 60 * 1000;
+
+export function npmUpdateSteps(version: string): { command: string; args: string[] }[] {
+  return [{ command: "npm", args: ["install", "-g", `${PACKAGE_NAME}@${version}`] }];
+}
 
 export function updateSteps(tag: string): { command: string; args: string[] }[] {
   return [
@@ -67,25 +72,31 @@ export async function runUpdate(options: UpdateOptions = {}): Promise<number> {
     return 0;
   }
 
-  if (!fs.existsSync(path.join(root, ".git"))) {
-    log(`${root}는 git clone이 아니라 자동으로 올릴 수 없습니다. ${RELEASES_URL}에서 받아 다시 설치하세요.`);
-    return 1;
-  }
-  const dirty = (await exec("git", ["status", "--porcelain", "--untracked-files=no"], root)).trim();
-  if (dirty) {
-    log(`${root}에 커밋하지 않은 변경이 있어 멈춥니다:\n${dirty}\n정리한 뒤 다시 실행하세요.`);
-    return 1;
+  const npm = isNpmInstall(root);
+  if (!npm) {
+    if (!fs.existsSync(path.join(root, ".git"))) {
+      log(`${root}는 npm 설치본도 git clone도 아니라 자동으로 올릴 수 없습니다. npm install -g ${PACKAGE_NAME}로 다시 설치하세요.`);
+      return 1;
+    }
+    const dirty = (await exec("git", ["status", "--porcelain", "--untracked-files=no"], root)).trim();
+    if (dirty) {
+      log(`${root}에 커밋하지 않은 변경이 있어 멈춥니다:\n${dirty}\n정리한 뒤 다시 실행하세요.`);
+      return 1;
+    }
   }
 
-  for (const step of updateSteps(tag)) {
+  // npm -g는 설치본 폴더 자체를 갈아 끼우므로 그 안에서 돌리지 않는다
+  const cwd = npm ? os.homedir() : root;
+  for (const step of npm ? npmUpdateSteps(cache.latest) : updateSteps(tag)) {
     const line = `${step.command} ${step.args.join(" ")}`;
     log(`${options.dryRun ? "(dry-run) " : ""}→ ${line}`);
     if (options.dryRun) continue;
     try {
-      await exec(step.command, step.args, root);
+      await exec(step.command, step.args, cwd);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       log(`실패: ${line}\n${message}`);
+      if (npm && /EACCES/.test(message)) log(`전역 설치 폴더에 쓸 권한이 없습니다. 처음 설치한 방식대로(예: sudo) '${line}'을 직접 실행하세요.`);
       if (step.args[0] === "merge") log(`로컬 브랜치가 ${tag}로 fast-forward되지 않습니다. 직접 'git checkout ${tag}' 후 'npm install && npm run build'를 실행하세요.`);
       return 1;
     }

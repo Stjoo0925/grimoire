@@ -1,5 +1,5 @@
 /**
- * 업데이트 확인 — 배포 채널은 GitHub 릴리스(Stjoo0925/grimoire)다.
+ * 업데이트 확인 — 기준은 GitHub 릴리스(Stjoo0925/grimoire)다. npm에도 같은 버전으로 배포한다.
  *
  * 하루 한 번만 최신 릴리스를 묻고 결과를 `GRIMOIRE_HOME/update.json`에 둔다.
  * 알림(MCP hint·CLI·doctor)은 이 캐시만 읽으므로 네트워크를 기다리지 않는다.
@@ -12,6 +12,8 @@ import path from "node:path";
 import { grimoireHome, type Env } from "./config";
 
 export const RELEASE_REPO = "Stjoo0925/grimoire";
+/** npm 패키지 이름 — 릴리스마다 GitHub 태그와 같은 버전으로 배포한다 */
+export const PACKAGE_NAME = "@stjoo0925/grimoire";
 const RELEASE_API = `https://api.github.com/repos/${RELEASE_REPO}/releases/latest`;
 export const RELEASES_URL = `https://github.com/${RELEASE_REPO}/releases`;
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -21,11 +23,16 @@ const TIMEOUT_MS = 3_000;
 export const INSTALL_ROOT = findInstallRoot(__dirname);
 export const VERSION = readVersion(INSTALL_ROOT);
 
+/** npm으로 깐 설치본인지 (아니면 git clone) */
+export function isNpmInstall(root: string): boolean {
+  return root.split(path.sep).includes("node_modules");
+}
+
 function findInstallRoot(from: string): string {
   for (let dir = from; ; dir = path.dirname(dir)) {
     try {
       const pkg = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8")) as { name?: string };
-      if (pkg.name === "grimoire") return dir;
+      if (pkg.name === PACKAGE_NAME) return dir;
     } catch {
       // 없으면 위로
     }

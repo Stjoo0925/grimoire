@@ -22,13 +22,13 @@ AI가 프로젝트를 일일이 열어 보거나 git log를 뒤지지 않고, �
 Node.js 20 이상과 git이 필요합니다.
 
 ```bash
-npm install && npm run build
-node dist/cli.js scan ~/work-dir              # 하위 git 레포를 찾아 모두 등록 + 인덱싱
-node dist/cli.js install claude-code          # MCP 클라이언트에 연결 (아래 표 참고)
-node dist/cli.js doctor                       # 연결 상태 점검
+npm install -g @stjoo0925/grimoire
+grimoire scan ~/work-dir              # 하위 git 레포를 찾아 모두 등록 + 인덱싱
+grimoire install claude-code          # MCP 클라이언트에 연결 (아래 표 참고)
+grimoire doctor                       # 연결 상태 점검
 ```
 
-`npm link`를 하면 이후로는 `node dist/cli.js` 대신 `grimoire`로 부를 수 있습니다.
+소스에서 쓰려면 clone한 뒤 `npm install && npm run build && npm link`를 하세요.
 
 ## MCP 연결
 
@@ -135,16 +135,18 @@ grimoire embed          # 의미 있는 커밋과 노트를 임베딩 (중간에
 
 ## 업데이트
 
-배포 채널은 [GitHub 릴리스](https://github.com/Stjoo0925/grimoire/releases)입니다.
+새 버전은 [GitHub 릴리스](https://github.com/Stjoo0925/grimoire/releases)로 나오고, npm에도 같은 버전으로 배포됩니다.
 
 ```bash
-grimoire update            # 최신 릴리스 태그로 fast-forward → npm install → npm run build
+grimoire update            # 최신 릴리스로 올리기
 grimoire update --check    # 확인만
 grimoire update --dry-run  # 무엇을 실행할지만 보기
 ```
 
-업데이트한 뒤에는 MCP 클라이언트를 다시 시작하세요. 같은 자리에서 다시 빌드하므로 MCP 설정은 다시 쓸 필요가 없습니다.
-설치 폴더에 커밋하지 않은 변경이 있거나 fast-forward가 안 되면 아무것도 바꾸지 않고 멈춥니다.
+- npm으로 설치했다면 `npm install -g @stjoo0925/grimoire@<새 버전>`을 실행합니다.
+- clone으로 설치했다면 릴리스 태그로 fast-forward한 뒤 `npm install`·`npm run build`를 합니다. 커밋하지 않은 변경이 있거나 fast-forward가 안 되면 아무것도 바꾸지 않고 멈춥니다.
+
+업데이트한 뒤에는 MCP 클라이언트를 다시 시작하세요. 같은 자리를 갈아 끼우므로 MCP 설정은 다시 쓸 필요가 없습니다.
 
 새 버전은 하루 한 번 확인하고(`~/.grimoire/update.json`에 기록), 이렇게 알립니다.
 
@@ -229,12 +231,13 @@ npm run bench -- --questions bench/questions.local.json --modes grimoire --only 
 
 ### 릴리스 내기
 
-`grimoire update`는 GitHub의 latest 릴리스 태그로 fast-forward합니다. 그래서 태그는 `main` 위의 커밋에 달아야 합니다.
+업데이트 확인은 GitHub의 latest 릴리스를 보고, `grimoire update`는 그 버전을 npm에서 받거나(npm 설치본) 그 태그로 fast-forward합니다(clone).
+그래서 **npm 배포와 GitHub 릴리스는 같은 버전으로**, 태그는 `main` 위의 커밋에 답니다. npm에 먼저 올린 뒤 릴리스를 만드세요(릴리스를 본 사용자가 아직 없는 버전을 받지 않게).
 
 ```bash
-npm version minor --no-git-tag-version   # package.json 버전 올리기 (MCP 서버 버전도 여기서 읽음)
-git commit -am "chore: v0.3.0"
-git tag v0.3.0 && git push origin main v0.3.0
+npm version minor                           # package.json 버전 올리기 + 커밋 + v0.3.0 태그 (MCP 서버 버전도 여기서 읽음)
+git push origin main --follow-tags
+npm publish                                 # prepublishOnly가 dist를 새로 빌드하고 테스트를 돌림
 gh release create v0.3.0 --generate-notes   # 사용자에게 할 일이 있으면 노트에 적기
 ```
 
@@ -253,3 +256,7 @@ src/
 e2e/                종단 하네스(harness) · 에이전트 하네스(agent) · 벤치(bench) · 공용 픽스처와 claude 실행기
 tests/              단위·통합 테스트 (임시 git 레포, 네트워크 없음)
 ```
+
+## 라이선스
+
+[MIT](./LICENSE)

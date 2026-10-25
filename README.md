@@ -22,13 +22,13 @@ See [PLANNING.md](./PLANNING.md) (Korean) for the design and what changed from e
 Requires Node.js 20+ and git.
 
 ```bash
-npm install && npm run build
-node dist/cli.js scan ~/work-dir              # find every git repo below, register + index
-node dist/cli.js install claude-code          # connect an MCP client (see table below)
-node dist/cli.js doctor                       # check the connection
+npm install -g @stjoo0925/grimoire
+grimoire scan ~/work-dir              # find every git repo below, register + index
+grimoire install claude-code          # connect an MCP client (see table below)
+grimoire doctor                       # check the connection
 ```
 
-After `npm link` you can call `grimoire` instead of `node dist/cli.js`.
+To run from source, clone it and run `npm install && npm run build && npm link`.
 
 ## Connecting over MCP
 
@@ -135,16 +135,18 @@ Change the address and model with `OLLAMA_HOST` and `OLLAMA_EMBED_MODEL`.
 
 ## Updating
 
-Releases are distributed through [GitHub Releases](https://github.com/Stjoo0925/grimoire/releases).
+New versions come out as [GitHub Releases](https://github.com/Stjoo0925/grimoire/releases) and are published to npm under the same version.
 
 ```bash
-grimoire update            # fast-forward to the latest release tag → npm install → npm run build
+grimoire update            # move to the latest release
 grimoire update --check    # only check
 grimoire update --dry-run  # only show what would run
 ```
 
-Restart your MCP client afterwards. The build happens in place, so the MCP config doesn't need to be rewritten.
-If the install folder has uncommitted changes or can't be fast-forwarded, nothing is changed and the update stops.
+- Installed from npm: runs `npm install -g @stjoo0925/grimoire@<new version>`.
+- Installed from a clone: fast-forwards to the release tag, then runs `npm install` and `npm run build`. If there are uncommitted changes or it can't fast-forward, nothing is changed and the update stops.
+
+Restart your MCP client afterwards. The install is replaced in place, so the MCP config doesn't need to be rewritten.
 
 New versions are checked once a day (recorded in `~/.grimoire/update.json`) and announced like this:
 
@@ -229,12 +231,13 @@ npm run bench -- --questions bench/questions.local.json --modes grimoire --only 
 
 ### Cutting a release
 
-`grimoire update` fast-forwards to the latest GitHub release tag, so tag a commit on `main`.
+The update check looks at the latest GitHub release, and `grimoire update` either installs that version from npm (npm installs) or fast-forwards to that tag (clones).
+So **publish to npm and cut the GitHub release with the same version**, and tag a commit on `main`. Publish to npm first, then create the release, so nobody is told about a version they can't install yet.
 
 ```bash
-npm version minor --no-git-tag-version   # bump package.json (the MCP server version is read from it)
-git commit -am "chore: v0.3.0"
-git tag v0.3.0 && git push origin main v0.3.0
+npm version minor                           # bump package.json + commit + v0.3.0 tag (the MCP server version is read from it)
+git push origin main --follow-tags
+npm publish                                 # prepublishOnly rebuilds dist from scratch and runs the tests
 gh release create v0.3.0 --generate-notes   # note anything users need to do
 ```
 
@@ -253,3 +256,7 @@ src/
 e2e/                end-to-end harness · agent harness · bench · shared fixture and claude runner
 tests/              unit and integration tests (temp git repos, no network)
 ```
+
+## License
+
+[MIT](./LICENSE)

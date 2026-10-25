@@ -41,7 +41,7 @@
     "e2e": "npm run build --silent && tsc -p tsconfig.test.json && node .test-out/e2e/harness.js",
     "e2e:agent": "npm run build --silent && tsc -p tsconfig.test.json && node .test-out/e2e/agent.js",
     "bench": "npm run build --silent && tsc -p tsconfig.test.json && node .test-out/e2e/bench.js",
-    "prepublishOnly": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && npm run build && npm test"
+    "prepack": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && npm run build && npm test"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

@@ -242,7 +242,9 @@ Versioning and publishing are handled by the [release workflow](.github/workflow
 1. Write commit messages as [Conventional Commits](https://www.conventionalcommits.org/) (`feat: …`, `fix(search): …`, `feat!: …` for breaking changes).
 2. On every push to main, [release-please](https://github.com/googleapis/release-please) collects the commits since the last release and keeps a `chore: release vX.Y.Z` PR open and up to date. That PR bumps the `package.json` version and `CHANGELOG.md`.
    - Before 1.0: `feat` → minor, `fix` and `perf` → patch, breaking changes → minor as well. Only `docs`, `chore`, `ci`, `test` or `refactor` commits produce no release.
-3. When it's time to ship, merge that PR. It then goes out in this order: tests and e2e → npm publish → `vX.Y.Z` tag → GitHub release (notes taken from the CHANGELOG).
+3. When it's time to ship, merge that PR. It then goes out in this order: tests and e2e → package file (`.tgz`) built once → npm publish → `vX.Y.Z` tag → GitHub release → GitHub Packages.
+   - The **same `.tgz`** goes to npm (with provenance), the release's Assets (plus a `.sha256`), and GitHub Packages (`npm.pkg.github.com`).
+   - Release notes are filled in automatically: the CHANGELOG section, plus any user-facing commits that landed after the release PR was merged (e.g. a fix needed to ship), plus install instructions.
 
 The update check looks at GitHub releases, and `grimoire update` installs that version from npm or fast-forwards to the tag, so the release is created last, once the tag and npm are ready.
 If something fails midway, re-run it from Actions. The tag, the npm version and the GitHub release are each checked separately and only the missing ones are created, always from the tagged commit (or the merge commit before the tag exists), so npm content matches the tag. npm goes before the tag, so a failed publish leaves nothing behind.

@@ -23,6 +23,8 @@ const SEMANTIC_MIN = 0.45;
 export const RRF_K = 60;
 /** 개념이 코드 파일 이름에 들어 있을 때 곱하는 가중치 */
 const FILE_NAME_BONUS = 1.6;
+/** 이보다 많은 파일을 건드린 커밋은 "대량 커밋"으로 보고 순위를 낮춘다 */
+const BULK_COMMIT_FILES = 40;
 /** 재정렬 전에 bm25로 넉넉히 뽑아 둘 배수 */
 const RERANK_FACTOR = 4;
 /** 결과에 붙이는 변경 파일 수 */
@@ -99,7 +101,8 @@ export function buildMatchExpression(query: string): string | null {
  * 하나에 걸린 문서를 이긴다(긴 문서는 길이 보정으로 더 밀린다). 개념마다 IDF²를 매겨(드문 개념이
  * 흔한 개념 여럿보다 무겁게) 덮은 개념의 합으로 다시 줄 세운다. 같으면 bm25 순서를 지킨다.
  * 코드 파일은 개념이 **파일 이름**에 들어 있으면 가산한다 — 위치 질문에서 가장 강한 신호다.
- * 테스트 파일은 구현 파일보다 살짝 뒤로 보낸다(핀포인트는 보통 구현이다).
+ * 테스트 파일과 수십 개 파일을 한꺼번에 건드린 커밋(초기 세팅·대량 이동)은 살짝 뒤로 보낸다 —
+ * 무엇에든 걸리지만 핀포인트인 경우는 드물다.
  */
 function rerankByCoverage(db: DB, concepts: string[][], candidates: Candidate[]): Candidate[] {
   if (concepts.length < 2 || candidates.length < 2) return candidates;
@@ -137,10 +140,21 @@ function rerankByCoverage(db: DB, concepts: string[][], candidates: Candidate[])
         .all(...ids) as { id: number }[]
     ).map((row) => row.id),
   );
+  const bulk = new Set(
+    (
+      db
+        .prepare(
+          `SELECT d.id FROM docs d JOIN commits c ON c.repo_id = d.repo_id AND c.sha = d.ref
+            WHERE d.kind = 'commit' AND d.id IN (${placeholders}) AND c.files_changed > ?`,
+        )
+        .all(...ids, BULK_COMMIT_FILES) as { id: number }[]
+    ).map((row) => row.id),
+  );
+  const factor = (id: number) => (testPenalty.has(id) ? 0.85 : 1) * (bulk.has(id) ? 0.7 : 1);
   const order = new Map(ids.map((id, index) => [id, index]));
   return [...candidates].sort((a, b) => {
-    const sa = (score.get(a.docId) ?? 0) * (testPenalty.has(a.docId) ? 0.85 : 1);
-    const sb = (score.get(b.docId) ?? 0) * (testPenalty.has(b.docId) ? 0.85 : 1);
+    const sa = (score.get(a.docId) ?? 0) * factor(a.docId);
+    const sb = (score.get(b.docId) ?? 0) * factor(b.docId);
     return sb - sa || (order.get(a.docId) ?? 0) - (order.get(b.docId) ?? 0);
   });
 }

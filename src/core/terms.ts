@@ -4,6 +4,7 @@
  * 질문은 한국어("충돌", "횟수 제한")인데 코드 식별자는 영어(resolveConflict, rateLimit)라서
  * 키워드 검색이 서로 만나지 못한다. 흔한 용어만 사전으로 잇는다(임베딩이 없어도 동작).
  * 값은 공백으로 여러 낱말을 줄 수 있고, 질의에서는 OR로 더해진다.
+ * 값에 한국어 동의어를 넣어도 된다 — 질문은 "바꾼", 커밋은 "변경"처럼 갈리는 경우.
  */
 export const KO_EN: Record<string, string> = {
   인증: "auth authentication",
@@ -130,6 +131,20 @@ export const KO_EN: Record<string, string> = {
   훅: "hook",
   상태: "state store",
   정리: "cleanup resolve",
+  바꾼: "변경 change replace migrate switch",
+  바꾸: "변경 change replace migrate switch",
+  바꿨: "변경 change replace migrate switch",
+  변경: "change update",
+  전환: "변경 migrate switch",
+  고친: "수정 fix",
+  고쳤: "수정 fix",
+  해결: "fix resolve",
+  추가: "add",
+  제거: "remove delete",
+  없앤: "제거 remove delete",
+  개선: "improve refactor",
+  깨졌: "오류 fix broken",
+  깨진: "오류 fix broken",
   주소록: "contacts",
   // 서비스·브랜드 이름은 한글 표기로 묻지만 코드에는 영어로 쓴다
   카카오: "kakao",

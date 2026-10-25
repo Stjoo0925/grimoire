@@ -30,7 +30,8 @@ test("isTempPath: 시스템 임시 폴더와 /tmp·/var/folders, 심볼릭 링�
   assert.equal(isTempPath(os.tmpdir()), true);
   assert.equal(isTempPath(path.join(os.tmpdir(), "x", "y")), true);
   assert.equal(isTempPath("/tmp/scratchpad/ci"), true);
-  assert.equal(isTempPath("/private/tmp/claude-501/scratchpad/ci"), true);
+  // macOS는 /tmp가 /private/tmp의 링크라 실제 경로로 와도 임시로 본다 (리눅스에는 /private가 없다)
+  if (process.platform === "darwin") assert.equal(isTempPath("/private/tmp/claude-501/scratchpad/ci"), true);
   assert.equal(isTempPath(path.join(os.homedir(), "work-dir", "app")), false);
   assert.equal(isTempPath("/tmpfoo/app"), false); // 접두만 같은 다른 폴더
 });

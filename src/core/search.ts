@@ -240,8 +240,8 @@ export function search(db: DB, query: string, options: SearchOptions = {}): Sear
             LIMIT ?`,
         )
         .all(expression, ...params, count) as Candidate[];
-    // 순위는 제목·본문·경로로만 매긴다. diff에서 바뀐 선언 이름(code 컬럼)을 순위에 섞으면 흔한 이름에 걸린 커밋이
-    // 파일·정답 커밋을 밀어내 오프라인 평가(npm run eval)에서 정확도가 떨어졌다 — Acc@1 0.28 → 0.16~0.20.
+    // 순위는 제목·본문·경로로만 매긴다. diff 이름(code 컬럼)을 순위에 섞으면 검색이 2~3배 느려지는데,
+    // 89문항 평가(npm run eval)에서 정확도 이득은 아직 유의하지 않다 (식별자 전부: Acc@3 +6문항, p=0.07).
     const rows = candidates(`{title body paths}: (${match})`, "4.0, 1.0, 1.5, 0", pool * RERANK_FACTOR);
     keyword.push(...rerankByCoverage(db, concepts, rows).slice(0, pool));
     // 그래도 모자라면 diff에만 남은 이름으로 채운다 — 지금 코드에도 메시지에도 없는 "지워진 함수" 같은 질문

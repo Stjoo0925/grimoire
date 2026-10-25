@@ -104,7 +104,7 @@ Alongside commit history, Grimoire indexes the **source files at HEAD** of each 
 
 After the commit metadata is indexed, a second pass reads each commit's diff (source files only) and records the functions, classes and types it added, changed or removed.
 Search results show them as `changed` ("webhook.ts: dedupeWebhookEvent"), so the AI can often answer "how did I solve this?" without opening the diff.
-The names are also searchable, but only to fill in when titles, bodies and paths give too few results (for example a function that no longer exists anywhere). Mixing them into the main ranking lowered accuracy in the offline eval.
+The names are also searchable, but only to fill in when titles, bodies and paths give too few results (for example a function that no longer exists anywhere). Mixing them into the main ranking made search 2–3× slower without a significant accuracy gain in the offline eval (see docs/improvement-plan.md §7).
 
 The server syncs registered repos in the background right after it starts, then fills in the diff pass. The repo you're working in is re-synced before a search when 15 seconds have passed, so a commit you just made is searchable. Set `GRIMOIRE_SYNC_ON_START=0` to turn off the startup sync.
 

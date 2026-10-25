@@ -83,7 +83,7 @@ export const TOOLS = [
         until: { type: "string", description: "YYYY-MM-DD" },
         kind: { type: "string", enum: ["file", "commit", "note"] },
         limit: { type: "number", description: "기본 8" },
-        detail: { type: "string", enum: ["index", "summary", "full"], description: "기본 summary(상위 커밋 본문·바뀐 함수). full=1위 커밋 diff 포함" },
+        detail: { type: "string", enum: ["index", "summary", "full"], description: "기본 index. summary=상위 커밋 본문·바뀐 함수, full=1위 커밋 diff까지" },
       },
       required: ["query"],
     },
@@ -209,7 +209,8 @@ export async function callTool(context: ToolContext, name: string, args: Args = 
         limit: num(args.limit) ?? SEARCH_LIMIT,
         preferRepoId: current?.id,
       });
-      const detail: Detail = args.detail === "index" || args.detail === "full" ? args.detail : "summary";
+      // 기본은 index — summary는 응답이 66% 커지는데 한 번에 답할 수 있는 비율은 유의하게 늘지 않았다 (docs/improvement-plan.md §7)
+      const detail: Detail = args.detail === "summary" || args.detail === "full" ? args.detail : "index";
       const slim = slimSearch(result, me, detail);
       // full: 1위 커밋의 diff를 소스 파일 위주로 붙인다 — show_commit을 따로 부르지 않게
       const top = detail === "full" ? result.hits.find((hit) => hit.kind === "commit") : undefined;

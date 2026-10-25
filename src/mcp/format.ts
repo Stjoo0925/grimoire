@@ -15,7 +15,7 @@ const SHA = 10;
 const FILES_PER_HIT = 4;
 const SNIPPET_CHARS = 140;
 /**
- * detail=summary에서 자세히 싣는 상위 커밋 수와 그 크기. 이력 질문("어떻게 풀었지?")에서 AI가 diff를 보러
+ * detail=summary(요청할 때만)에서 자세히 싣는 상위 커밋 수와 그 크기. 이력 질문("어떻게 풀었지?")에서 AI가 diff를 보러
  * show_commit을 한 번 더 부르던 것을, 본문 전체와 바뀐 선언으로 대신한다.
  */
 const SUMMARY_COMMITS = 3;
@@ -24,7 +24,7 @@ const SUMMARY_FILES = 8;
 const SUMMARY_TOUCHED_FILES = 3;
 const SUMMARY_NAMES = 6;
 
-/** 검색 응답의 자세함 — index: 목록만, summary(기본): 상위 커밋에 본문·바뀐 선언, full: 1위 커밋 diff까지 */
+/** 검색 응답의 자세함 — index(기본): 목록만, summary: 상위 커밋에 본문·바뀐 선언, full: 1위 커밋 diff까지 */
 export type Detail = "index" | "summary" | "full";
 const FILES_PER_COMMIT = 30;
 

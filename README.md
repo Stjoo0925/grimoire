@@ -77,7 +77,7 @@ The `add_repo` tool registers right from the conversation ("remember every repo 
 
 | Tool | What it does |
 |---|---|
-| `search_memory` | Searches current code files, commits and notes at once. Filters: `repo`, `author` (`me`), `since`, `until`, `kind` (`file`, `commit`, `note`), `limit` (default 8). `detail`: `summary` (default: the top 3 commits carry their full message and the functions they changed), `index` (list only), `full` (also the top commit's diff) |
+| `search_memory` | Searches current code files, commits and notes at once. Filters: `repo`, `author` (`me`), `since`, `until`, `kind` (`file`, `commit`, `note`), `limit` (default 8). `detail`: `index` (default, a compact list), `summary` (on request: the top 3 commits also carry their full message and the functions they changed), `full` (also the top commit's diff) |
 | `show_commit` | Message, changed files and diff of one commit (read straight from the local repo). The diff defaults to 120 lines; `paths` narrows it to specific files |
 | `get_repo_overview` | Tech stack (from manifests), quarterly activity, most-touched directories, top authors, recent notable commits |
 | `list_repos` | Indexed repos |
@@ -103,7 +103,7 @@ Alongside commit history, Grimoire indexes the **source files at HEAD** of each 
 ### What each commit changed
 
 After the commit metadata is indexed, a second pass reads each commit's diff (source files only) and records the functions, classes and types it added, changed or removed.
-Search results show them as `changed` ("webhook.ts: dedupeWebhookEvent"), so the AI can often answer "how did I solve this?" without opening the diff.
+With `detail: "summary"`, search results show them as `changed` ("webhook.ts: dedupeWebhookEvent"). The default stays the compact list: in the offline eval, summary made responses 66% larger without significantly raising how often one search was enough to answer (docs/improvement-plan.md §7).
 The names are also searchable, but only to fill in when titles, bodies and paths give too few results (for example a function that no longer exists anywhere). Mixing them into the main ranking made search 2–3× slower without a significant accuracy gain in the offline eval (see docs/improvement-plan.md §7).
 
 The server syncs registered repos in the background right after it starts, then fills in the diff pass. The repo you're working in is re-synced before a search when 15 seconds have passed, so a commit you just made is searchable. Set `GRIMOIRE_SYNC_ON_START=0` to turn off the startup sync.

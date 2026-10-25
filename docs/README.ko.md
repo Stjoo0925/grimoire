@@ -77,7 +77,7 @@ Grimoire가 **서버를 띄울 때 바로 등록하고, 다른 레포보다 먼�
 
 | 도구 | 하는 일 |
 |---|---|
-| `search_memory` | 현재 코드 파일·커밋·노트를 한 번에 검색. `repo`·`author`(`me`)·`since`·`until`·`kind`(`file`·`commit`·`note`)·`limit`(기본 8) 필터. `detail`: `summary`(기본, 상위 커밋 3개에 본문 전체와 바뀐 함수), `index`(목록만), `full`(1위 커밋 diff까지) |
+| `search_memory` | 현재 코드 파일·커밋·노트를 한 번에 검색. `repo`·`author`(`me`)·`since`·`until`·`kind`(`file`·`commit`·`note`)·`limit`(기본 8) 필터. `detail`: `index`(기본, 간결한 목록), `summary`(요청할 때, 상위 커밋 3개에 본문 전체와 바뀐 함수), `full`(1위 커밋 diff까지) |
 | `show_commit` | 커밋 하나의 메시지·변경 파일·diff (로컬 레포에서 직접 읽음). diff는 기본 120줄이고, `paths`로 특정 파일만 볼 수 있음 |
 | `get_repo_overview` | 기술 스택(매니페스트 기준)·분기별 활동·많이 건드린 디렉터리·주요 작성자·최근 주요 커밋 |
 | `list_repos` | 인덱싱된 레포 목록 |
@@ -103,7 +103,7 @@ CLI는 줄이지 않은 전체 결과를 보여 줍니다.
 ### 커밋이 바꾼 것
 
 커밋 메타를 색인한 뒤, 두 번째 단계에서 커밋마다 diff(소스 파일만)를 읽어 추가·수정·삭제된 함수·클래스·타입 이름을 남깁니다.
-검색 결과에 `changed`("webhook.ts: dedupeWebhookEvent")로 실리므로, AI가 diff를 열지 않고도 "예전에 어떻게 풀었지?"에 답할 때가 많습니다.
+`detail: "summary"`로 검색하면 결과에 `changed`("webhook.ts: dedupeWebhookEvent")로 실립니다. 기본값은 간결한 목록입니다. 오프라인 평가에서 summary는 응답을 66% 키웠지만, 검색 한 번으로 답할 수 있는 비율을 유의하게 올리지 못했습니다(docs/improvement-plan.md §7).
 이 이름들도 검색되지만, 제목·본문·경로만으로 결과가 모자랄 때 채우는 데만 씁니다(지금은 어디에도 없는 지워진 함수 등). 순위에 섞으면 검색이 2~3배 느려지는데, 오프라인 평가에서 정확도 이득은 아직 유의하지 않습니다(docs/improvement-plan.md §7).
 
 서버는 기동 직후 등록된 레포를 백그라운드로 동기화하고, 이어서 diff 단계를 채웁니다. 작업 중인 레포는 검색 전에 15초가 지났으면 다시 동기화하므로 방금 만든 커밋도 검색됩니다. 기동 시 동기화를 끄려면 `GRIMOIRE_SYNC_ON_START=0`을 주세요.

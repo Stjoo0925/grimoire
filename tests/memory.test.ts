@@ -231,7 +231,7 @@ test("discoverRepos: 하위 레포를 찾되 레포 안으로는 내려가지 �
   assert.deepEqual(found, ["a", path.join("nested", "b")]);
 });
 
-test("diff 단계: 바뀐 선언을 채우고, search_memory summary가 본문·바뀐 함수를 싣는다 (index는 그대로)", async () => {
+test("diff 단계: 바뀐 선언을 채우고, search_memory 기본(index)은 목록만, summary를 요청하면 본문·바뀐 함수를 싣는다", async () => {
   const db = memoryDb();
   const dir = sampleRepo();
   addCommit(dir, {
@@ -247,11 +247,13 @@ test("diff 단계: 바뀐 선언을 채우고, search_memory summary가 본문·
   assert.equal(await indexCommitCode(db, repo), 0);
 
   const context = { db, me: ["me@example.com"], cwd: dir };
-  const summary = (await callTool(context, "search_memory", { query: "웹훅 중복", kind: "commit" })) as { hits: Record<string, unknown>[] };
+  const summary = (await callTool(context, "search_memory", { query: "웹훅 중복", kind: "commit", detail: "summary" })) as { hits: Record<string, unknown>[] };
   assert.deepEqual(summary.hits[0].changed, ["webhook.ts: dedupeWebhookEvent"]);
   assert.match(String(summary.hits[0].body), /결제사가 타임아웃 뒤/);
-  const index = (await callTool(context, "search_memory", { query: "웹훅 중복", kind: "commit", detail: "index" })) as { hits: Record<string, unknown>[] };
+  // detail을 주지 않으면 index — 예전 목록 형태
+  const index = (await callTool(context, "search_memory", { query: "웹훅 중복", kind: "commit" })) as { hits: Record<string, unknown>[] };
   assert.equal(index.hits[0].changed, undefined);
+  assert.ok(String(index.hits[0].body ?? "").length <= 141);
   const full = (await callTool(context, "search_memory", { query: "웹훅 중복", kind: "commit", detail: "full" })) as { diff?: { patch: string } };
   assert.match(full.diff?.patch ?? "", /\+export function dedupeWebhookEvent/);
 });

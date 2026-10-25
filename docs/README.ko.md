@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Stjoo0925/grimoire/actions/workflows/ci.yml/badge.svg)](https://github.com/Stjoo0925/grimoire/actions/workflows/ci.yml) [![npm](https://img.shields.io/npm/v/@stjoo0925/grimoire)](https://www.npmjs.com/package/@stjoo0925/grimoire)
 
-[English](./README.md) | **한국어**
+[English](../README.md) | **한국어**
 
 > "내가 예전에 이걸 어떻게 풀었더라?" "그 코드 어디 있지?"에 **근거와 함께** 답하는 로컬 개발 메모리.
 
@@ -17,7 +17,7 @@ AI가 프로젝트를 일일이 열어 보거나 git log를 뒤지지 않고, �
 - 응답은 토큰을 아끼는 최소 형태. 대화 컨텍스트에 쌓이는 양이 곧 비용이라서
 - LLM·임베딩 모델·GPU 필요 없음: 검색은 키워드(SQLite FTS5)로 하고, 찾은 근거를 읽는 건 이미 쓰는 AI가 합니다
 
-설계와 이전 버전에서 바뀐 점은 [PLANNING.md](./PLANNING.md)를 보세요.
+설계와 이전 버전에서 바뀐 점은 [PLANNING.md](./PLANNING.md)를, 연구에 기반한 개선 로드맵은 [improvement-plan.md](./improvement-plan.md)를 보세요.
 
 ## 빠른 시작
 
@@ -77,7 +77,7 @@ Grimoire가 **서버를 띄울 때 바로 등록하고, 다른 레포보다 먼�
 
 | 도구 | 하는 일 |
 |---|---|
-| `search_memory` | 현재 코드 파일·커밋·노트를 한 번에 검색. `repo`·`author`(`me`)·`since`·`until`·`kind`(`file`·`commit`·`note`)·`limit`(기본 8) 필터 |
+| `search_memory` | 현재 코드 파일·커밋·노트를 한 번에 검색. `repo`·`author`(`me`)·`since`·`until`·`kind`(`file`·`commit`·`note`)·`limit`(기본 8) 필터. `detail`: `summary`(기본, 상위 커밋 3개에 본문 전체와 바뀐 함수), `index`(목록만), `full`(1위 커밋 diff까지) |
 | `show_commit` | 커밋 하나의 메시지·변경 파일·diff (로컬 레포에서 직접 읽음). diff는 기본 120줄이고, `paths`로 특정 파일만 볼 수 있음 |
 | `get_repo_overview` | 기술 스택(매니페스트 기준)·분기별 활동·많이 건드린 디렉터리·주요 작성자·최근 주요 커밋 |
 | `list_repos` | 인덱싱된 레포 목록 |
@@ -100,7 +100,17 @@ CLI는 줄이지 않은 전체 결과를 보여 줍니다.
 - 검색 결과(`kind: "file"`)에는 질의와 맞는 심볼 `이름:줄`, 파일 줄 수, 그 파일을 마지막으로 건드린 커밋이 붙습니다
 - `author`·`since`·`until` 필터를 주면 이력에 대한 질문으로 보고 코드 파일은 결과에서 뺍니다
 
-서버는 기동 직후 등록된 레포를 백그라운드로 동기화합니다. 끄려면 `GRIMOIRE_SYNC_ON_START=0`을 주세요.
+### 커밋이 바꾼 것
+
+커밋 메타를 색인한 뒤, 두 번째 단계에서 커밋마다 diff(소스 파일만)를 읽어 추가·수정·삭제된 함수·클래스·타입 이름을 남깁니다.
+검색 결과에 `changed`("webhook.ts: dedupeWebhookEvent")로 실리므로, AI가 diff를 열지 않고도 "예전에 어떻게 풀었지?"에 답할 때가 많습니다.
+이 이름들도 검색되지만, 제목·본문·경로만으로 결과가 모자랄 때 채우는 데만 씁니다(지금은 어디에도 없는 지워진 함수 등). 순위에 섞으면 오프라인 평가에서 정확도가 떨어졌습니다.
+
+서버는 기동 직후 등록된 레포를 백그라운드로 동기화하고, 이어서 diff 단계를 채웁니다. 작업 중인 레포는 검색 전에 15초가 지났으면 다시 동기화하므로 방금 만든 커밋도 검색됩니다. 기동 시 동기화를 끄려면 `GRIMOIRE_SYNC_ON_START=0`을 주세요.
+
+### 검색 품질 재기
+
+`npm run eval`은 레포를 임시 DB에 색인하고 모델 호출 없이 `search()`를 채점합니다. 커밋 제목으로 그 커밋이 건드린 파일을 찾는 과제와, `bench/eval.local.json`에 손으로 쓴 질문(`{ "root": "~/work-dir", "questions": [{ "id", "type": "history" | "location", "q", "expect": ["sha나 경로 일부"] }] }`)을 씁니다. Acc@k·MRR·검색 지연·색인 시간을 보여 주고, `--save --label x`면 `bench/results/`에 남깁니다.
 
 ## CLI
 
@@ -279,4 +289,4 @@ tests/              단위·통합 테스트 (임시 git 레포, 네트워크 �
 
 ## 라이선스
 
-[MIT](./LICENSE)
+[MIT](../LICENSE)

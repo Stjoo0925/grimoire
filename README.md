@@ -139,6 +139,27 @@ npm run e2e -- --json                          # 결과 JSON
 - DB·HOME은 항상 임시 폴더로 바꿔 실행합니다. 실제 `~/.grimoire`와 내 레포는 건드리지 않습니다.
 - 실패하면 종료 코드가 1입니다. 연결이 안 되면 거기서 멈추고, 서버 stderr를 함께 보여 줍니다.
 
+### 에이전트 하네스 (`e2e/agent.ts`)
+
+실제 Claude(`claude -p`)에게 **질문만** 주고, 알맞은 Grimoire 도구를 골라 쓰는지와 맞는 근거 커밋을 대는지 채점합니다.
+
+| 사례 | 확인하는 것 |
+|---|---|
+| `onboarding` | 빈 DB에서 스스로 `add_repo`로 등록한 뒤 검색해, 맞는 커밋 sha를 대는지 |
+| `recall` | 맞는 sha, 해결 방법(Redis), 작성자(동료 커밋인지)를 정확히 말하는지 |
+| `no-memory` | 기억에 없는 것을 물으면 커밋을 지어내지 않고 없다고 말하는지 |
+
+```bash
+npm run e2e:agent                     # 세 사례 (한 번에 약 $0.2)
+npm run e2e:agent -- --repeat 3       # 모델 응답 편차를 보려면
+npm run e2e:agent -- --case recall --model sonnet
+```
+
+- Claude Code가 설치·로그인돼 있어야 합니다. macOS는 로그인 정보를 Keychain에 두므로, Keychain에 닿지 못하는
+  샌드박스 셸에서 돌리면 "로그인돼 있지 않습니다"가 나옵니다. 일반 터미널에서 실행하세요.
+- 내장 도구를 모두 끄므로(`--tools ""`) 에이전트가 git으로 픽스처를 직접 읽지 못합니다. 답의 근거는 Grimoire를 거친 것뿐입니다.
+- DB는 임시 폴더를 쓰고, `--strict-mcp-config`로 사용자 MCP 설정은 무시합니다. 사례당 비용 상한은 $0.50입니다.
+
 ```
 src/
   cli.ts            CLI 진입점

@@ -15,9 +15,10 @@ import { parseArgs } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-import { addCommit, makeRepo, tempDir } from "../tests/helpers";
+import { addCommit, tempDir } from "../tests/helpers";
 
-const ME = "me@example.com";
+import { makeFixture, ME } from "./fixture";
+
 /** GUI 앱(Claude Desktop·Cursor)이 MCP 서버에 넘기는 수준의 PATH */
 const GUI_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
 const CONNECT_BUDGET_MS = 5_000;
@@ -40,57 +41,6 @@ interface StepResult {
 class Check extends Error {}
 function expect(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Check(message);
-}
-
-/* ── 픽스처 ─────────────────────────────────────────────── */
-
-interface Fixture {
-  root: string;
-  api: string;
-  web: string;
-}
-
-function makeFixture(): Fixture {
-  const api = makeRepo(
-    [
-      {
-        message: "feat: 프로젝트 시작",
-        files: { "package.json": JSON.stringify({ dependencies: { express: "^4" } }) },
-        date: "2023-01-10T10:00:00+09:00",
-      },
-      {
-        message: "feat(auth): JWT 리프레시 토큰 회전\n\n만료 직전에 refresh token을 새로 발급하고 이전 토큰을 폐기한다.",
-        files: { "src/auth/refresh.ts": "export function rotate() {\n  return 'rotated';\n}\n" },
-        email: ME,
-        date: "2023-05-02T10:00:00+09:00",
-      },
-      {
-        message: "fix: 재고 차감 동시성 문제를 Redis 분산 락으로 해결",
-        files: { "src/order/lock.ts": "export const lock = 'redlock';\n" },
-        email: "teammate@example.com",
-        date: "2024-02-03T10:00:00+09:00",
-      },
-    ],
-    "shop-api",
-  );
-  const web = makeRepo(
-    [
-      {
-        message: "feat: 장바구니 화면",
-        files: { "package.json": JSON.stringify({ dependencies: { react: "^18" } }), "src/Cart.tsx": "export {}\n" },
-        email: ME,
-        date: "2024-03-01T10:00:00+09:00",
-      },
-    ],
-    "shop-web",
-  );
-  // 두 레포를 한 폴더 아래로 모아 scan 대상으로 쓴다
-  const root = tempDir("grimoire-e2e-");
-  const apiLink = path.join(root, "shop-api");
-  const webLink = path.join(root, "shop-web");
-  fs.renameSync(api, apiLink);
-  fs.renameSync(web, webLink);
-  return { root, api: apiLink, web: webLink };
 }
 
 /* ── 서버 실행 ─────────────────────────────────────────── */

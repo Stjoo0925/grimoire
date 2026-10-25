@@ -123,6 +123,10 @@ const MIGRATIONS: string[] = [
     PRIMARY KEY (repo_id, path)
   );
   `,
+  // 3: 시맨틱 검색(로컬 임베딩) 제거 — 질의를 만드는 AI가 스스로 말을 바꿔 다시 찾으므로 키워드로 충분했다
+  `
+  DROP TABLE IF EXISTS embeddings;
+  `,
 ];
 
 export function openDb(file: string): DB {
@@ -148,7 +152,6 @@ function migrate(db: DB): void {
 
 /**
  * 문서 하나를 색인에 넣거나 갈아 끼운다. FTS 행 id는 docs.id와 같게 맞춘다.
- * 내용이 바뀌면 옛 임베딩은 더 이상 맞지 않으므로 지운다.
  */
 export function upsertDoc(
   db: DB,
@@ -173,7 +176,6 @@ export function upsertDoc(
     id = existing.id;
     db.prepare("UPDATE docs SET at = ? WHERE id = ?").run(doc.at, id);
     db.prepare("DELETE FROM docs_fts WHERE rowid = ?").run(id);
-    db.prepare("DELETE FROM embeddings WHERE doc_id = ?").run(id);
   } else {
     id = Number(
       db

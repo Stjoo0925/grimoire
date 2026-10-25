@@ -125,7 +125,7 @@ async function main(): Promise<number> {
       const shas = fixtureShas(fixture);
       const data = tempDir("grimoire-agent-data-");
       const workdir = tempDir("grimoire-agent-cwd-");
-      const env = { GRIMOIRE_HOME: data, GRIMOIRE_ME: ME, OLLAMA_HOST: "http://127.0.0.1:9", GRIMOIRE_SYNC_ON_START: "0", GRIMOIRE_UPDATE_CHECK: "0" };
+      const env = { GRIMOIRE_HOME: data, GRIMOIRE_ME: ME, GRIMOIRE_SYNC_ON_START: "0", GRIMOIRE_UPDATE_CHECK: "0" };
       if (item.preindex) {
         execFileSync(process.execPath, [cli, "scan", fixture.root], { env: { ...process.env, ...env }, stdio: "ignore" });
       }

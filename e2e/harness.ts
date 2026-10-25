@@ -85,8 +85,6 @@ async function connect(
       GRIMOIRE_ME: ME,
       // 하네스는 네트워크에 닿지 않는다 — 업데이트 확인은 단위 테스트에서 본다
       GRIMOIRE_UPDATE_CHECK: "0",
-      // 샌드박스에 Ollama가 있을 리 없지만, 혹시 있더라도 결과가 흔들리지 않게 닿지 않는 주소로
-      OLLAMA_HOST: "http://127.0.0.1:9",
       ...extraEnv,
     },
     stderr: "pipe",
@@ -275,8 +273,9 @@ async function runScenario(spec: ServerSpec): Promise<StepResult[]> {
 
   await step("프로젝트 폴더에서 뜨면 그 레포를 자동 등록하고 current로 우선", async () => {
     // Claude Code처럼 프로젝트(하위 폴더) 안에서, 빈 DB로 띄운다 — add_repo 없이 바로 검색돼야 한다
+    // 픽스처는 임시 폴더에 있어 기본값으로는 건너뛰므로 GRIMOIRE_AUTO_ADD=1로 강제한다(아래에서 기본값도 확인)
     const fresh = { home: sandbox.home, data: tempDir("grimoire-e2e-ws-") };
-    const projectSession = await connect(spec, fresh, {}, path.join(fixture.web, "src"));
+    const projectSession = await connect(spec, fresh, { GRIMOIRE_AUTO_ADD: "1" }, path.join(fixture.web, "src"));
     try {
       const found = await call(projectSession, "search_memory", { query: "장바구니" });
       expect(found.json.current === "shop-web", `current: ${found.json.current}`);
@@ -285,15 +284,40 @@ async function runScenario(spec: ServerSpec): Promise<StepResult[]> {
     } finally {
       await projectSession.close();
     }
-    // 끄면 등록하지 않는다
+    // 끄면, 그리고 기본값에서 임시 폴더면 등록하지 않는다
     const off = { home: sandbox.home, data: tempDir("grimoire-e2e-ws-off-") };
-    const offSession = await connect(spec, off, { GRIMOIRE_AUTO_ADD: "0" }, fixture.web);
     try {
-      const listed = await call(offSession, "list_repos");
-      expect(listed.json.repos.length === 0 && listed.json.current === undefined, `꺼도 등록됨: ${listed.text}`);
+      const variants: Record<string, string>[] = [{ GRIMOIRE_AUTO_ADD: "0" }, {}];
+      for (const extra of variants) {
+        const session = await connect(spec, off, extra, fixture.web);
+        try {
+          const listed = await call(session, "list_repos");
+          expect(listed.json.repos.length === 0 && listed.json.current === undefined, `등록되면 안 됨(${JSON.stringify(extra)}): ${listed.text}`);
+        } finally {
+          await session.close();
+        }
+      }
     } finally {
-      await offSession.close();
       for (const dir of [fresh.data, off.data]) fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await step("연결 확인처럼 곧 끝나는 실행은 아무것도 등록하지 않음", async () => {
+    // claude mcp list처럼: 띄우고 도구 목록만 보고 바로 끈다
+    const quick = { home: sandbox.home, data: tempDir("grimoire-e2e-quick-") };
+    try {
+      const session = await connect(spec, quick, { GRIMOIRE_AUTO_ADD: "1" }, fixture.api);
+      await session.client.listTools();
+      await session.close();
+      const checker = await connect(spec, quick, { GRIMOIRE_AUTO_ADD: "0" });
+      try {
+        const listed = await call(checker, "list_repos");
+        expect(listed.json.repos.length === 0, `연결 확인에서 등록됨: ${listed.text}`);
+      } finally {
+        await checker.close();
+      }
+    } finally {
+      fs.rmSync(quick.data, { recursive: true, force: true });
     }
   });
 

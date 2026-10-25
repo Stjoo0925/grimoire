@@ -1,5 +1,5 @@
 /**
- * 검색 — FTS5 키워드(bm25) + 선택적 로컬 임베딩, RRF 융합.
+ * 검색 — FTS5 키워드(bm25) + 개념 커버리지 재정렬 + 현재 레포 우선.
  *
  * 결과는 항상 **근거** 단위다: 커밋(레포·sha·날짜·작성자·변경 파일·링크) 또는 노트.
  * 해석은 호출한 쪽(AI 클라이언트)이 한다.
@@ -7,20 +7,20 @@
 import path from "node:path";
 
 import { splitIdentifier } from "./code";
-import { embedModel, type Env } from "./config";
 import type { DB } from "./db";
-import { cosine, embedTexts, fromBlob, hasEmbeddings, QUERY_PREFIX, type FetchLike } from "./embed";
 import { commitWebUrl } from "./git";
 import { canonicalTech } from "./tech/canonical";
 import { expandKorean, isFiller } from "./terms";
 
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 50;
-/** 융합 전에 각 순위에서 볼 후보 수 = limit × 이 값 */
+/** 재정렬 뒤 남겨 둘 후보 수 = limit × 이 값 */
 const POOL_FACTOR = 5;
-/** 이보다 안 닮은 문서는 시맨틱 후보로 올리지 않는다 */
-const SEMANTIC_MIN = 0.45;
-export const RRF_K = 60;
+/**
+ * 순위 → 점수 1/(K+순위). 현재 레포 가산(×CURRENT_REPO_BOOST)이 순위 몇 칸을 뛰어넘을지 정한다 —
+ * K가 크면 점수 차가 작아 현재 레포 결과가 앞으로 많이 당겨진다.
+ */
+const RANK_K = 60;
 /** 개념이 코드 파일 이름에 들어 있을 때 곱하는 가중치 */
 const FILE_NAME_BONUS = 1.6;
 /** 현재 작업 레포 결과에 곱하는 가중치 */
@@ -180,10 +180,6 @@ export interface SearchOptions extends SearchFilters {
    * 개발 중 질문은 대개 현재 프로젝트에 대한 것이다. 다른 레포를 지우지는 않는다(repoId 필터와 다름).
    */
   preferRepoId?: number;
-  /** false면 임베딩이 있어도 키워드만 */
-  semantic?: boolean;
-  env?: Env;
-  fetchImpl?: FetchLike;
 }
 
 export interface SearchHit {
@@ -201,7 +197,6 @@ export interface SearchHit {
   filesChanged: number | null;
   url: string | null;
   score: number;
-  matchedBy: ("keyword" | "semantic")[];
   /** kind='file'일 때: 질의와 맞는 심볼 "이름:줄" (없으면 앞쪽 심볼) */
   symbols?: string[];
   /** kind='file'일 때: 파일 줄 수 */
@@ -212,9 +207,6 @@ export interface SearchHit {
 
 export interface SearchResult {
   query: string;
-  mode: "hybrid" | "keyword";
-  /** 시맨틱이 안 된 이유 (모델 없음 등) */
-  semanticNote?: string;
   hits: SearchHit[];
 }
 
@@ -223,7 +215,7 @@ interface Candidate {
   snippet?: string;
 }
 
-export async function search(db: DB, query: string, options: SearchOptions = {}): Promise<SearchResult> {
+export function search(db: DB, query: string, options: SearchOptions = {}): SearchResult {
   const limit = Math.min(Math.max(1, Math.floor(options.limit ?? DEFAULT_LIMIT)), MAX_LIMIT);
   const pool = limit * POOL_FACTOR;
   const { where, params } = filterSql(options);
@@ -246,29 +238,15 @@ export async function search(db: DB, query: string, options: SearchOptions = {})
     keyword.push(...rerankByCoverage(db, concepts, rows).slice(0, pool));
   }
 
-  let semantic: Candidate[] = [];
-  let semanticNote: string | undefined;
-  const model = embedModel(options.env ?? process.env);
-  if (options.semantic !== false) {
-    if (!hasEmbeddings(db, model)) {
-      semanticNote = "임베딩이 없어 키워드 검색만 했습니다 (grimoire embed로 켤 수 있음).";
-    } else {
-      const embedded = await embedTexts([QUERY_PREFIX + query], options);
-      if (!embedded.ok) {
-        semanticNote = `로컬 임베딩 모델에 닿지 못해 키워드 검색만 했습니다 (${embedded.reason}).`;
-      } else {
-        semantic = semanticCandidates(db, embedded.vectors[0], model, where, params, pool);
-      }
-    }
-  }
-
-  const fused = preferRepo(db, fuse(keyword, semantic), options.preferRepoId);
+  const ranked = preferRepo(
+    db,
+    keyword.map((candidate, rank) => ({ ...candidate, score: 1 / (RANK_K + rank + 1) })),
+    options.preferRepoId,
+  );
   const terms = queryTerms(query);
-  const hits = fused.slice(0, limit).map((item) => toHit(db, item.docId, item.score, item.matchedBy, item.snippet, terms));
+  const hits = ranked.slice(0, limit).map((item) => toHit(db, item.docId, item.score, item.snippet, terms));
   return {
     query,
-    mode: semantic.length > 0 ? "hybrid" : "keyword",
-    semanticNote,
     hits: hits.filter((hit): hit is SearchHit => hit !== null),
   };
 }
@@ -304,32 +282,6 @@ function filterSql(filters: SearchFilters): { where: string; params: (string | n
   return { where: clauses.map((clause) => `AND ${clause}`).join(" "), params };
 }
 
-function semanticCandidates(
-  db: DB,
-  queryVector: Float32Array,
-  model: string,
-  where: string,
-  params: (string | number)[],
-  pool: number,
-): Candidate[] {
-  const rows = db
-    .prepare(
-      `SELECT d.id AS docId, e.vector AS vector
-         FROM embeddings e
-         JOIN docs d ON d.id = e.doc_id
-         LEFT JOIN commits c ON d.kind = 'commit' AND c.repo_id = d.repo_id AND c.sha = d.ref
-        WHERE e.model = ? ${where}`,
-    )
-    .all(model, ...params) as { docId: number; vector: Buffer }[];
-
-  return rows
-    .map((row) => ({ docId: row.docId, similarity: cosine(queryVector, fromBlob(row.vector)) }))
-    .filter((row) => row.similarity >= SEMANTIC_MIN)
-    .sort((a, b) => b.similarity - a.similarity)
-    .slice(0, pool)
-    .map((row) => ({ docId: row.docId }));
-}
-
 /** 현재 레포 결과의 점수를 키워 다시 줄 세운다 */
 function preferRepo<T extends { docId: number; score: number }>(db: DB, items: T[], repoId: number | undefined): T[] {
   if (repoId === undefined || items.length === 0) return items;
@@ -345,26 +297,6 @@ function preferRepo<T extends { docId: number; score: number }>(db: DB, items: T
   return items
     .map((item) => (inRepo.has(item.docId) ? { ...item, score: item.score * CURRENT_REPO_BOOST } : item))
     .sort((a, b) => b.score - a.score);
-}
-
-/** Reciprocal Rank Fusion — 순위만 쓰므로 bm25와 코사인의 척도 차이를 신경 쓰지 않는다. */
-export function fuse(
-  keyword: Candidate[],
-  semantic: Candidate[],
-): { docId: number; score: number; matchedBy: ("keyword" | "semantic")[]; snippet?: string }[] {
-  const merged = new Map<number, { docId: number; score: number; matchedBy: ("keyword" | "semantic")[]; snippet?: string }>();
-  const add = (list: Candidate[], source: "keyword" | "semantic") => {
-    list.forEach((candidate, rank) => {
-      const entry = merged.get(candidate.docId) ?? { docId: candidate.docId, score: 0, matchedBy: [] };
-      entry.score += 1 / (RRF_K + rank + 1);
-      entry.matchedBy.push(source);
-      entry.snippet ??= candidate.snippet;
-      merged.set(candidate.docId, entry);
-    });
-  };
-  add(keyword, "keyword");
-  add(semantic, "semantic");
-  return [...merged.values()].sort((a, b) => b.score - a.score);
 }
 
 /** 심볼 매칭에 쓰는 질의 낱말 (조사 제거·한영 확장 포함, 소문자) */
@@ -387,7 +319,6 @@ function toHit(
   db: DB,
   docId: number,
   score: number,
-  matchedBy: ("keyword" | "semantic")[],
   snippet: string | undefined,
   terms: string[] = [],
 ): SearchHit | null {
@@ -423,7 +354,6 @@ function toHit(
     date: doc.at,
     title: doc.title,
     score: Number(score.toFixed(5)),
-    matchedBy,
   };
 
   if (doc.kind === "file") {

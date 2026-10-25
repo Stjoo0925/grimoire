@@ -14,8 +14,6 @@ test("slimSearch: 링크는 레포별 접두 한 번, 결과는 sha 10자·날�
   const sha = "a".repeat(40);
   const result: SearchResult = {
     query: "q",
-    mode: "keyword",
-    semanticNote: "임베딩 없음",
     hits: [
       {
         kind: "commit",
@@ -30,7 +28,6 @@ test("slimSearch: 링크는 레포별 접두 한 번, 결과는 sha 10자·날�
         filesChanged: 7,
         url: `https://github.com/o/api/commit/${sha}`,
         score: 0.1,
-        matchedBy: ["keyword"],
       },
     ],
   };
@@ -49,6 +46,6 @@ test("slimSearch: 링크는 레포별 접두 한 번, 결과는 sha 10자·날�
     ],
     links: { api: "https://github.com/o/api/commit/" },
   });
-  // 로컬 경로·점수·이메일·semanticNote는 내보내지 않는다
-  assert.doesNotMatch(JSON.stringify(slim), /Users|score|matchedBy|me@x\.com|임베딩/);
+  // 로컬 경로·점수·이메일은 내보내지 않는다
+  assert.doesNotMatch(JSON.stringify(slim), /Users|score|me@x\.com/);
 });

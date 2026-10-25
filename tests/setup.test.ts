@@ -107,7 +107,6 @@ test("doctor: README식 'node' 설정과 빈 DB를 짚어 낸다", async () => {
 
   assert.ok(checks.some((c) => c.level === "fail" && c.title.includes("실행 파일을 찾을 수 없습니다")), text);
   assert.ok(checks.some((c) => c.level === "warn" && c.title.includes("등록된 레포가 없습니다")), text);
-  assert.ok(checks.some((c) => c.level === "warn" && c.title.includes("Ollama")), text);
   assert.ok(checks.some((c) => c.level === "ok" && c.title.startsWith("SQLite")), text);
   assert.match(text, /문제 1개/);
 

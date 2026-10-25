@@ -72,24 +72,24 @@ test("현재 코드 색인: 파일·심볼:줄로 핀포인트, 바뀐 파일만
   const first = await syncRepo(db, repo);
   assert.equal(first.files, 2); // README.md는 소스가 아님
 
-  const conflict = await search(db, "두 사람 선택이 충돌할 때", { semantic: false, kind: "file" });
+  const conflict = await search(db, "두 사람 선택이 충돌할 때", { kind: "file" });
   assert.equal(conflict.hits[0]?.ref, "src/lib/conflict-resolver.ts");
   assert.ok(conflict.hits[0]?.symbols?.includes("resolveConflict:2"), String(conflict.hits[0]?.symbols));
   assert.equal(conflict.hits[0]?.lastCommit?.title, "feat: 선택 충돌 정리");
 
-  const limit = await search(db, "요청 횟수 제한", { semantic: false, kind: "file" });
+  const limit = await search(db, "요청 횟수 제한", { kind: "file" });
   assert.equal(limit.hits[0]?.ref, "src/lib/rate-limit.ts");
 
   // 바뀐 파일만 다시 읽는다
   assert.equal((await syncRepo(db, repo)).files, 0);
   addCommit(dir, { message: "refactor: 리졸버 정리", files: { "src/lib/conflict-resolver.ts": "export function mergeChoices() {}\n" } });
   assert.equal((await syncRepo(db, repo)).files, 1);
-  const renamed = await search(db, "merge choices", { semantic: false, kind: "file" });
+  const renamed = await search(db, "merge choices", { kind: "file" });
   assert.deepEqual(renamed.hits[0]?.symbols, ["mergeChoices:1"]);
 
   // 지운 파일은 색인에서 빠진다
   git(dir, ["rm", "-q", "src/lib/rate-limit.ts"]);
   git(dir, ["commit", "-q", "-m", "chore: 제거"], { GIT_AUTHOR_NAME: "me", GIT_AUTHOR_EMAIL: "me@example.com", GIT_COMMITTER_NAME: "me", GIT_COMMITTER_EMAIL: "me@example.com" });
   await syncRepo(db, repo);
-  assert.equal((await search(db, "rate limit", { semantic: false, kind: "file" })).hits.length, 0);
+  assert.equal((await search(db, "rate limit", { kind: "file" })).hits.length, 0);
 });

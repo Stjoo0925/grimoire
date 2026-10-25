@@ -4,7 +4,6 @@ import path from "node:path";
 import { test } from "node:test";
 
 import { openDb } from "../src/core/db";
-import { embedPending, type FetchLike } from "../src/core/embed";
 import { addRepo, discoverRepos, listRepos, removeRepo, syncRepo } from "../src/core/indexer";
 import { addNote } from "../src/core/notes";
 import { commitDetail, repoOverview } from "../src/core/overview";
@@ -82,8 +81,7 @@ test("search: 키워드로 근거(sha·파일·링크)를 찾고 필터가 먹�
   const repo = await addRepo(db, sampleRepo());
   await syncRepo(db, repo);
 
-  const result = await search(db, "refresh 토큰을", { semantic: false });
-  assert.equal(result.mode, "keyword");
+  const result = await search(db, "refresh 토큰을");
   const top = result.hits[0];
   assert.equal(top.title, "feat(auth): JWT 리프레시 토큰 회전");
   assert.deepEqual(top.files, ["src/auth/refresh.ts"]);
@@ -91,19 +89,19 @@ test("search: 키워드로 근거(sha·파일·링크)를 찾고 필터가 먹�
   assert.equal(top.author, "me <me@example.com>");
 
   // 파일 경로로도 걸린다 (커밋 이력 쪽)
-  assert.equal((await search(db, "lock.ts", { semantic: false, kind: "commit" })).hits[0]?.title.startsWith("fix:"), true);
+  assert.equal((await search(db, "lock.ts", { kind: "commit" })).hits[0]?.title.startsWith("fix:"), true);
 
   // 작성자 필터
-  const mine = await search(db, "동시성", { authors: ["me@example.com"], semantic: false });
+  const mine = await search(db, "동시성", { authors: ["me@example.com"] });
   assert.equal(mine.hits.length, 0);
-  const theirs = await search(db, "동시성", { authors: ["teammate@example.com"], semantic: false });
+  const theirs = await search(db, "동시성", { authors: ["teammate@example.com"] });
   assert.equal(theirs.hits.length, 1);
 
   // 기간 필터
-  assert.equal((await search(db, "동시성", { since: "2025-01-01", semantic: false })).hits.length, 0);
+  assert.equal((await search(db, "동시성", { since: "2025-01-01" })).hits.length, 0);
 
   // FTS 연산자처럼 보이는 입력도 오류 없이 처리
-  assert.doesNotThrow(() => search(db, 'NEAR( "x" AND -', { semantic: false }));
+  assert.doesNotThrow(() => search(db, 'NEAR( "x" AND -', {}));
 });
 
 test("notes: 노트도 검색되고 레포 삭제 시 색인이 정리된다", async () => {
@@ -112,15 +110,15 @@ test("notes: 노트도 검색되고 레포 삭제 시 색인이 정리된다", a
   await syncRepo(db, repo);
   addNote(db, { text: "결정: 세션 대신 JWT\n모바일 클라이언트 때문", repoId: repo.id, tags: ["Decision"], source: "cli" });
 
-  const notes = await search(db, "모바일", { kind: "note", semantic: false });
+  const notes = await search(db, "모바일", { kind: "note" });
   assert.equal(notes.hits.length, 1);
   assert.equal(notes.hits[0].title, "결정: 세션 대신 JWT");
   // 노트는 작성자 필터(나)와 무관하게 통과
-  assert.equal((await search(db, "모바일", { authors: ["nobody@x"], semantic: false })).hits.length, 1);
+  assert.equal((await search(db, "모바일", { authors: ["nobody@x"] })).hits.length, 1);
 
   removeRepo(db, repo);
   assert.equal(listRepos(db).length, 0);
-  assert.equal((await search(db, "토큰", { semantic: false })).hits.length, 0);
+  assert.equal((await search(db, "토큰")).hits.length, 0);
   const fts = db.prepare("SELECT COUNT(*) AS n FROM docs_fts").get() as { n: number };
   // 레포에 묶인 노트는 repo_id가 NULL로 남고(ON DELETE SET NULL) 색인 문서는 지워진다
   assert.equal(fts.n, 0);
@@ -146,39 +144,6 @@ test("overview / commitDetail: 개요와 로컬 diff", async () => {
     assert.equal(detail.body, "만료 직전에 refresh token을 새로 발급하고 이전 토큰을 폐기한다.");
   }
   assert.ok("error" in (await commitDetail(db, "zzzz")));
-});
-
-test("embed + hybrid: 임베딩이 있으면 키워드에 없는 표현도 걸린다", async () => {
-  const db = memoryDb();
-  const repo = await addRepo(db, sampleRepo());
-  await syncRepo(db, repo);
-
-  // 가짜 임베딩: "락/동시성/concurrency" 계열이면 축 0, 아니면 축 1
-  const vectorFor = (text: string) =>
-    /락|동시성|concurrency|race/i.test(text) ? [1, 0, 0] : [0, 1, 0];
-  const fakeFetch: FetchLike = async (_url, init) => {
-    const { input } = JSON.parse(init.body) as { input: string[] };
-    return { ok: true, status: 200, json: async () => ({ embeddings: input.map(vectorFor) }) };
-  };
-
-  const embedded = await embedPending(db, { fetchImpl: fakeFetch });
-  assert.equal(embedded.ok, true);
-  assert.equal(embedded.embedded, 5); // 의미 있는 커밋 3 + 코드 파일 2 (chore 커밋은 제외)
-  assert.equal((await embedPending(db, { fetchImpl: fakeFetch })).embedded, 0); // 이미 있으면 건너뜀
-
-  const result = await search(db, "race condition", { fetchImpl: fakeFetch });
-  assert.equal(result.mode, "hybrid");
-  assert.equal(result.hits[0].title, "fix: 재고 차감 동시성 문제를 Redis 분산 락으로 해결");
-  assert.deepEqual(result.hits[0].matchedBy, ["semantic"]);
-
-  // 모델에 닿지 못하면 키워드로 조용히 폴백
-  const down: FetchLike = async () => {
-    throw new Error("ECONNREFUSED");
-  };
-  const fallback = await search(db, "refresh", { fetchImpl: down });
-  assert.equal(fallback.mode, "keyword");
-  assert.match(fallback.semanticNote ?? "", /ECONNREFUSED/);
-  assert.equal(fallback.hits.length > 0, true);
 });
 
 test("MCP 도구: 인자 검증과 기록", async () => {

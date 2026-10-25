@@ -15,7 +15,7 @@ AI가 프로젝트를 일일이 열어 보거나 git log를 뒤지지 않고, �
 - **증분 동기화**: 새 커밋과 바뀐 파일만 읽음. MCP 서버가 뜰 때 백그라운드로 자동 동기화
 - 한국어 질문도 영어 식별자에 닿도록 흔한 개발 용어를 영어로 확장("충돌" → `conflict`, "횟수 제한" → `rate limit`)
 - 응답은 토큰을 아끼는 최소 형태. 대화 컨텍스트에 쌓이는 양이 곧 비용이라서
-- 외부 API 호출 없음. 시맨틱 검색은 선택이며 로컬 Ollama만 사용
+- LLM·임베딩 모델·GPU 필요 없음: 검색은 키워드(SQLite FTS5)로 하고, 찾은 근거를 읽는 건 이미 쓰는 AI가 합니다
 
 설계와 이전 버전에서 바뀐 점은 [PLANNING.md](./PLANNING.md)를 보세요.
 
@@ -46,7 +46,7 @@ grimoire doctor                       # 연결 상태 점검
 - 설정에는 **지금 실행 중인 node의 절대경로**가 들어갑니다. Claude Desktop·Cursor 같은 GUI 앱은 셸의 PATH를
   모르기 때문에 `"command": "node"`로 적으면 `spawn node ENOENT`로 연결이 안 됩니다. 또 SQLite 모듈은
   빌드할 때 쓴 node로만 열립니다. 그래서 node 버전을 바꿨다면 `install`을 다시 하세요.
-- `GRIMOIRE_HOME`·`GRIMOIRE_ME`·`OLLAMA_HOST`·`OLLAMA_EMBED_MODEL`·`GRIMOIRE_UPDATE_CHECK`를 설정해 둔 상태라면 그 값도 같이 적혀,
+- `GRIMOIRE_HOME`·`GRIMOIRE_ME`·`GRIMOIRE_AUTO_ADD`·`GRIMOIRE_UPDATE_CHECK`를 설정해 둔 상태라면 그 값도 같이 적혀,
   CLI와 MCP가 같은 DB를 보게 됩니다.
 - 다른 서버 항목은 그대로 두고 `grimoire` 항목만 넣습니다. 기존 파일은 `.bak`으로 백업하고, JSON이 깨져 있으면
   건드리지 않고 멈춥니다. 무엇을 쓸지 먼저 보려면 `--dry-run`을 붙이세요.
@@ -54,7 +54,7 @@ grimoire doctor                       # 연결 상태 점검
 
 ### 연결이 안 될 때 — `grimoire doctor`
 
-Grimoire 버전(새 릴리스가 있는지), node 버전과 SQLite 모듈, git, DB와 등록된 레포, 내 이메일, Ollama, 각 클라이언트에 적힌 설정(node 경로가
+Grimoire 버전(새 릴리스가 있는지), node 버전과 SQLite 모듈, git, DB와 등록된 레포, 내 이메일, 각 클라이언트에 적힌 설정(node 경로가
 실제로 있는지, 지금 node와 같은지, 같은 DB를 보는지)을 점검하고 고치는 명령을 알려 줍니다.
 
 ### 작업 중인 프로젝트는 자동 등록
@@ -131,19 +131,12 @@ grimoire update                                # 최신 릴리스로 올리기 (
 export GRIMOIRE_ME="me@gmail.com,me@company.com"
 ```
 
-## 시맨틱 검색 (선택)
+## 시맨틱 검색이 없는 이유
 
-키워드에 없는 표현("race condition" → "동시성 락" 커밋)까지 찾으려면 로컬 임베딩을 켭니다.
-
-```bash
-ollama pull nomic-embed-text
-grimoire embed          # 의미 있는 커밋과 노트를 임베딩 (중간에 끊겨도 이어서 함)
-```
-
-임베딩이 없어도 한국어 질의는 흔한 개발 용어 사전(`src/core/terms.ts`)으로 영어 낱말이 더해져 검색됩니다.
-임베딩을 켜면 검색은 키워드(FTS5 bm25)와 코사인 순위를 RRF로 융합합니다. 모델에 닿지 못하면 키워드로
-조용히 폴백합니다. 새 커밋이 들어오면 `grimoire embed`를 다시 돌리세요.
-`OLLAMA_HOST`·`OLLAMA_EMBED_MODEL`로 주소와 모델을 바꿀 수 있습니다.
+예전에는 로컬 모델(Ollama)로 커밋을 임베딩해, 표현이 달라도 걸리게 하는 기능이 있었습니다. 지금은 뺐습니다.
+검색어를 만드는 쪽이 AI이고, AI는 한 번에 못 찾으면 스스로 말을 바꿔 다시 찾습니다. 한국어·영어 엇갈림은
+용어 사전(`src/core/terms.ts`)이 메우고, 핀포인트 벤치도 키워드 검색만으로 6/6이었습니다. 덕분에 따로 설치할 것
+(Ollama와 모델)이 없어지고, DB가 약 3배 커지는 일과 검색이 느려지는 일도 없어졌습니다.
 
 ## 업데이트
 
@@ -275,7 +268,7 @@ npm run bench -- --questions bench/questions.local.json --modes grimoire --only 
 src/
   cli.ts            CLI 진입점
   mcp/              MCP 서버(stdio)·도구 정의·응답 다이어트(format)
-  core/             단일 코어 — db · git · indexer · code · search · terms · embed · overview · notes · identity · update
+  core/             단일 코어 — db · git · indexer · code · search · terms · overview · notes · identity · update
     tech/           매니페스트 파서와 기술 이름 정규화 사전
   setup/            install · doctor · update 명령
 e2e/                종단 하네스(harness) · 에이전트 하네스(agent) · 벤치(bench) · 공용 픽스처와 claude 실행기

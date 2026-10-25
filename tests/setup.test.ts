@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
 
+import { openDb } from "../src/core/db";
 import { callTool, emptyHint } from "../src/mcp/tools";
 import { doctor, formatChecks } from "../src/setup/doctor";
 import { configPath, install, InstallError, mergeServer, serverSpec } from "../src/setup/install";
@@ -143,4 +144,23 @@ test("빈 DB 안내와 add_repo: 안내를 보고 대화 중에 등록할 수 �
 
   await assert.rejects(callTool(context, "add_repo", { path: "/definitely/not/here" }), /경로가 없습니다/);
   await assert.rejects(callTool(context, "add_repo", { path: tempDir() }), /git 레포가 아닙니다/);
+
+  // 루트·홈 전체 스캔은 MCP로는 하지 않는다 (터미널의 grimoire scan으로 안내)
+  await assert.rejects(callTool(context, "add_repo", { path: "/", scan: true }), /전체를 스캔하지는 않습니다/);
+  await assert.rejects(callTool(context, "add_repo", { path: "~", scan: true }), /grimoire scan/);
+});
+
+test("DB 파일은 나만 읽을 수 있게 만든다 (이전 버전의 0644도 고친다)", { skip: process.platform === "win32" }, () => {
+  const home = path.join(tempDir(), "new-home");
+  const file = path.join(home, "grimoire.db");
+  openDb(file).close();
+  assert.equal(fs.statSync(home).mode & 0o777, 0o700);
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+
+  fs.chmodSync(file, 0o644);
+  const db = openDb(file);
+  db.exec("CREATE TABLE IF NOT EXISTS t (x)");
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(`${file}-wal`).mode & 0o777, 0o600, "WAL도 DB 파일 권한을 따른다");
+  db.close();
 });

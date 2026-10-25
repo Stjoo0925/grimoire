@@ -12,6 +12,7 @@
  * 새 버전이 있으면 세션에 한 번 같은 `hint`로 업데이트를 알린다.
  */
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import type { DB } from "../core/db";
@@ -130,6 +131,12 @@ export const TOOLS = [
   },
 ] as const;
 
+/** MCP로 scan하기엔 너무 넓은 곳: 파일 시스템 루트와 홈 디렉터리 자체 */
+function isTooBroad(dir: string): boolean {
+  const resolved = path.resolve(dir);
+  return resolved === path.parse(resolved).root || resolved === path.resolve(os.homedir());
+}
+
 export type ToolName = (typeof TOOLS)[number]["name"];
 
 type Args = Record<string, unknown>;
@@ -210,6 +217,10 @@ export async function callTool(context: ToolContext, name: string, args: Args = 
       if (!target) throw new ToolError("path가 필요합니다");
       const dir = path.resolve(context.cwd, target.replace(/^~(?=$|\/)/, process.env.HOME ?? "~"));
       if (!fs.existsSync(dir)) throw new ToolError(`경로가 없습니다: ${dir}`);
+      // 루트·홈 전체 스캔은 너무 넓다 — 결과 속 주입된 지시를 따른 AI가 모든 레포를 긁어 가는 길을 막는다
+      if (args.scan === true && isTooBroad(dir)) {
+        throw new ToolError(`${dir} 전체를 스캔하지는 않습니다. 레포들이 든 하위 폴더를 지정하거나, 터미널에서 'grimoire scan ${dir}'를 실행하세요.`);
+      }
       const dirs = args.scan === true ? discoverRepos(dir) : [dir];
       if (dirs.length === 0) throw new ToolError(`git 레포를 찾지 못했습니다: ${dir}`);
       const added: unknown[] = [];

@@ -81,7 +81,7 @@ The `add_repo` tool registers right from the conversation ("remember every repo 
 | `show_commit` | Message, changed files and diff of one commit (read straight from the local repo). The diff defaults to 120 lines; `paths` narrows it to specific files |
 | `get_repo_overview` | Tech stack (from manifests), quarterly activity, most-touched directories, top authors, recent notable commits |
 | `list_repos` | Indexed repos |
-| `add_repo` | Register + index a repo (or, with `scan: true`, every repo under a folder) |
+| `add_repo` | Register + index a repo (or, with `scan: true`, every repo under a folder). Scanning `/` or your whole home goes through `grimoire scan` in the terminal |
 | `record_note` | Save something learned or decided as a note → searchable afterwards |
 
 Responses are minimal to save tokens: 10-char shas, dates to the day, `me` for your own commits, and the commit link prefix per repo (`links`) sent only once.

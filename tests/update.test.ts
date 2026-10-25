@@ -56,6 +56,27 @@ test("GRIMOIRE_UPDATE_CHECK=0이면 묻지도 알리지도 않는다", async () 
   assert.equal(pendingUpdate(off, "0.2.0"), null);
 });
 
+test("버전 형식이 틀린 응답·캐시는 버린다 — npm·git 인자로 옵션이나 셸 명령이 들어가지 않게", async () => {
+  const home = tempDir();
+  const env = envAt(home);
+  await refreshUpdateCache({ env, fetchImpl: fakeRelease("v9.0.0").impl });
+  for (const tag of ["--upload-pack=touch /tmp/x", "v9.1.0 & calc", "v9.1.0;rm -rf ~", "latest"]) {
+    await refreshUpdateCache({ env, fetchImpl: fakeRelease(tag).impl, force: true });
+    assert.equal(readUpdateCache(env)?.latest, "9.0.0", tag);
+  }
+  assert.equal(readUpdateCache(env)?.url, "https://github.com/Stjoo0925/grimoire/releases", "다른 곳 링크는 기본 링크로");
+
+  // 누가 캐시 파일을 고쳐 놓아도 알림·업데이트에 쓰이지 않는다
+  const file = path.join(home, "update.json");
+  fs.writeFileSync(file, JSON.stringify({ checkedAt: new Date().toISOString(), latest: "9.9.9&calc", tag: "v9.9.9&calc" }));
+  assert.equal(readUpdateCache(env)?.latest, undefined);
+  assert.equal(pendingUpdate(env, "0.2.0"), null);
+  fs.writeFileSync(file, JSON.stringify({ checkedAt: new Date().toISOString(), latest: "9.9.9", tag: "--exec=x" }));
+  assert.equal(pendingUpdate(env, "0.2.0"), null, "버전과 맞지 않는 태그");
+  fs.writeFileSync(file, JSON.stringify({ checkedAt: new Date().toISOString(), latest: "9.9.9", tag: "v9.9.9" }));
+  assert.equal(pendingUpdate(env, "0.2.0")?.tag, "v9.9.9");
+});
+
 test("MCP: 업데이트 안내가 레포 안내와 함께 hint로 실린다", async () => {
   let pending: string | undefined = "Grimoire 9.0.0이 나왔습니다";
   const context = {

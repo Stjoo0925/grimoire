@@ -1,13 +1,15 @@
 # 자동 버저닝과 배포 — main push마다 돈다.
 #
 #   1. publish     package.json 버전이 아직 다 나가지 않았으면(= 릴리스 PR이 방금 머지됨, 또는 지난 실행이 중간에 실패)
-#                  테스트 → npm publish → 태그 → GitHub 릴리스 순서로 내보낸다.
+#                  테스트 → 패키지 파일(.tgz) 한 번 만들기 → npm publish → 태그 → GitHub 릴리스(노트·.tgz·.sha256 첨부)
+#                  → GitHub Packages 순서로 내보낸다. 세 곳에 올라가는 패키지는 같은 파일이다.
 #   2. release-pr  release-please가 지난 릴리스 이후의 Conventional Commits를 모아
 #                  "chore: release vX.Y.Z" PR(버전·CHANGELOG)을 열어 두고 계속 갱신한다.
 #                  0.x 동안은 feat → minor, fix → patch, 깨지는 변경(!)도 minor.
 #
 # 다시 실행해도 안전해야 한다(재시도 가능):
-#  - 태그·npm·GitHub 릴리스가 각각 있는지 따로 보고, 없는 것만 만든다. 셋 다 있으면 아무것도 안 한다.
+#  - 태그·npm·GitHub 릴리스·릴리스 첨부·GitHub Packages가 각각 있는지 따로 보고, 없는 것만 만든다.
+#    다 있으면 아무것도 안 한다. npm에 이미 있는 버전이면 패키지 파일은 npm에서 받아 쓴다(같은 파일 보장).
 #  - 기준 커밋은 태그가 있으면 **그 태그의 커밋**, 없으면 이번 push의 커밋이다 — npm 내용이 태그와 같아야 하므로
 #    (재실행이 나중 커밋에서 돌아도 그 버전의 코드로 배포한다).
 #  - npm을 태그보다 먼저 낸다. npm이 실패하면 아무것도 남지 않아 그냥 다시 돌리면 된다.
@@ -41,9 +43,10 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # 태그·릴리스
+      contents: write # 태그·릴리스·릴리스 첨부
       pull-requests: write # 릴리스 PR 라벨 정리
       id-token: write # npm Trusted Publishing
+      packages: write # GitHub Packages
     env:
       GRIMOIRE_UPDATE_CHECK: "0"
       GH_TOKEN: ${{ github.token }}
@@ -53,7 +56,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: 무엇이 남았나 (태그·npm·GitHub 릴리스)
+      - name: 무엇이 남았나 (태그·npm·GitHub 릴리스·첨부·GitHub Packages)
         id: state
         run: |
           version="$(node -p "require('./package.json').version")"
@@ -73,19 +76,36 @@ jobs:
           fi
           if npm view "$name@$version" version >/dev/null 2>&1; then need_npm=false; else need_npm=true; fi
           if gh release view "$tag" >/dev/null 2>&1; then need_release=false; else need_release=true; fi
+          # npm pack이 만드는 파일 이름: @scope/name → scope-name-버전.tgz
+          tarball="$(node -p "require('./package.json').name.replace(/^@/, '').replace('/', '-')")-$version.tgz"
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+          if [ "$need_release" = false ] && gh release view "$tag" --json assets -q '.assets[].name' | grep -qx "$tarball"; then
+            need_assets=false
+          else
+            need_assets=true
+          fi
+          # GitHub Packages: 사용자 패키지 이름은 scope를 뺀 이름. 패키지가 아직 없으면 404 → 필요
+          short="${name#*/}"
+          if gh api "/users/${GITHUB_REPOSITORY_OWNER}/packages/npm/${short}/versions" -q '.[].name' 2>/dev/null | grep -qx "$version"; then
+            need_gpr=false
+          else
+            need_gpr=true
+          fi
 
           {
             echo "base=$base"
             echo "need_tag=$need_tag"
             echo "need_npm=$need_npm"
             echo "need_release=$need_release"
+            echo "need_assets=$need_assets"
+            echo "need_gpr=$need_gpr"
           } >> "$GITHUB_OUTPUT"
-          if [ "$need_tag$need_npm$need_release" = "falsefalsefalse" ]; then
+          if [ "$need_tag$need_npm$need_release$need_assets$need_gpr" = "falsefalsefalsefalsefalse" ]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "$tag 은 태그·npm·릴리스가 모두 있습니다 — 배포할 것이 없습니다"
+            echo "$tag 은 태그·npm·릴리스·첨부·GitHub Packages가 모두 있습니다 — 배포할 것이 없습니다"
           else
             echo "run=true" >> "$GITHUB_OUTPUT"
-            echo "$tag 기준 커밋 $base — 태그 필요: $need_tag, npm 필요: $need_npm, 릴리스 필요: $need_release"
+            echo "$tag 기준 커밋 $base — 태그 $need_tag · npm $need_npm · 릴리스 $need_release · 첨부 $need_assets · GitHub Packages $need_gpr"
           fi
 
       - name: 기준 커밋으로
@@ -108,9 +128,33 @@ jobs:
       - if: steps.state.outputs.run == 'true'
         run: npm run e2e
 
-      - name: npm 배포 (prepublishOnly가 dist를 새로 빌드하고 테스트를 돌린다)
+      # 패키지 파일은 한 번만 만든다 — npm·릴리스 첨부·GitHub Packages에 같은 파일이 올라가게.
+      # 새 버전이면 npm pack(prepack이 dist를 새로 빌드하고 테스트를 돌린다), 이미 npm에 있으면 그 파일을 받는다.
+      - name: 패키지 파일 (.tgz · .sha256)
+        if: steps.state.outputs.run == 'true'
+        id: pack
+        env:
+          NEED_NPM: ${{ steps.state.outputs.need_npm }}
+          VERSION: ${{ steps.state.outputs.version }}
+          TARBALL: ${{ steps.state.outputs.tarball }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/pkg"
+          if [ "$NEED_NPM" = true ]; then
+            npm pack --pack-destination "$RUNNER_TEMP/pkg"
+          else
+            npm pack "$(node -p "require('./package.json').name")@$VERSION" --pack-destination "$RUNNER_TEMP/pkg"
+          fi
+          cd "$RUNNER_TEMP/pkg"
+          test -f "$TARBALL"
+          sha256sum "$TARBALL" > "$TARBALL.sha256"
+          cat "$TARBALL.sha256"
+          echo "file=$RUNNER_TEMP/pkg/$TARBALL" >> "$GITHUB_OUTPUT"
+
+      - name: npm 배포
         if: steps.state.outputs.run == 'true' && steps.state.outputs.need_npm == 'true'
-        run: npm publish --provenance --access public
+        env:
+          FILE: ${{ steps.pack.outputs.file }}
+        run: npm publish "$FILE" --provenance --access public
 
       - name: 태그
         if: steps.state.outputs.run == 'true' && steps.state.outputs.need_tag == 'true'
@@ -124,9 +168,28 @@ jobs:
         env:
           TAG: ${{ steps.state.outputs.tag }}
           VERSION: ${{ steps.state.outputs.version }}
+          FILE: ${{ steps.pack.outputs.file }}
         run: |
           node .github/scripts/release-notes.mjs "$VERSION" > "$RUNNER_TEMP/notes.md"
-          gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
+          gh release create "$TAG" "$FILE" "$FILE.sha256" --verify-tag --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
+
+      - name: 릴리스 첨부 보충 (릴리스는 있는데 패키지 파일이 없을 때)
+        if: steps.state.outputs.run == 'true' && steps.state.outputs.need_release == 'false' && steps.state.outputs.need_assets == 'true'
+        env:
+          TAG: ${{ steps.state.outputs.tag }}
+          FILE: ${{ steps.pack.outputs.file }}
+        run: gh release upload "$TAG" "$FILE" "$FILE.sha256" --clobber
+
+      # 같은 파일을 GitHub Packages(npm.pkg.github.com)에도 올린다. 토큰은 이 단계 전용 npmrc에만 둔다.
+      - name: GitHub Packages
+        if: steps.state.outputs.run == 'true' && steps.state.outputs.need_gpr == 'true'
+        env:
+          FILE: ${{ steps.pack.outputs.file }}
+        run: |
+          umask 077
+          printf '//npm.pkg.github.com/:_authToken=%s\n' "$GH_TOKEN" > "$RUNNER_TEMP/gpr.npmrc"
+          NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/gpr.npmrc" npm publish "$FILE" --registry https://npm.pkg.github.com --provenance=false
+          rm -f "$RUNNER_TEMP/gpr.npmrc"
 
       - name: 릴리스 PR 표시 정리 (release-please가 다음 PR을 열 수 있게)
         if: steps.state.outputs.run == 'true'

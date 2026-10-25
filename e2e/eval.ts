@@ -1,184 +1,311 @@
 /**
- * 오프라인 검색 평가 — Claude를 부르지 않고 `search()`만으로 정확도·지연을 잰다.
+ * 오프라인 검색 평가 — Claude를 부르지 않고 정확도·답변 가능성·응답 크기·지연을 잰다.
  *
- *   npm run eval                                   bench/eval.local.json의 root 아래 레포
- *   npm run eval -- --root ~/work-dir              다른 폴더
- *   npm run eval -- --repo . --repo ../other       레포를 직접 고름
- *   npm run eval -- --label after-x --save         결과를 bench/results/eval-<시각>-<label>.json에 남김
+ *   npm run eval                                   bench/eval.local.json(+ eval-*.local.json 질문)의 고정 코퍼스
+ *   npm run eval -- --detail index                 search_memory 응답 형태를 바꿔 잼
+ *   npm run eval -- --core path/to/dist            다른 빌드(core/, mcp/가 든 폴더)를 잼 — 빌드 사이 비교용
+ *   npm run eval -- --label x --save               bench/results/eval-<시각>-x.json에 남김
+ *   npm run eval -- --compare a.json b.json        저장한 두 결과를 질문별로 짝지어 비교 (맥니마 검정)
+ *   npm run eval -- --repo ~/big-repo --no-questions   색인 속도만
  *
- * 두 가지를 잰다.
- *  1. history→file (자동): 의미 있는 커밋마다 질의 = 커밋 제목, 정답 = 그 커밋이 건드린 파일 중 HEAD에 남은 소스 파일.
- *     kind=file로 찾아 정답 파일이 몇 등에 나오나. git 이력에서 기계적으로 만드는 표준 방식(LocAgent·SweRank)이다.
- *     제목을 그대로 질의로 쓰니 점수가 부풀려진다 — 절대값보다 변경 전후 비교에 쓴다.
- *  2. holdout (손으로 쓴 질문): 질문 파일의 expect 문자열이 모두 들어 있는 첫 결과의 순위.
- *     MCP와 같은 조건(limit 8, kind 없음)으로 찾는다. 실제 쓰임새에 가장 가깝다.
+ * 설정 파일(bench/eval.local.json):
+ *   { "corpus": [{ "path": "~/work-dir/x", "sha": "<40자>" }, …],
+ *     "questions": [{ id, repo?, type, q, expect: ["sha 7자 또는 경로 일부"], key?: ["답에 필요한 코드 조각"] }],
+ *     "include": ["eval-new.local.json"] }
  *
- * 지표: Acc@k(정답이 상위 k 안에 있는 비율), MRR(1/정답 순위의 평균), 검색 지연 p50·p95, 색인 시간.
- * 실제 ~/.grimoire는 건드리지 않는다(임시 DB).
+ * 코퍼스 고정: 원본 레포는 건드리지 않고, 고정한 sha만 가리키는 임시 shared clone(객체는 원본 것을 빌려 씀)을 색인한다.
+ * 그래서 레포에 커밋이 쌓여도 같은 코퍼스를 다시 잴 수 있다.
+ *
+ * 지표
+ *  - 찾기(locate): search() 상위 8개 안에서 expect를 모두 담은 첫 결과의 순위 → Acc@1/3/8, MRR.
+ *  - 답변 가능성(answerable): MCP와 같은 search_memory 응답 한 번에 정답 근거(expect)가 들어 있나(evidence),
+ *    이력 질문은 "어떻게"에 필요한 코드 조각(key)까지 모두 들어 있나. 한 번 검색으로 답할 수 있는지를 LLM 없이 잰다.
+ *  - 응답 크기(chars), 검색 지연, 색인 시간, DB 크기.
+ *  - 자동 과제(history→file): 커밋 제목 → 그 커밋이 건드린 소스 파일. 제목을 그대로 쓰니 점수가 부풀려진다.
  */
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
 
-import { isIndexable } from "../src/core/code";
-import { indexCommitCode } from "../src/core/diffs";
-import { openDb, type DB } from "../src/core/db";
-import { addRepo, discoverRepos, syncRepo } from "../src/core/indexer";
-import { search, type SearchHit } from "../src/core/search";
 import { tempDir } from "../tests/helpers";
 
 interface Question {
   id: string;
+  repo?: string;
   type: string;
   q: string;
   expect: string[];
+  key?: string[];
+  source?: string;
 }
 
-interface Scored {
-  /** 1부터. 못 찾으면 null */
+interface Row {
+  id: string;
+  type: string;
+  /** 찾기 순위 (1부터, 못 찾으면 null) */
   rank: number | null;
+  /** 응답에 정답 근거가 있나 */
+  evidence: boolean;
+  /** key가 있으면: 근거 + key 전부가 응답에 있나 */
+  answerable: boolean | null;
+  chars: number;
   ms: number;
 }
 
-const K = [1, 3, 5];
-/** history→file 과제에서 질의로 쓸 커밋의 변경 파일 수 범위 (대량 커밋은 정답이 흐려진다) */
-const MAX_GOLD_FILES = 5;
+/* eslint-disable @typescript-eslint/no-explicit-any */
+type Core = { db: any; search: any; indexer: any; diffs: any; tools: any; code: any };
 
 const expandHome = (value: string) => value.replace(/^~(?=$|\/)/, os.homedir());
 
-function metrics(rows: Scored[], ks = K) {
+function loadCore(dir: string): Core {
+  const load = (name: string) => require(path.join(dir, name));
+  let diffs: any = null;
+  try {
+    diffs = load("core/diffs");
+  } catch {
+    diffs = null; // diff 단계가 없는 옛 빌드
+  }
+  return { db: load("core/db"), search: load("core/search"), indexer: load("core/indexer"), diffs, tools: load("mcp/tools"), code: load("core/code") };
+}
+
+function git(cwd: string, args: string[]): string {
+  return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+}
+
+/** 원본 레포의 sha 하나만 가리키는 임시 clone — 원본 객체를 빌려 써서 빠르고, 원본은 건드리지 않는다 */
+function pin(source: string, sha: string, root: string): string {
+  const dir = path.join(root, path.basename(source));
+  execFileSync("git", ["clone", "-q", "--shared", "--no-checkout", source, dir], { stdio: "ignore" });
+  for (const ref of git(dir, ["for-each-ref", "--format=%(refname)"]).split("\n").filter(Boolean)) git(dir, ["update-ref", "-d", ref]);
+  git(dir, ["update-ref", "refs/heads/pinned", sha]);
+  git(dir, ["symbolic-ref", "HEAD", "refs/heads/pinned"]);
+  // 링크 모양을 원본과 같게
+  let origin = "";
+  try {
+    origin = git(source, ["remote", "get-url", "origin"]).trim();
+  } catch {
+    origin = "";
+  }
+  if (origin) git(dir, ["remote", "set-url", "origin", origin]);
+  else git(dir, ["remote", "remove", "origin"]);
+  return dir;
+}
+
+function metrics(rows: Row[], ks = [1, 3, 8]) {
   const n = rows.length || 1;
   const acc = Object.fromEntries(ks.map((k) => [`acc@${k}`, +(rows.filter((row) => row.rank !== null && row.rank <= k).length / n).toFixed(3)]));
-  const mrr = +(rows.reduce((sum, row) => sum + (row.rank ? 1 / row.rank : 0), 0) / n).toFixed(3);
-  const times = rows.map((row) => row.ms).sort((a, b) => a - b);
-  const pick = (q: number) => +(times[Math.min(times.length - 1, Math.floor(q * times.length))] ?? 0).toFixed(1);
-  return { n: rows.length, ...acc, mrr, p50ms: pick(0.5), p95ms: pick(0.95) };
+  const keyed = rows.filter((row) => row.answerable !== null);
+  const sorted = (values: number[]) => [...values].sort((a, b) => a - b);
+  const pick = (values: number[], q: number) => sorted(values)[Math.min(values.length - 1, Math.floor(q * values.length))] ?? 0;
+  return {
+    n: rows.length,
+    ...acc,
+    mrr: +(rows.reduce((sum, row) => sum + (row.rank ? 1 / row.rank : 0), 0) / n).toFixed(3),
+    evidence: +(rows.filter((row) => row.evidence).length / n).toFixed(3),
+    answerable: keyed.length ? +(keyed.filter((row) => row.answerable).length / keyed.length).toFixed(3) : null,
+    keyed: keyed.length,
+    chars: Math.round(rows.reduce((sum, row) => sum + row.chars, 0) / n),
+    charsP90: pick(rows.map((row) => row.chars), 0.9),
+    p50ms: +pick(rows.map((row) => row.ms), 0.5).toFixed(1),
+  };
 }
 
-function dbSize(db: DB): number {
-  const pages = db.pragma("page_count", { simple: true }) as number;
-  const size = db.pragma("page_size", { simple: true }) as number;
-  return pages * size;
-}
-
-function timed<T>(fn: () => T): { value: T; ms: number } {
-  const start = process.hrtime.bigint();
-  const value = fn();
-  return { value, ms: Number(process.hrtime.bigint() - start) / 1e6 };
-}
-
-/** 결과 하나를 문자열로 — expect 비교용 (파일 경로·sha·제목) */
-function hitText(hit: SearchHit): string {
+function hitText(hit: any): string {
   return [hit.repo, hit.ref, hit.title, ...(hit.files ?? [])].join(" ").toLowerCase();
 }
 
-function historyToFile(db: DB): Scored[] {
+async function runQuestions(core: Core, db: any, questions: Question[], detail: string): Promise<Row[]> {
+  const context = { db, me: [], cwd: "/" };
+  const rows: Row[] = [];
+  for (const question of questions) {
+    const expect = question.expect.map((item) => item.toLowerCase());
+    const start = process.hrtime.bigint();
+    const result = core.search.search(db, question.q, { limit: 8 });
+    const ms = Number(process.hrtime.bigint() - start) / 1e6;
+    const index = result.hits.findIndex((hit: any) => expect.every((item) => hitText(hit).includes(item)));
+    const response = JSON.stringify(await core.tools.callTool(context, "search_memory", { query: question.q, ...(detail ? { detail } : {}) }));
+    const text = response.toLowerCase();
+    const evidence = expect.every((item) => text.includes(item));
+    const keys = (question.key ?? []).map((item) => item.toLowerCase());
+    rows.push({
+      id: question.id,
+      type: question.type,
+      rank: index < 0 ? null : index + 1,
+      evidence,
+      answerable: keys.length > 0 ? evidence && keys.every((item) => text.includes(item)) : null,
+      chars: response.length,
+      ms,
+    });
+  }
+  return rows;
+}
+
+function historyToFile(core: Core, db: any) {
   const commits = db
-    .prepare(
-      `SELECT c.repo_id, c.sha, c.subject FROM commits c
-        WHERE c.meaningful = 1 AND c.files_changed BETWEEN 1 AND 40
-        ORDER BY c.repo_id, c.authored_at`,
-    )
+    .prepare("SELECT repo_id, sha, subject FROM commits WHERE meaningful = 1 AND files_changed BETWEEN 1 AND 40 ORDER BY repo_id, authored_at")
     .all() as { repo_id: number; sha: string; subject: string }[];
   const filesOf = db.prepare("SELECT path FROM commit_files WHERE repo_id = ? AND sha = ?");
   const atHead = db.prepare("SELECT 1 FROM code_files WHERE repo_id = ? AND path = ?");
-  const rows: Scored[] = [];
+  const repoPath = new Map((db.prepare("SELECT id, path FROM repos").all() as { id: number; path: string }[]).map((row) => [row.path, row.id]));
+  const rows: { rank: number | null }[] = [];
   for (const commit of commits) {
-    const touched = (filesOf.all(commit.repo_id, commit.sha) as { path: string }[]).map((row) => row.path);
-    const gold = touched.filter((file) => isIndexable(file, 0) && atHead.get(commit.repo_id, file));
-    if (gold.length === 0 || gold.length > MAX_GOLD_FILES) continue;
-    const { value, ms } = timed(() => search(db, commit.subject, { kind: "file", limit: 10, preferRepoId: commit.repo_id }));
-    const index = value.hits.findIndex((hit) => hit.repoPath !== null && gold.includes(hit.ref) && hitRepoId(db, hit) === commit.repo_id);
-    rows.push({ rank: index < 0 ? null : index + 1, ms });
+    const gold = (filesOf.all(commit.repo_id, commit.sha) as { path: string }[])
+      .map((row) => row.path)
+      .filter((file) => core.code.isIndexable(file, 0) && atHead.get(commit.repo_id, file));
+    if (gold.length === 0 || gold.length > 5) continue;
+    const hits = core.search.search(db, commit.subject, { kind: "file", limit: 10, preferRepoId: commit.repo_id }).hits;
+    const index = hits.findIndex((hit: any) => gold.includes(hit.ref) && repoPath.get(hit.repoPath) === commit.repo_id);
+    rows.push({ rank: index < 0 ? null : index + 1 });
   }
-  return rows;
+  const n = rows.length || 1;
+  return {
+    n: rows.length,
+    "acc@1": +(rows.filter((row) => row.rank === 1).length / n).toFixed(3),
+    "acc@5": +(rows.filter((row) => row.rank !== null && row.rank <= 5).length / n).toFixed(3),
+    mrr: +(rows.reduce((sum, row) => sum + (row.rank ? 1 / row.rank : 0), 0) / n).toFixed(3),
+  };
 }
 
-const repoIds = new Map<string, number>();
-function hitRepoId(db: DB, hit: SearchHit): number | undefined {
-  if (!hit.repoPath) return undefined;
-  if (!repoIds.has(hit.repoPath)) {
-    const row = db.prepare("SELECT id FROM repos WHERE path = ?").get(hit.repoPath) as { id: number } | undefined;
-    if (row) repoIds.set(hit.repoPath, row.id);
-  }
-  return repoIds.get(hit.repoPath);
+/** 이항 양측 정확 검정 — 짝지은 두 결과에서 한쪽만 맞은 질문 수(b, c)로 맥니마 p값 */
+export function mcnemar(b: number, c: number): number {
+  const n = b + c;
+  if (n === 0) return 1;
+  const k = Math.min(b, c);
+  let tail = 0;
+  for (let i = 0; i <= k; i++) tail += comb(n, i);
+  return Math.min(1, (2 * tail) / 2 ** n);
 }
 
-function holdout(db: DB, questions: Question[]) {
-  const rows: (Scored & { id: string; type: string })[] = [];
-  for (const question of questions) {
-    const { value, ms } = timed(() => search(db, question.q, { limit: 8 }));
-    const expect = question.expect.map((item) => item.toLowerCase());
-    const index = value.hits.findIndex((hit) => expect.every((item) => hitText(hit).includes(item)));
-    rows.push({ id: question.id, type: question.type, rank: index < 0 ? null : index + 1, ms });
+function comb(n: number, k: number): number {
+  let value = 1;
+  for (let i = 1; i <= k; i++) value = (value * (n - k + i)) / i;
+  return value;
+}
+
+function compare(fileA: string, fileB: string): void {
+  const a = JSON.parse(fs.readFileSync(fileA, "utf8")) as { label: string; rows: Row[] };
+  const b = JSON.parse(fs.readFileSync(fileB, "utf8")) as { label: string; rows: Row[] };
+  const byId = new Map(b.rows.map((row) => [row.id, row]));
+  const pairs = a.rows.filter((row) => byId.has(row.id)).map((row) => [row, byId.get(row.id)!] as const);
+  const test = (name: string, ok: (row: Row) => boolean | null) => {
+    const usable = pairs.filter(([x, y]) => ok(x) !== null && ok(y) !== null);
+    const onlyA = usable.filter(([x, y]) => ok(x) && !ok(y)).map(([x]) => x.id);
+    const onlyB = usable.filter(([x, y]) => !ok(x) && ok(y)).map(([x]) => x.id);
+    const rate = (pick: (pair: readonly [Row, Row]) => Row) => +(usable.filter((pair) => ok(pick(pair))).length / (usable.length || 1)).toFixed(3);
+    console.log(
+      `${name.padEnd(12)} n=${usable.length}  ${a.label}=${rate(([x]) => x)}  ${b.label}=${rate(([, y]) => y)}  ` +
+        `${a.label}만=${onlyA.length} ${b.label}만=${onlyB.length}  p=${mcnemar(onlyA.length, onlyB.length).toFixed(3)}`,
+    );
+    if (onlyA.length + onlyB.length > 0 && onlyA.length + onlyB.length <= 12) console.log(`             ${a.label}만: ${onlyA.join(" ")} | ${b.label}만: ${onlyB.join(" ")}`);
+  };
+  test("acc@1", (row) => row.rank === 1);
+  test("acc@3", (row) => row.rank !== null && row.rank <= 3);
+  test("acc@8", (row) => row.rank !== null);
+  test("evidence", (row) => row.evidence);
+  test("answerable", (row) => row.answerable);
+  const chars = (rows: Row[]) => Math.round(rows.reduce((sum, row) => sum + row.chars, 0) / (rows.length || 1));
+  console.log(`chars        ${a.label}=${chars(pairs.map(([x]) => x))}  ${b.label}=${chars(pairs.map(([, y]) => y))}`);
+}
+
+function readQuestions(file: string): { corpus: { path: string; sha: string }[]; questions: Question[] } {
+  const spec = JSON.parse(fs.readFileSync(file, "utf8")) as {
+    corpus?: { path: string; sha: string }[];
+    questions?: Question[];
+    include?: string[];
+  };
+  const questions = [...(spec.questions ?? [])];
+  for (const extra of spec.include ?? []) {
+    const included = path.resolve(path.dirname(file), extra);
+    if (fs.existsSync(included)) questions.push(...readQuestions(included).questions);
   }
-  return rows;
+  return { corpus: spec.corpus ?? [], questions };
 }
 
 async function main(): Promise<number> {
-  const { values } = parseArgs({
+  const { values, positionals } = parseArgs({
+    allowPositionals: true,
     options: {
-      questions: { type: "string" },
-      root: { type: "string" },
+      config: { type: "string" },
       repo: { type: "string", multiple: true },
+      core: { type: "string" },
+      detail: { type: "string" },
       label: { type: "string" },
       save: { type: "boolean" },
       verbose: { type: "boolean" },
+      compare: { type: "boolean" },
+      "no-questions": { type: "boolean" },
       "no-code": { type: "boolean" },
     },
   });
-  const questionsFile = values.questions ?? (fs.existsSync("bench/eval.local.json") ? "bench/eval.local.json" : undefined);
-  const spec = questionsFile
-    ? (JSON.parse(fs.readFileSync(questionsFile, "utf8")) as { root?: string; questions: Question[] })
-    : { questions: [] as Question[] };
-  const repos = values.repo?.length
-    ? values.repo.map((dir) => path.resolve(expandHome(dir)))
-    : discoverRepos(path.resolve(expandHome(values.root ?? spec.root ?? "."))).filter((dir) => !dir.includes("node_modules"));
-  if (repos.length === 0) throw new Error("평가할 레포가 없습니다 (--root 또는 --repo)");
+  if (values.compare) {
+    compare(positionals[0], positionals[1]);
+    return 0;
+  }
+  const core = loadCore(path.resolve(values.core ?? path.join(__dirname, "..", "src")));
+  const config = values.config ?? "bench/eval.local.json";
+  const spec = fs.existsSync(config) ? readQuestions(config) : { corpus: [], questions: [] as Question[] };
+  const questions = values["no-questions"] ? [] : spec.questions;
 
-  const db = openDb(path.join(tempDir("grimoire-eval-"), "eval.db"));
+  // 코퍼스: --repo(HEAD 고정) 또는 설정 파일의 고정 sha
+  const work = tempDir("grimoire-eval-");
+  const pinned = (values.repo?.length
+    ? values.repo.map((dir) => {
+        const source = path.resolve(expandHome(dir));
+        return { source, sha: git(source, ["rev-parse", "HEAD"]).trim() };
+      })
+    : spec.corpus.map((item) => ({ source: path.resolve(expandHome(item.path)), sha: item.sha }))
+  ).map((item) => ({ ...item, dir: pin(item.source, item.sha, path.join(work, "repos")) }));
+  if (pinned.length === 0) throw new Error("코퍼스가 없습니다 (설정 파일의 corpus 또는 --repo)");
+
+  const db = core.db.openDb(path.join(work, "eval.db"));
   const indexStart = Date.now();
   let commits = 0;
-  for (const dir of repos) {
-    const repo = await addRepo(db, dir);
-    const result = await syncRepo(db, repo);
-    commits += result.added;
+  const repos: any[] = [];
+  for (const item of pinned) {
+    const repo = await core.indexer.addRepo(db, item.dir);
+    commits += (await core.indexer.syncRepo(db, repo)).added;
+    repos.push(repo);
   }
   const indexMs = Date.now() - indexStart;
-  // diff 식별자 단계 (MCP 서버는 뒤에서 한다) — 시간을 따로 잰다
   const codeStart = Date.now();
-  if (!values["no-code"]) for (const repo of db.prepare("SELECT id, path FROM repos").all() as { id: number; path: string }[]) await indexCommitCode(db, repo);
+  if (core.diffs && !values["no-code"]) for (const repo of repos) await core.diffs.indexCommitCode(db, repo);
   const codeMs = Date.now() - codeStart;
   const files = (db.prepare("SELECT COUNT(*) AS n FROM code_files").get() as { n: number }).n;
+  const dbBytes = (db.pragma("page_count", { simple: true }) as number) * (db.pragma("page_size", { simple: true }) as number);
 
-  const history = metrics(historyToFile(db));
-  const held = holdout(db, spec.questions);
-  const byType = (type: string) => metrics(held.filter((row) => row.type === type), [1, 3, 8]);
-
+  const rows = await runQuestions(core, db, questions, values.detail ?? "");
+  const types = [...new Set(rows.map((row) => row.type))];
   const report = {
     label: values.label ?? "",
     at: new Date().toISOString(),
-    corpus: { repos: repos.length, commits, files, indexMs, codeMs, dbBytes: dbSize(db) },
-    historyToFile: history,
-    holdout: { all: metrics(held, [1, 3, 8]), history: byType("history"), location: byType("location") },
-    misses: held.filter((row) => row.rank === null || row.rank > 1).map((row) => `${row.id}:${row.rank ?? "-"}`),
+    core: values.core ?? "src",
+    detail: values.detail ?? "(기본)",
+    corpus: { repos: pinned.map((item) => `${path.basename(item.source)}@${item.sha.slice(0, 7)}`), commits, files, indexMs, codeMs, dbBytes },
+    historyToFile: historyToFile(core, db),
+    all: metrics(rows),
+    byType: Object.fromEntries(types.map((type) => [type, metrics(rows.filter((row) => row.type === type))])),
   };
   console.log(JSON.stringify(report, null, 2));
-  if (values.verbose) for (const row of held) console.log(`${row.rank ?? "-"}\t${row.id}`);
+  if (values.verbose) for (const row of rows) console.log(`${row.rank ?? "-"}\t${row.evidence ? "E" : "-"}${row.answerable === null ? " " : row.answerable ? "A" : "x"}\t${row.chars}\t${row.id}`);
   if (values.save) {
     const out = path.join("bench", "results", `eval-${report.at.replace(/[:.]/g, "-")}${report.label ? `-${report.label}` : ""}.json`);
     fs.mkdirSync(path.dirname(out), { recursive: true });
-    fs.writeFileSync(out, JSON.stringify({ ...report, rows: held }, null, 2));
+    fs.writeFileSync(out, JSON.stringify({ ...report, rows }, null, 2));
     console.error(`저장: ${out}`);
   }
+  db.close();
+  fs.rmSync(work, { recursive: true, force: true });
   return 0;
 }
 
-main().then(
-  (code) => process.exit(code),
-  (error) => {
-    console.error(error instanceof Error ? error.message : error);
-    process.exit(1);
-  },
-);
+if (require.main === module) {
+  main().then(
+    (code) => process.exit(code),
+    (error) => {
+      console.error(error instanceof Error ? error.stack : error);
+      process.exit(1);
+    },
+  );
+}

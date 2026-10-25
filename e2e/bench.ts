@@ -109,7 +109,8 @@ async function main(): Promise<number> {
   const modes = (values.modes?.split(",") as Mode[] | undefined) ?? MODES;
   const repeat = Math.max(1, Number.parseInt(values.repeat ?? "1", 10) || 1);
 
-  const cli = path.resolve(__dirname, "..", "..", "dist", "cli.js");
+  // BENCH_CLI로 고정해 둔 빌드를 가리킬 수 있다 — 벤치 도중 dist가 다시 빌드돼도 측정 대상이 바뀌지 않게
+  const cli = process.env.BENCH_CLI ? path.resolve(process.env.BENCH_CLI) : path.resolve(__dirname, "..", "..", "dist", "cli.js");
   if (!fs.existsSync(cli)) throw new Error(`${cli}가 없습니다 — npm run build를 먼저 하세요`);
 
   // grimoire용 임시 DB — root 아래 레포를 새로 인덱싱

@@ -7,9 +7,29 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import Database from "better-sqlite3";
+import type BetterSqlite3 from "better-sqlite3";
 
-export type DB = Database.Database;
+export type DB = BetterSqlite3.Database;
+
+/**
+ * better-sqlite3는 네이티브 모듈이라 빌드할 때의 Node로만 열린다.
+ * 모듈 최상단이 아니라 여기서 늦게 불러야 `grimoire doctor`가 이 실패를 진단할 수 있다.
+ */
+export function loadSqlite(): typeof BetterSqlite3 {
+  try {
+    return require("better-sqlite3") as typeof BetterSqlite3;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/NODE_MODULE_VERSION|was compiled against a different Node\.js version/.test(message)) {
+      throw new Error(
+        `SQLite 모듈이 지금 Node(${process.version}, ${process.execPath})와 맞지 않습니다. ` +
+          "설치할 때 쓴 node로 실행하거나, 이 node로 'npm rebuild better-sqlite3'를 실행한 뒤 " +
+          "'grimoire install'을 다시 하세요.",
+      );
+    }
+    throw error;
+  }
+}
 
 /** 스키마 버전 — 바꾸면 MIGRATIONS에 한 단계를 덧붙인다. */
 const MIGRATIONS: string[] = [
@@ -95,6 +115,7 @@ const MIGRATIONS: string[] = [
 
 export function openDb(file: string): DB {
   if (file !== ":memory:") fs.mkdirSync(path.dirname(file), { recursive: true });
+  const Database = loadSqlite();
   const db = new Database(file);
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");

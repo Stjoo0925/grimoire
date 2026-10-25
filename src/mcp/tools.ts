@@ -5,11 +5,17 @@
  *   show_commit        — 커밋 하나의 메시지·파일·diff
  *   get_repo_overview  — 레포의 기술 스택·활동·많이 건드린 곳·최근 주요 커밋
  *   list_repos         — 인덱싱된 레포 목록
- *   record_note        — 대화 중 배운 것·결정을 노트로 남김 (유일한 쓰기 경로)
+ *   add_repo           — 레포(또는 디렉터리 아래 레포 전부) 등록 + 인덱싱
+ *   record_note        — 대화 중 배운 것·결정을 노트로 남김
+ *
+ * 등록된 레포가 하나도 없으면 결과에 `hint`를 실어, AI가 사용자에게 등록 방법을 안내하게 한다.
  */
+import fs from "node:fs";
+import path from "node:path";
+
 import type { DB } from "../core/db";
 import { resolveAuthors } from "../core/identity";
-import { findRepo } from "../core/indexer";
+import { addRepo, discoverRepos, findRepo, listRepos, syncRepo } from "../core/indexer";
 import { addNote } from "../core/notes";
 import { commitDetail, repoOverview, repoSummaries } from "../core/overview";
 import { search } from "../core/search";
@@ -18,6 +24,21 @@ export interface ToolContext {
   db: DB;
   /** 내 작성자 이메일 */
   me: string[];
+  /** 서버의 작업 디렉터리 — Claude Code는 보통 열려 있는 프로젝트 폴더다 */
+  cwd: string;
+}
+
+/** 레포가 없을 때 AI가 사용자에게 전할 안내. 레포가 있으면 undefined. */
+export function emptyHint(context: ToolContext): string | undefined {
+  if (listRepos(context.db).length > 0) return undefined;
+  const cwdIsRepo = fs.existsSync(path.join(context.cwd, ".git"));
+  return [
+    "아직 인덱싱된 레포가 없습니다.",
+    cwdIsRepo
+      ? `지금 작업 디렉터리(${context.cwd})가 git 레포입니다 — add_repo {"path": "${context.cwd}"}로 바로 등록할 수 있습니다.`
+      : "사용자에게 어떤 폴더의 레포를 기억시킬지 물어본 뒤 add_repo로 등록하세요 (여러 레포가 든 폴더는 scan: true).",
+    "터미널에서는 'grimoire scan <폴더>'로도 등록할 수 있습니다.",
+  ].join(" ");
 }
 
 const DATE_HINT = "ISO 날짜 (예: 2024-01-01)";
@@ -75,6 +96,20 @@ export const TOOLS = [
     inputSchema: { type: "object", properties: {} },
   },
   {
+    name: "add_repo",
+    description:
+      "로컬 git 레포를 Grimoire에 등록하고 인덱싱합니다. scan: true면 그 폴더 아래의 git 레포를 모두 찾아 등록합니다. " +
+      "이미 등록된 레포는 새 커밋만 반영합니다. 사용자가 원하는 폴더일 때만 쓰세요.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "레포(또는 scan할 폴더) 경로. 상대 경로는 서버 작업 디렉터리 기준" },
+        scan: { type: "boolean", description: "하위 폴더의 레포를 모두 찾아 등록 (기본 false)" },
+      },
+      required: ["path"],
+    },
+  },
+  {
     name: "record_note",
     description:
       "대화 중 알게 된 것·내린 결정·해결 방법을 노트로 남깁니다. 이후 search_memory에서 커밋과 함께 검색됩니다. " +
@@ -105,6 +140,10 @@ export class ToolError extends Error {}
 /** 도구를 실행하고 JSON 직렬화 가능한 결과를 돌려준다. 잘못된 인자는 ToolError. */
 export async function callTool(context: ToolContext, name: string, args: Args = {}): Promise<unknown> {
   const { db, me } = context;
+  const withHint = <T extends object>(result: T): T & { hint?: string } => {
+    const hint = emptyHint(context);
+    return hint ? { ...result, hint } : result;
+  };
 
   const repoFilter = (value: unknown) => {
     const query = str(value);
@@ -123,14 +162,16 @@ export async function callTool(context: ToolContext, name: string, args: Args = 
       if (authors && authors.length === 0) {
         throw new ToolError("내 이메일을 알 수 없습니다. GRIMOIRE_ME 또는 git config user.email을 설정하세요.");
       }
-      return search(db, query, {
-        repoId: repoFilter(args.repo)?.id,
-        authors,
-        since: str(args.since),
-        until: str(args.until),
-        kind,
-        limit: num(args.limit),
-      });
+      return withHint(
+        await search(db, query, {
+          repoId: repoFilter(args.repo)?.id,
+          authors,
+          since: str(args.since),
+          until: str(args.until),
+          kind,
+          limit: num(args.limit),
+        }),
+      );
     }
     case "show_commit": {
       const sha = str(args.sha);
@@ -146,7 +187,26 @@ export async function callTool(context: ToolContext, name: string, args: Args = 
       return repoOverview(db, repo, me);
     }
     case "list_repos":
-      return { me, repos: repoSummaries(db, me) };
+      return withHint({ me, repos: repoSummaries(db, me) });
+    case "add_repo": {
+      const target = str(args.path);
+      if (!target) throw new ToolError("path가 필요합니다");
+      const dir = path.resolve(context.cwd, target.replace(/^~(?=$|\/)/, process.env.HOME ?? "~"));
+      if (!fs.existsSync(dir)) throw new ToolError(`경로가 없습니다: ${dir}`);
+      const dirs = args.scan === true ? discoverRepos(dir) : [dir];
+      if (dirs.length === 0) throw new ToolError(`git 레포를 찾지 못했습니다: ${dir}`);
+      const added: unknown[] = [];
+      const failed: { path: string; error: string }[] = [];
+      for (const repoDir of dirs) {
+        try {
+          added.push(await syncRepo(db, await addRepo(db, repoDir)));
+        } catch (error) {
+          failed.push({ path: repoDir, error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      if (added.length === 0) throw new ToolError(failed.map((item) => item.error).join("\n"));
+      return { added, failed };
+    }
     case "record_note": {
       const text = str(args.text);
       if (!text) throw new ToolError("text가 필요합니다");

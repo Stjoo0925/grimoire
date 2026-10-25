@@ -12,8 +12,11 @@
  *   grimoire note <text>        노트 남기기
  *   grimoire embed              로컬 임베딩 채우기 (선택, Ollama)
  *   grimoire remove <repo>      레포와 색인 삭제
+ *   grimoire install <client>   MCP 클라이언트 설정 자동 작성
+ *   grimoire doctor             연결 문제 진단
  *   grimoire mcp                MCP 서버 (stdio)
  */
+import path from "node:path";
 import { parseArgs } from "node:util";
 
 import { dbPath, embedModel } from "./core/config";
@@ -25,6 +28,8 @@ import { addNote } from "./core/notes";
 import { commitDetail, repoOverview, repoSummaries } from "./core/overview";
 import { search } from "./core/search";
 import { runMcpServer } from "./mcp/server";
+import { doctor, formatChecks } from "./setup/doctor";
+import { CLIENTS, install, InstallError, type ClientName } from "./setup/install";
 
 const HELP = `grimoire — 로컬 git 이력을 AI 코딩 도구의 기억으로
 
@@ -39,7 +44,12 @@ const HELP = `grimoire — 로컬 git 이력을 AI 코딩 도구의 기억으로
   grimoire note <text>            노트 남기기  [--repo r] [--tag t ...]
   grimoire embed                  로컬 임베딩 채우기 (Ollama ${embedModel()})
   grimoire remove <repo>          레포와 색인 삭제
-  grimoire mcp                    MCP 서버 (stdio)
+
+MCP 연결:
+  grimoire install <client>       설정 자동 작성  client: ${CLIENTS.join(" | ")}
+                                  [--project <dir>] 프로젝트 범위  [--dry-run] 쓰지 않고 보기
+  grimoire doctor                 연결 문제 진단
+  grimoire mcp                    MCP 서버 (stdio) — 보통 클라이언트가 직접 띄웁니다
 
 데이터: ${dbPath()}
 `;
@@ -68,8 +78,20 @@ async function main(argv: string[]): Promise<number> {
       depth: { type: "string" },
       tag: { type: "string", multiple: true },
       json: { type: "boolean" },
+      project: { type: "string" },
+      "dry-run": { type: "boolean" },
     },
   });
+
+  // DB를 열기 전에 처리한다 — SQLite 모듈이 안 맞아도 doctor·install은 돌아야 한다.
+  if (command === "doctor") {
+    const checks = await doctor({ cliPath: __filename });
+    print(formatChecks(checks));
+    return checks.some((check) => check.level === "fail") ? 1 : 0;
+  }
+  if (command === "install") {
+    return cmdInstall(positionals[0], values.project, values["dry-run"]);
+  }
 
   const db = openDb(dbPath());
   try {
@@ -146,6 +168,38 @@ async function main(argv: string[]): Promise<number> {
     }
   } finally {
     db.close();
+  }
+}
+
+async function cmdInstall(client: string | undefined, project: string | undefined, dryRun: boolean | undefined): Promise<number> {
+  if (!client || !(CLIENTS as readonly string[]).includes(client)) {
+    throw new UsageError(`클라이언트를 고르세요: ${CLIENTS.join(" | ")}`);
+  }
+  try {
+    const result = await install(client as ClientName, {
+      cliPath: __filename,
+      project: project ? path.resolve(project) : undefined,
+      dryRun,
+    });
+    const target = result.file ?? "claude CLI (사용자 범위)";
+    if (dryRun) {
+      print(`[dry-run] ${target}에 다음을 넣습니다:`);
+      print(result.command ?? JSON.stringify({ mcpServers: { grimoire: result.spec } }, null, 2));
+      return 0;
+    }
+    print(result.unchanged ? `이미 같은 설정입니다: ${target}` : `✓ ${client}에 등록했습니다: ${target}`);
+    if (result.command) print(`  실행: ${result.command}`);
+    if (result.backup) print(`  이전 설정 백업: ${result.backup}`);
+    print(`  node: ${result.spec.command}`);
+    print(`  다음: ${result.next}`);
+    print("  확인: grimoire doctor");
+    return 0;
+  } catch (error) {
+    if (error instanceof InstallError) {
+      console.error(error.message);
+      return 1;
+    }
+    throw error;
   }
 }
 

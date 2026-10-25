@@ -22,7 +22,7 @@ const SERVER_VERSION = "0.2.0";
 
 export async function runMcpServer(env = process.env): Promise<void> {
   const db = openDb(dbPath(env));
-  const context: ToolContext = { db, me: await myEmails(env) };
+  const context: ToolContext = { db, me: await myEmails(env), cwd: process.cwd() };
 
   const server = new Server(
     { name: SERVER_NAME, version: SERVER_VERSION },

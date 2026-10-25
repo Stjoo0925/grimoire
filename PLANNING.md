@@ -70,6 +70,10 @@ Grimoire는 내 컴퓨터에 있는 git 레포를 인덱싱해, Claude Code·Cur
 | `show_commit` | 커밋 하나의 전체 메시지 + 변경 파일 + diff(로컬 레포에서, 길이 제한) |
 | `get_repo_overview` | 레포의 기술 스택·활동 기간·많이 건드린 디렉터리·최근 주요 커밋 |
 | `list_repos` | 인덱싱된 레포 목록과 커밋 수 |
+| `add_repo` | 대화 중 레포(또는 폴더 아래 레포 전부) 등록 + 인덱싱 |
+
+레포가 하나도 없으면 결과에 `hint`를 실어 AI가 등록부터 안내하게 한다.
+연결은 `grimoire install <client>`(node 절대경로로 설정 작성)와 `grimoire doctor`(진단)가 맡는다.
 | `record_note` | 대화 중 배운 것·결정을 노트로 남김 (검색 대상이 됨) |
 
 ## 6. 로드맵

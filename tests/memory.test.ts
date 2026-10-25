@@ -185,7 +185,7 @@ test("MCP 도구: 인자 검증과 기록", async () => {
   const db = memoryDb();
   const repo = await addRepo(db, sampleRepo());
   await syncRepo(db, repo);
-  const context = { db, me: ["me@example.com"] };
+  const context = { db, me: ["me@example.com"], cwd: process.cwd() };
 
   const found = (await callTool(context, "search_memory", { query: "토큰", author: "me", repo: "shop" })) as {
     hits: unknown[];
@@ -194,7 +194,7 @@ test("MCP 도구: 인자 검증과 기록", async () => {
 
   await assert.rejects(callTool(context, "search_memory", {}), ToolError);
   await assert.rejects(callTool(context, "get_repo_overview", { repo: "없는레포" }), /찾지 못했습니다/);
-  await assert.rejects(callTool({ db, me: [] }, "search_memory", { query: "x", author: "me" }), /GRIMOIRE_ME/);
+  await assert.rejects(callTool({ db, me: [], cwd: process.cwd() }, "search_memory", { query: "x", author: "me" }), /GRIMOIRE_ME/);
 
   const recorded = (await callTool(context, "record_note", { text: "배움: FTS5 접두 질의", tags: ["sqlite"] })) as {
     recorded: boolean;

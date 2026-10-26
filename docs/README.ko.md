@@ -15,6 +15,8 @@ AI가 프로젝트를 일일이 열어 보거나 git log를 뒤지지 않고, �
 - **증분 동기화**: 새 커밋과 바뀐 파일만 읽음. MCP 서버가 뜰 때 백그라운드로 자동 동기화
 - 한국어 질문도 영어 식별자에 닿도록 흔한 개발 용어를 영어로 확장("충돌" → `conflict`, "횟수 제한" → `rate limit`)
 - 응답은 토큰을 아끼는 최소 형태. 대화 컨텍스트에 쌓이는 양이 곧 비용이라서
+- **고치기 전에** (Claude Code 훅, 선택): 그 파일의 최근 커밋, 거기 묶인 *왜*, 같이 바뀌는 파일과 테스트를 다섯 줄로, 세션당 파일당 한 번
+- **커밋에 묶인 "왜"**: 커밋 트레일러(`Constraint:`·`Rejected:`·`Tested:`·`Why:` …)와, 훅이 있으면 AI에게 한 말·돌린 검증·고쳤다가 뺀 파일까지 sha에 붙어 그때 쓴 말로 검색됨
 - LLM·임베딩 모델·GPU 필요 없음: 검색은 키워드(SQLite FTS5)로 하고, 찾은 근거를 읽는 건 이미 쓰는 AI가 합니다
 
 설계와 이전 버전에서 바뀐 점은 [PLANNING.md](./PLANNING.md)를, 연구에 기반한 개선 로드맵은 [improvement-plan.md](./improvement-plan.md)를, 에이전트 코딩에 실질적으로 도움이 되게 하는 핵심가치와 강화 계획(커밋에 묶인 "왜"·편집 직전 훅·공변경·작업 완수 벤치)은 [enhancement-plan.md](./enhancement-plan.md)를 보세요.
@@ -78,7 +80,8 @@ Grimoire가 **서버를 띄울 때 바로 등록하고, 다른 레포보다 먼�
 | 도구 | 하는 일 |
 |---|---|
 | `search_memory` | 현재 코드 파일·커밋·노트를 한 번에 검색. `repo`·`author`(`me`)·`since`·`until`·`kind`(`file`·`commit`·`note`)·`limit`(기본 8) 필터. `detail`: `index`(기본, 간결한 목록), `summary`(요청할 때, 상위 커밋 3개에 본문 전체와 바뀐 함수), `full`(1위 커밋 diff까지) |
-| `show_commit` | 커밋의 메시지·변경 파일·diff (로컬 레포에서 직접 읽음). diff는 기본 120줄이고, `paths`로 특정 파일만 볼 수 있음. `shas`(최대 5개)로 여러 커밋을 한 번에 받음(커밋당 diff 기본 40줄) |
+| `show_commit` | 커밋의 메시지·변경 파일·diff (로컬 레포에서 직접 읽음). diff는 기본 120줄이고, `paths`로 특정 파일만 볼 수 있음. `shas`(최대 5개)로 여러 커밋을 한 번에 받음(커밋당 diff 기본 40줄). 커밋에 묶인 것이 있으면 `why`(프롬프트·검증·버린 편집·트레일러)도 실음 |
+| `file_context` | 파일을 고치기 전에 볼 것: 최근 커밋, 거기 묶인 `why`, 같이 바뀌는 파일과 테스트(이력에서 캔 공변경 + 이름 규칙 짝), 이 파일을 import하는 파일, 요즘 fix가 잦은지. 확인할 후보이지 지시가 아님. 더 말할 것이 없으면 `recent`와 `worth: false`만 |
 | `get_repo_overview` | 기술 스택(매니페스트 기준)·분기별 활동·많이 건드린 디렉터리·주요 작성자·최근 주요 커밋 |
 | `list_repos` | 인덱싱된 레포 목록 |
 | `add_repo` | 레포(또는 `scan: true`로 폴더 아래 레포 전부) 등록 + 인덱싱. 루트·홈 전체 스캔은 터미널의 `grimoire scan`으로 |
@@ -86,8 +89,43 @@ Grimoire가 **서버를 띄울 때 바로 등록하고, 다른 레포보다 먼�
 
 응답은 토큰을 아끼도록 최소 형태로 보냅니다. sha는 10자, 날짜는 일까지, 작성자는 내 커밋이면 `me`로 표시하고, 커밋 링크는 레포별 접두(`links`)를 한 번만 보냅니다.
 로컬 경로·점수·이메일처럼 답에 쓰지 않는 필드는 뺍니다. 도구 설명도 "언제 쓰는지"만 짧은 영어로 둡니다. 도구 정의는 서버가 켜진 모든 세션의 매 요청에 실리기 때문입니다. 읽기 도구에는 `readOnlyHint`, `add_repo`에는 `idempotentHint`를 달아 클라이언트가 안전한 호출을 알아보게 합니다.
-대화 컨텍스트에 쌓이는 양이 곧 비용입니다. `npm run e2e`의 "응답 크기 예산" 단계(검색 결과 건당 260자, 도구 정의 2600자, 설명 글 420자)가 형식이 다시 커지는 것을 막습니다.
+대화 컨텍스트에 쌓이는 양이 곧 비용입니다. `npm run e2e`의 "응답 크기 예산" 단계(검색 결과 건당 260자, 도구 정의 2600자, 설명 글 500자)가 형식이 다시 커지는 것을 막습니다.
 CLI는 줄이지 않은 전체 결과를 보여 줍니다.
+
+### 고치기 전에 — Claude Code 훅 (선택)
+
+AI는 자기가 모르는 것을 물어보지 않습니다. 훅을 설치하면 Grimoire가 딱 그 순간, 파일을 고치기 직전에 먼저 말해 줍니다.
+
+```bash
+grimoire install claude-code --hooks          # ~/.claude/settings.json에 훅을 넣습니다 (다른 훅은 보존, .bak 백업)
+grimoire install claude-code --remove-hooks   # 다시 뺍니다
+grimoire context src/core/search.ts           # 같은 내용을 터미널에서
+```
+
+`PreToolUse` 훅이 건네는 것 (한 줄에 사실 하나, 400자 이하, 실측 247자·49ms):
+
+```
+Grimoire: src/core/search.ts
+Recent: a1b2c3d4e5 10-25 me "perf: 재정렬 후보 질의 개선" · f6e5d4c3b2 10-23 me "feat(search): 식별자 정확 일치"
+Why (a1b2c3d4e5): "검색이 느려서 p95를 20ms 아래로" · verified: npm run eval
+Co-changes: src/core/db.ts (4/5, strong, imports) · src/mcp/tools.ts (3/5)
+Tests: tests/search.test.ts
+```
+
+- 등록된 레포의 소스 파일에만, **세션당 파일당 한 번**(HEAD가 바뀌면 다시). 이력에 "최근 커밋" 말고 줄 것이 없으면 아무 말도 하지 않습니다 — 그 정도는 파일을 읽으면 압니다.
+- `Co-changes`는 커밋을 거래로 본 연관 규칙입니다(머지·10파일 초과 커밋 제외, 신뢰도 ≥ 0.5는 필터, 정렬은 최근순, 동기화마다 증분). 커밋이 보통 10개 넘는 파일을 건드리는 레포라면 `GRIMOIRE_COCHANGE_MAX_FILES=20`을 두고 `grimoire sync`를 다시 하세요. `Tests`는 이름 규칙 짝(`foo.ts` ↔ `foo.test.ts`·`test_foo.py`·`foo_test.go`)이 먼저, 그다음 같이 바뀐 테스트. `Fixes(90d)`는 최근 90일 fix 커밋이 2개 이상이고 30% 이상일 때만 sha와 함께.
+- `SessionStart`(startup·clear·compact)에는 600자 요약: 이 레포의 내 최근 커밋 3개와 그 *왜*, 이전 세션에서 고쳤지만 커밋하지 않은 파일.
+- 세션에서 **처음 실패한 검증**(`npm test`·`pytest` 등)이 나오면 한 번 더: 고치고 있는 파일들의 과거 커밋이 남긴 왜·검증·고쳤다가 뺀 파일·`Rejected:`/`Constraint:` 트레일러. 세션당 한 번이고, 막히지 않은 세션은 비용이 없습니다.
+- 훅은 가벼운 별도 진입점(`dist/hook.js`)이라 MCP 모듈을 불러오지 않고, 항상 exit 0, 오류는 `~/.grimoire/hook.log`, 동기화는 하지 않습니다. `GRIMOIRE_HOOKS=0`이면 주입을 끄고, `grimoire doctor`가 훅 항목을 점검합니다.
+
+### 커밋에 묶인 "왜"
+
+커밋에는 *무엇*을 바꿨는지만 남습니다. 왜 그랬는지 — 내가 무엇을 시켰고, 뭘 해 보다 버렸고, 뭘로 확인했는지 — 는 대화창이 닫히면 사라집니다. Grimoire는 두 길로 그것을 sha에 붙여, 나중에 그때 쓴 말로 커밋을 찾게 합니다(검색 결과엔 한 줄 `why`, `show_commit`엔 전체).
+
+1. **커밋 트레일러, 훅 없이.** 커밋 메시지 마지막 문단의 `Key: value` 줄을 `git interpret-trailers`와 같은 규칙으로 읽습니다. Lore(`Constraint`, `Rejected: 대안 | 이유`, `Directive`, `Tested`, `Not-tested` …), QAC(`Agent`, `Mode`, `What`, `Why`), 플랫폼 꼬리표(`Claude-Session`, `Agent-Logs-Url`, `Co-Authored-By` …). 값은 자유 문자열이고 모르는 키도 저장합니다. `Co-Authored-By: Claude…`·`Claude-Session`·`Agent-Logs-Url`·`Agent:`가 있으면 에이전트가 만든 커밋으로 표시합니다. 옛 DB는 다음 동기화 때 레포당 한 번 백필됩니다.
+2. **세션 캡처, 훅이 있을 때.** `UserPromptSubmit`은 프롬프트(슬래시 명령·서브에이전트 제외), `PostToolUse`는 테스트·린트·타입체크 명령과 결과, 편집한 줄의 해시를 모읍니다. `git commit`이 성공하면 직전 커밋 이후의 것을 새 sha에 묶습니다: 프롬프트(최대 10건, 각 1,000자), 검증(최대 20건), 그리고 *dropped* — 세션에서 고쳤지만 그 줄이 커밋에 하나도 없는 파일. 커밋은 그 자리에서 색인되므로 다음 동기화를 기다리지 않습니다.
+
+프라이버시: 캡처는 훅을 설치했을 때만 켜집니다(`GRIMOIRE_CAPTURE=0`이면 주입은 두고 캡처만 끔). 저장 전에 `<private>…</private>` 구간, 붙여 넣은 블록, API 토큰·키·JWT, `password=…` 류 값은 `[redacted]`로 바뀝니다. 도구 출력은 실패한 검증의 마지막 300자 말고는 저장하지 않습니다. 커밋에 묶이지 않은 기록은 14일 뒤 지웁니다. 전부 로컬 SQLite 파일 안에 있고 git에는 아무것도 쓰지 않습니다.
 
 ### 현재 코드 색인
 
@@ -125,9 +163,11 @@ grimoire search "동시성 락" --author me --since 2024-01-01
 grimoire show 2518bf75                         # 커밋 메시지 + 파일 + diff (기본 120줄)
 grimoire show 2518bf75 --path route.ts         # 경로 일부가 맞는 파일의 diff만 (--lines n으로 늘리기)
 grimoire overview please_readme                # 기술 스택·활동·많이 건드린 곳·최근 주요 커밋
+grimoire context src/core/search.ts            # 고치기 전에: 최근 커밋·왜·같이 바뀌는 파일/테스트·import하는 파일
 grimoire note "결정: 세션 대신 JWT — 모바일 때문" --repo shop-api --tag decision
 grimoire remove shop-api                       # 레포와 색인 삭제
 grimoire update                                # 최신 릴리스로 올리기 (아래 '업데이트')
+grimoire install claude-code --hooks           # 편집 직전 맥락 + 세션 캡처 (위 참고)
 ```
 
 데이터는 `~/.grimoire/grimoire.db`(SQLite) 하나에 있습니다. `GRIMOIRE_HOME`으로 위치를 바꿀 수 있습니다.
@@ -185,13 +225,17 @@ npm test            # 임시 git 레포로 인덱싱·검색·MCP 도구 검증 
 npm run e2e         # MCP 종단 하네스 (아래)
 npm run e2e:agent   # 에이전트 하네스 (아래, 실제 Claude 호출)
 npm run bench       # 핀포인트 벤치 (아래, 실제 Claude 호출)
+npm run taskbench   # 작업 완수 벤치: 실제 fix 작업을 Grimoire 있음/없음으로 (아래, 실제 Claude 호출)
+npm run eval -- --cochange   # 오프라인: 공변경이 같이 바뀔 파일을 맞히나 (시간 분할)
 ```
 
 ### MCP 종단 하네스 (`e2e/harness.ts`)
 
-실제 클라이언트처럼 서버를 **별도 프로세스로 띄워 stdio로** 붙고, 고정 픽스처 레포로 시나리오 14단계를 검증합니다.
+실제 클라이언트처럼 서버를 **별도 프로세스로 띄워 stdio로** 붙고, 고정 픽스처 레포로 시나리오 20단계를 검증합니다.
 GUI 앱 환경(최소 PATH, cwd `/`)에서 연결 → 빈 DB 안내 → `add_repo` scan → 한국어 검색과 근거 → 응답 크기 예산 →
-작성자 필터 → diff와 `paths`로 고른 diff → 개요 → 노트 → 오류 처리 → 재시작 시 백그라운드 동기화 → stdout 오염 여부.
+작성자 필터 → diff와 `paths`로 고른 diff → 개요 → 노트 → 오류 처리 → 재시작 시 백그라운드 동기화 → 작업 레포 자동 등록 →
+`PreToolUse` 훅(줄 것 없으면 무출력, 세 번 같이 바뀐 뒤 공변경, 세션당 한 번, 깨진 stdin, 지연) →
+세션 캡처가 커밋에 묶이고 그때의 말로 다시 찾아지는지 → stdout 오염 여부.
 
 ```bash
 npm run e2e                                    # 빌드한 dist/cli.js
@@ -243,6 +287,19 @@ npm run bench -- --questions bench/questions.local.json --modes grimoire --only 
   `expect`의 문자열이 모두 답에 들어 있으면 맞은 것으로 봅니다.
 - 질문은 내 레포 기준이라 `bench/*.local.json`으로 두고, 결과는 `bench/results/<시각>.json`에 남깁니다. 둘 다 git에 올라가지 않습니다.
 - `grimoire` 모드는 `root` 아래 레포를 임시 DB에 새로 인덱싱해서 씁니다. 실제 `~/.grimoire`는 건드리지 않습니다.
+
+### 작업 완수 벤치 (`e2e/taskbench.ts`)
+
+핀포인트 벤치는 "sha를 대는가"를 묻습니다. 이 벤치는 계획의 진짜 질문을 묻습니다. **Grimoire가 있으면 실제 버그를 더 싸게, 회귀 없이 고치나?** (docs/enhancement-plan.md §3-4)
+
+```bash
+npm run taskbench -- --mine --repo ~/work/foo --test "npm test" --limit 40     # fail-to-pass fix 커밋 채굴 → bench/tasks.local.json
+npm run taskbench -- --run --tasks bench/tasks.local.json --seeds 3             # bare vs grimoire, 짝지어
+```
+
+- **채굴**은 테스트 패치만 부모에 얹었을 때 3회 모두 실패하고 커밋 전체가 3회 모두 통과하는 fix 커밋만 남깁니다(뒤집히는 테스트는 버림). 필터: 머지 아님, 파일 1~15개, 테스트 파일 ≥1과 소스 ≥1, 비테스트 ≤100줄, 의존성 파일 변경 없음. 테스트를 건드린 커밋의 5~10%쯤 남습니다. 그다음 각 사례의 `prompt`를 증상 서술로 고치세요(기본값은 커밋 제목이라 수정 힌트가 샐 수 있습니다).
+- **실행**은 부모 커밋의 새 worktree에서 `claude -p --bare`에 프롬프트를 줍니다. `grimoire` 모드는 부모까지만 보이는 임시 색인(시간 마스킹)과 편집 직전 훅(`--settings`)을 씁니다. 채점은 실제 테스트 패치를 얹어(`pass`), 부모 테스트를 얹어(`p2p_broken`), 고친 파일을 실제 fix와 대조(`stray`·`missed`)하고, `total_cost_usd`/`modelUsage`의 청구 비용·턴·되돌린 편집·churn 비율을 적습니다.
+- 요약은 사례·시드별로 짝짓고, 비용·턴은 둘 다 푼 짝(`_ok`)에서 윌콕슨 부호 순위 p와 함께 비교합니다. 채택 기준은 보기 전에 고정돼 있습니다(§3-4): 통과율 안 떨어지고, 회귀 안 늘고, 청구 비용이나 턴이 15% 이상 줄거나 `missed`/`p2p_broken`이 유의하게 줄 것. 비용은 실행당 $0.5~1.5, 먼저 10사례 × 1시드로 파일럿.
 
 ### 릴리스 내기
 

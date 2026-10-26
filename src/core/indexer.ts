@@ -120,10 +120,13 @@ export function repoOfPath(db: DB, target: string): RepoRow | undefined {
     .sort((a, b) => b.path.length - a.path.length)[0];
 }
 
+/** 레포 폴더 안에 사는 git worktree — Claude Code가 세션마다 만드는 자리. 그 안의 파일은 레포 기준 경로로 색인돼 있다 */
+const NESTED_WORKTREE = /^\.claude\/worktrees\/[^/]+\//;
+
 /** 레포 안 경로를 색인과 같은 꼴(레포 기준, POSIX 구분자)로 */
 export function relativeToRepo(repoPath: string, target: string): string {
   const relative = path.isAbsolute(target) ? path.relative(repoPath, path.resolve(target)) : target;
-  return relative.split(path.sep).join("/").replace(/^\.\//, "");
+  return relative.split(path.sep).join("/").replace(/^\.\//, "").replace(NESTED_WORKTREE, "");
 }
 
 /** 하위 디렉터리에서 git 레포를 찾는다 (레포 안으로는 더 내려가지 않는다). */

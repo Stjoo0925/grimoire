@@ -21,9 +21,12 @@ import { isIndexable, SOURCE_EXT } from "./code";
 import type { DB } from "./db";
 import type { GitCommit } from "./git";
 
-/** 공변경 거래로 쓰는 커밋의 변경 파일 수 범위 */
+/**
+ * 공변경 거래로 쓰는 커밋의 변경 파일 수 범위. 상한은 GRIMOIRE_COCHANGE_MAX_FILES로 바꿀 수 있다 —
+ * 기능 하나를 큰 커밋으로 넣는 레포(파일 10개 초과가 보통)에서는 20~30으로 올려야 신호가 생긴다. 바꾼 뒤 `grimoire sync`가 다시 집계한다.
+ */
 export const COCHANGE_MIN_FILES = 2;
-export const COCHANGE_MAX_FILES = 10;
+export const COCHANGE_MAX_FILES = Math.min(60, Math.max(COCHANGE_MIN_FILES, Number.parseInt(process.env.GRIMOIRE_COCHANGE_MAX_FILES ?? "", 10) || 10));
 /** 공변경 집계에 넣는 커밋 수 상한 (레포당, 최신부터) */
 export const COCHANGE_HISTORY = 15_000;
 /** related에 쓰는 신뢰도·지지도 문턱 */

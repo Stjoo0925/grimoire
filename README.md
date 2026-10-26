@@ -15,6 +15,8 @@ The goal is to let the AI point at the right file and commit with a single searc
 - **Incremental sync**: only new commits and changed files are read. Syncs in the background when the MCP server starts
 - Korean queries reach English identifiers: common dev terms are expanded to English ("충돌" → `conflict`, "횟수 제한" → `rate limit`)
 - Responses are kept minimal, because whatever lands in the conversation context is what you pay for
+- **Before you edit** (Claude Code hooks, opt-in): the file's recent commits, the *why* bound to them, the files and tests that usually change with it, in 5 lines, once per file per session
+- **The why, bound to the commit**: commit trailers (`Constraint:`, `Rejected:`, `Tested:`, `Why:`…) and, with hooks on, the prompt you gave the agent, the checks it ran and the edits it dropped, all attached to the sha and searchable in your own words
 - No LLM, no embedding model, no GPU: search is keyword-based (SQLite FTS5) and the AI you already use does the reading
 
 See [docs/PLANNING.md](./docs/PLANNING.md) (Korean) for the design and what changed from earlier versions, [docs/improvement-plan.md](./docs/improvement-plan.md) (Korean) for the research-based roadmap, and [docs/enhancement-plan.md](./docs/enhancement-plan.md) (Korean) for the core value and the plan to make it useful during agent coding (commit-bound "why", edit-time hooks, co-change, task benchmark).
@@ -46,7 +48,7 @@ To run from source, clone it and run `npm install && npm run build && npm link`.
 - The config contains the **absolute path of the node currently running**. GUI apps like Claude Desktop and Cursor
   don't see your shell's PATH, so `"command": "node"` fails with `spawn node ENOENT`. If you switch
   node versions, run `install` again so the config points at the node you use now.
-- If `GRIMOIRE_HOME`, `GRIMOIRE_ME`, `GRIMOIRE_AUTO_ADD` or `GRIMOIRE_UPDATE_CHECK` are set, they are written too,
+- If `GRIMOIRE_HOME`, `GRIMOIRE_ME`, `GRIMOIRE_AUTO_ADD`, `GRIMOIRE_UPDATE_CHECK`, `GRIMOIRE_CAPTURE` or `GRIMOIRE_COCHANGE_MAX_FILES` are set, they are written too,
   so the CLI and MCP server see the same DB.
 - Other server entries are left alone; only the `grimoire` entry is added. The existing file is backed up as `.bak`,
   and if its JSON is broken Grimoire stops without touching it. Add `--dry-run` to preview what would be written.
@@ -78,7 +80,8 @@ The `add_repo` tool registers right from the conversation ("remember every repo 
 | Tool | What it does |
 |---|---|
 | `search_memory` | Searches current code files, commits and notes at once. Filters: `repo`, `author` (`me`), `since`, `until`, `kind` (`file`, `commit`, `note`), `limit` (default 8). `detail`: `index` (default, a compact list), `summary` (on request: the top 3 commits also carry their full message and the functions they changed), `full` (also the top commit's diff) |
-| `show_commit` | Message, changed files and diff of a commit (read straight from the local repo). The diff defaults to 120 lines; `paths` narrows it to specific files. `shas` (up to 5) returns several commits in one call, 40 diff lines each by default |
+| `show_commit` | Message, changed files and diff of a commit (read straight from the local repo). The diff defaults to 120 lines; `paths` narrows it to specific files. `shas` (up to 5) returns several commits in one call, 40 diff lines each by default. Carries `why` (prompts, checks, dropped edits, trailers) when the commit has any |
+| `file_context` | What to know before editing a file: its recent commits, the `why` bound to them, files and tests that usually change with it (co-change mined from history, plus name-matched tests), who imports it, and whether it has had many fixes lately. Candidates to check, not instructions. Returns only `recent` and `worth: false` when there is nothing more to say |
 | `get_repo_overview` | Tech stack (from manifests), quarterly activity, most-touched directories, top authors, recent notable commits |
 | `list_repos` | Indexed repos |
 | `add_repo` | Register + index a repo (or, with `scan: true`, every repo under a folder). Scanning `/` or your whole home goes through `grimoire scan` in the terminal |
@@ -86,8 +89,43 @@ The `add_repo` tool registers right from the conversation ("remember every repo 
 
 Responses are minimal to save tokens: 10-char shas, dates to the day, `me` for your own commits, and the commit link prefix per repo (`links`) sent only once.
 Fields the answer doesn't need (local paths, scores, emails) are dropped. Tool descriptions are short English and only say *when* to use each tool, since tool definitions ride along with every request in every session where the server is on. Read-only tools carry `readOnlyHint`, and `add_repo` carries `idempotentHint`, so clients can tell which calls are safe.
-What piles up in the conversation context is the cost. The "response size budget" step in `npm run e2e` (260 chars per search hit, 2600 chars of tool definitions, 420 chars of description text) keeps the format from growing back.
+What piles up in the conversation context is the cost. The "response size budget" step in `npm run e2e` (260 chars per search hit, 2600 chars of tool definitions, 500 chars of description text) keeps the format from growing back.
 The CLI shows the full, unslimmed results.
+
+### Before you edit — Claude Code hooks (opt-in)
+
+The agent never asks what it doesn't know it's missing. With hooks installed, Grimoire tells it at the only moment that matters — right before it edits a file:
+
+```bash
+grimoire install claude-code --hooks          # writes hooks into ~/.claude/settings.json (other hooks are kept, .bak backup)
+grimoire install claude-code --remove-hooks   # takes them out again
+grimoire context src/core/search.ts           # the same card in the terminal
+```
+
+What the `PreToolUse` hook injects (one fact per line, 400 chars at most, measured 247 chars / 49 ms):
+
+```
+Grimoire: src/core/search.ts
+Recent: a1b2c3d4e5 10-25 me "perf: faster rerank" · f6e5d4c3b2 10-23 me "feat(search): exact identifiers"
+Why (a1b2c3d4e5): "search got slow, get p95 under 20ms" · verified: npm run eval
+Co-changes: src/core/db.ts (4/5, strong, imports) · src/mcp/tools.ts (3/5)
+Tests: tests/search.test.ts
+```
+
+- Only for files in a registered repo, only source files, **once per file per session** (again after HEAD changes). If the history has nothing beyond "recent commits" it says nothing at all — reading the file tells the agent that much already.
+- `Co-changes` are mined from history as association rules over commits (merge and >10-file commits excluded, confidence ≥ 0.5 as a filter, most recent first, incremental on every sync). Set `GRIMOIRE_COCHANGE_MAX_FILES=20` (then `grimoire sync`) for repos whose commits routinely touch more than 10 files. `Tests` are name-matched pairs first (`foo.ts` ↔ `foo.test.ts`, `test_foo.py`, `foo_test.go`), then tests that change together with the file. `Fixes(90d)` appears only when 2+ fix commits make up 30%+ of the file's recent commits, with the shas.
+- `SessionStart` (startup, clear, compact) adds a 600-char summary: your last 3 commits here with their *why*, and files edited but never committed in earlier sessions.
+- The **first failing check** in a session (a failing `npm test`, `pytest`, …) triggers one more hook message: what past commits on the files you're editing recorded — their why, what verified them, what was edited then dropped, `Rejected:`/`Constraint:` trailers. Once per session; sessions that never get stuck pay nothing.
+- The hook is a separate light entry point (`dist/hook.js`), always exits 0, logs errors to `~/.grimoire/hook.log`, and never syncs. `GRIMOIRE_HOOKS=0` turns injection off; `grimoire doctor` checks the hook entry.
+
+### The why, bound to the commit
+
+A commit records *what* changed. The reason — what you asked for, what you tried and threw away, how you checked it — disappears when the chat window closes. Grimoire attaches it to the sha two ways, so that later you find the commit with the words you used at the time (search results carry a one-line `why`, `show_commit` the full record):
+
+1. **Commit trailers, no hooks needed.** The last paragraph of a commit message in `Key: value` form is parsed the way `git interpret-trailers` does: Lore (`Constraint`, `Rejected: alternative | reason`, `Directive`, `Tested`, `Not-tested`, …), QAC (`Agent`, `Mode`, `What`, `Why`) and platform trailers (`Claude-Session`, `Agent-Logs-Url`, `Co-Authored-By`, …). Values are free text; unknown keys are kept. `Co-Authored-By: Claude…`, `Claude-Session`, `Agent-Logs-Url` or `Agent:` mark the commit as agent-made. Older databases are back-filled once per repo on the next sync.
+2. **Session capture, with hooks on.** `UserPromptSubmit` stores your prompt (not slash commands, not subagents' prompts); `PostToolUse` stores test/lint/typecheck commands with their outcome and the line hashes of each edit. When a `git commit` succeeds, everything since the previous commit is bound to the new sha: prompts (up to 10, 1,000 chars each), checks (up to 20), and *dropped* files — edited in the session but with none of those lines in the commit. The commit is indexed immediately; no need to wait for the next sync.
+
+Privacy: capture is on only when you installed the hooks (`GRIMOIRE_CAPTURE=0` turns it off while keeping injection). Before anything is stored, `<private>…</private>` blocks, pasted content, API tokens/keys/JWTs and `password=…`-style values are replaced with `[redacted]`. Tool output is never stored except the last 300 chars of a failing check. Records that never get bound to a commit are deleted after 14 days. Everything stays in your local SQLite file — nothing is written into git.
 
 ### Current code index
 
@@ -125,9 +163,11 @@ grimoire search "동시성 락" --author me --since 2024-01-01
 grimoire show 2518bf75                         # commit message + files + diff (120 lines by default)
 grimoire show 2518bf75 --path route.ts         # diff of files whose path partly matches (--lines n for more)
 grimoire overview please_readme                # tech stack, activity, hot spots, recent notable commits
+grimoire context src/core/search.ts            # before editing: recent commits, why, co-changed files/tests, importers
 grimoire note "Decision: JWT over sessions — because of mobile" --repo shop-api --tag decision
 grimoire remove shop-api                       # delete a repo and its index
 grimoire update                                # move to the latest release (see Updating)
+grimoire install claude-code --hooks           # context before edits + session capture (see above)
 ```
 
 All data lives in a single `~/.grimoire/grimoire.db` (SQLite). Change the location with `GRIMOIRE_HOME`.
@@ -186,13 +226,17 @@ npm test            # indexing, search and MCP tools against temp git repos (no 
 npm run e2e         # end-to-end MCP harness (below)
 npm run e2e:agent   # agent harness (below, calls real Claude)
 npm run bench       # pinpoint benchmark (below, calls real Claude)
+npm run taskbench   # task benchmark: with vs without Grimoire on real fix tasks (below, calls real Claude)
+npm run eval -- --cochange   # offline: does co-change predict the files that change together? (time split)
 ```
 
 ### End-to-end MCP harness (`e2e/harness.ts`)
 
-Starts the server **as a separate process over stdio**, like a real client, and runs a 14-step scenario against fixed fixture repos:
+Starts the server **as a separate process over stdio**, like a real client, and runs a 20-step scenario against fixed fixture repos:
 connect in a GUI-app environment (minimal PATH, cwd `/`) → empty-DB hint → `add_repo` scan → Korean search with evidence → response size budget →
-author filter → diff and `paths`-narrowed diff → overview → notes → error handling → background sync on restart → no stdout pollution.
+author filter → diff and `paths`-narrowed diff → overview → notes → error handling → background sync on restart → workspace auto-registration →
+the `PreToolUse` hook (silent when there is nothing to say, co-changes after three coupled commits, once per session, broken stdin, latency) →
+session capture bound to a commit and found again by the prompt's words → no stdout pollution.
 
 ```bash
 npm run e2e                                    # the built dist/cli.js
@@ -213,6 +257,7 @@ Gives real Claude (`claude -p`) **only a question** and scores whether it picks 
 | `onboarding` | Starting from an empty DB, registers repos with `add_repo` on its own, then searches and cites the right sha |
 | `recall` | States the right sha, the fix (Redis) and the author (a teammate's commit) correctly |
 | `no-memory` | Asked about something not in memory, says so instead of inventing a commit |
+| `cochange` | Built-in tools on, inside a repo where `refresh.ts` and `session.ts` always change together: asked to change only `refresh.ts`, does it mention or check `session.ts`? Run with `--no-hooks` for the control group |
 
 ```bash
 npm run e2e:agent                     # all three cases (about $0.2 per run)
@@ -244,6 +289,19 @@ npm run bench -- --questions bench/questions.local.json --modes grimoire --only 
   An answer counts as correct when it contains every string in `expect`.
 - Questions are about your own repos, so keep them as `bench/*.local.json`; results go to `bench/results/<timestamp>.json`. Neither is committed to git.
 - `grimoire` mode freshly indexes the repos under `root` into a temp DB. Your real `~/.grimoire` is never touched.
+
+### Task benchmark (`e2e/taskbench.ts`)
+
+The pinpoint benchmark asks "can it name the sha". This one asks what the plan is actually about: **does an agent fix a real bug cheaper, with fewer regressions, when Grimoire is there?** (docs/enhancement-plan.md §3-4)
+
+```bash
+npm run taskbench -- --mine --repo ~/work/foo --test "npm test" --limit 40     # mine fail-to-pass fix commits → bench/tasks.local.json
+npm run taskbench -- --run --tasks bench/tasks.local.json --seeds 3             # bare vs grimoire, paired
+```
+
+- **Mining** keeps a fix commit only if the test patch alone fails on the parent (3 runs) and the whole commit passes (3 runs) — flaky tests are dropped. Filters: non-merge, 1–15 files, ≥1 test file and ≥1 source file, ≤100 non-test lines, no dependency-file changes. Expect roughly 5–10% of test-touching commits to qualify. Then edit each task's `prompt` into a symptom description (the default is the commit subject, which may leak the fix).
+- **Running** gives `claude -p --bare` the prompt in a fresh worktree at the parent commit. In `grimoire` mode the temp index sees only commits up to the parent (time masking) and the edit-time hook is passed via `--settings`. Scoring applies the real test patch (`pass`), then the parent's tests (`p2p_broken`), and compares edited files with the real fix (`stray`, `missed`), plus billed cost from `total_cost_usd`/`modelUsage`, turns, reverted edits and churn ratio.
+- The summary pairs runs per task and seed; cost and turns are compared on pairs both modes solved (`_ok`), with a Wilcoxon signed-rank p. The acceptance criteria are fixed before looking (§3-4): pass rate not lower, no more regressions, and billed cost or turns down 15%+ or `missed`/`p2p_broken` significantly down. Budget: about $0.5–1.5 per run; pilot with 10 tasks × 1 seed first.
 
 ### Cutting a release
 

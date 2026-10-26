@@ -53,6 +53,10 @@ Grimoire는 내 컴퓨터에 있는 git 레포를 인덱싱해, Claude Code·Cur
 | `notes` | 대화 중 기록한 노트 (MCP `record_note`, CLI `note`) |
 | `docs` + `docs_fts` | 검색 단위(커밋·노트)와 FTS5 색인 |
 | `code_files` | HEAD의 소스 파일별 심볼(줄 번호)·머리 주석 — 현재 코드 핀포인트 |
+| `cochange` + `file_touches` | 같이 바뀐 파일 쌍(방향 있음, 지지도·마지막 시각)과 그 집계에 든 커밋 수 — "A를 고치면 보통 B도" (context.ts) |
+| `file_imports` | 레포 안 상대 import 그래프 — "누가 나를 쓰나" |
+| `session_events` | 훅이 모은 임시 기록(프롬프트·검증·편집 줄 해시), 커밋에 묶이면 아래로, 14일 뒤 삭제 (capture.ts) |
+| `commit_context` | 커밋에 묶인 왜·검증·버린 편집·트레일러. 커밋 doc 본문에 `[why]`로 재색인돼 그 말로 검색된다 |
 
 ## 4. 검색
 
@@ -67,7 +71,8 @@ Grimoire는 내 컴퓨터에 있는 git 레포를 인덱싱해, Claude Code·Cur
 | 도구 | 하는 일 |
 |---|---|
 | `search_memory` | 과거 커밋·노트 검색 → 근거 목록(레포·sha·날짜·작성자·변경 파일·링크) |
-| `show_commit` | 커밋 하나의 전체 메시지 + 변경 파일 + diff(로컬 레포에서, 길이 제한) |
+| `show_commit` | 커밋 하나의 전체 메시지 + 변경 파일 + diff(로컬 레포에서, 길이 제한) + 묶인 왜 |
+| `file_context` | 파일을 고치기 전에 볼 것 — 최근 커밋·왜·같이 바뀌는 파일/테스트·import하는 파일·취약도 (훅·CLI와 같은 코어) |
 | `get_repo_overview` | 레포의 기술 스택·활동 기간·많이 건드린 디렉터리·최근 주요 커밋 |
 | `list_repos` | 인덱싱된 레포 목록과 커밋 수 |
 | `add_repo` | 대화 중 레포(또는 폴더 아래 레포 전부) 등록 + 인덱싱 |

@@ -330,6 +330,8 @@ ALTER TABLE commits ADD COLUMN agent_signal TEXT;   -- 에이전트 커밋 판�
 
 각 단계는 이전 단계가 통과해야 들어간다. P2의 0단계(트레일러 파싱)는 P1 없이도 가치가 있으므로 P1이 실패하면 먼저 한다.
 
+**구현 기록 (2026-10-26, v0.7.0)**: P0~P4를 구현했다 — `src/core/context.ts`(공변경·import·테스트 짝·취약도·`fileContext`), `src/hook.ts`·`src/hook/runner.ts`(PreToolUse 주입, 캡처, SessionStart 요약, 막혔을 때 2단계), `src/core/trailers.ts`·`capture.ts`·`redact.ts`, `src/setup/hooks.ts`(`install --hooks`), `e2e/taskbench.ts`. 훅 실측 247자·49ms. 단위 테스트 64개, e2e 20단계. **P3의 유료 A/B 실행은 아직 하지 않았다** — 하네스와 채굴은 픽스처로 검증했고, 자기 레포 사례 40개 × 3시드는 비용($120~360)이 들어 따로 결정한다. 플러그인·Codex 패키징은 미착수.
+
 ## 6. 하지 않을 것과 한계
 
 - **임베딩·형태소 분석기**: §9-4 결정 유지. 3-3이 들어오면 질문의 말과 색인의 말이 같아져 의미 검색의 필요가 더 줄어든다. 하네스 11개 조사의 권고도 "코드에 RAG를 만들지 마라, ripgrep+FTS5보다 낫다는 것을 먼저 증명하라"였다.

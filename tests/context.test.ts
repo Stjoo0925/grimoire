@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import { test } from "node:test";
 
 import {
@@ -12,7 +13,7 @@ import {
   rebuildCochange,
   HOOK_BUDGET,
 } from "../src/core/context";
-import { addRepo, syncRepo } from "../src/core/indexer";
+import { addRepo, relativeToRepo, syncRepo } from "../src/core/indexer";
 import { callTool } from "../src/mcp/tools";
 import { addCommit, makeRepo, memoryDb, type FakeCommit } from "./helpers";
 
@@ -181,4 +182,11 @@ test("evaluateCochange: 시간 분할 평가가 돌고 표를 원상복구한다
   assert.ok(evaluated && evaluated.queries > 0, JSON.stringify(evaluated));
   assert.equal(evaluated!.l3, 1, "뒷부분 커밋은 전부 search↔db라 L3=1");
   assert.equal(cochangeOf(db, repo.id, "src/search.ts").find((item) => item.path === "src/db.ts")?.support, (before ?? 0) + 4);
+});
+
+test("relativeToRepo: 레포 안 Claude Code worktree의 파일은 레포 기준 경로로", () => {
+  const repo = path.resolve(path.sep, "w", "grimoire");
+  assert.equal(relativeToRepo(repo, path.join(repo, "src", "a.ts")), "src/a.ts");
+  assert.equal(relativeToRepo(repo, path.join(repo, ".claude", "worktrees", "x-1", "src", "a.ts")), "src/a.ts");
+  assert.equal(relativeToRepo(repo, "src/b.ts"), "src/b.ts");
 });

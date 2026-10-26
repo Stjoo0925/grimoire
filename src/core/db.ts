@@ -79,12 +79,14 @@ export class DB {
   /**
    * fn을 트랜잭션으로 감싼 함수를 돌려준다. 던지면 되돌린다.
    * 트랜잭션 안에서 또 부르면 SAVEPOINT로 안쪽만 되돌릴 수 있게 한다.
+   * 바깥 트랜잭션은 BEGIN IMMEDIATE — 쓰기 잠금을 시작할 때 busy_timeout만큼 기다려 얻는다.
+   * 지연 모드(BEGIN)는 읽다가 쓰기로 올라갈 때 다른 프로세스와 부딪히면 기다리지 않고 바로 실패한다.
    */
   transaction<T>(fn: () => T): () => T {
     return () => {
       const name = `grimoire_${this.depth}`;
       const nested = this.depth > 0;
-      this.raw.exec(nested ? `SAVEPOINT ${name}` : "BEGIN");
+      this.raw.exec(nested ? `SAVEPOINT ${name}` : "BEGIN IMMEDIATE");
       this.depth++;
       let result: T;
       try {
@@ -255,6 +257,8 @@ function migrate(db: DB): void {
   const current = db.pragma("user_version") as number;
   for (let version = current; version < MIGRATIONS.length; version++) {
     db.transaction(() => {
+      // 첫 실행에서 두 프로세스가 동시에 열면, 잠금을 기다리는 사이 다른 쪽이 이 단계를 끝냈을 수 있다
+      if ((db.pragma("user_version") as number) > version) return;
       db.exec(MIGRATIONS[version]);
       db.pragma(`user_version = ${version + 1}`);
     })();
@@ -310,6 +314,13 @@ export function deleteDoc(db: DB, kind: string, ref: string, repoId: number | nu
 }
 
 /** 레포를 지우면 docs는 CASCADE로 지워지지만 FTS 가상 테이블은 따로 정리해야 한다. */
+/** 다른 연결(다른 grimoire 프로세스)이 쓰기 잠금을 쥐고 있어 busy_timeout 안에 못 얻은 실패인가 */
+export function isBusyError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const code = (error as { code?: unknown }).code;
+  return code === "ERR_SQLITE_ERROR" && /locked|busy/i.test(error.message);
+}
+
 export function pruneOrphanFts(db: DB): void {
   db.exec("DELETE FROM docs_fts WHERE rowid NOT IN (SELECT id FROM docs)");
 }

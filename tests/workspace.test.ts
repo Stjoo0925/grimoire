@@ -4,10 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 
-import { addRepo, listRepos, syncRepo } from "../src/core/indexer";
+import { addRepo, listRepos, syncRepo, type RepoRow } from "../src/core/indexer";
 import { search } from "../src/core/search";
 import { callTool, emptyHint } from "../src/mcp/tools";
-import { isTempPath, resolveWorkspaceRoot, startWorkspace, waitForWorkspace } from "../src/mcp/workspace";
+import { isTempPath, resolveWorkspaceRoot, startWorkspace, waitForWorkspace, type Workspace } from "../src/mcp/workspace";
 import { makeRepo, memoryDb } from "./helpers";
 
 const quiet = () => undefined;
@@ -109,4 +109,22 @@ test("MCP: 작업 레포가 current로 표시되고, 자동 등록을 끈 채 �
   const listed = (await callTool(onContext, "list_repos")) as { current?: string; repos: unknown[] };
   assert.equal(listed.current, "app");
   assert.equal(listed.repos.length, 2);
+});
+
+test("waitForWorkspace: 한 번 시간을 넘기면 첫 인덱싱이 끝날 때까지 다시 기다리지 않는다", async () => {
+  let release: (repo: RepoRow) => void = () => undefined;
+  const pending = new Promise<RepoRow>((resolve) => (release = resolve));
+  const workspace: Workspace = { root: "/x", disabled: false, begin: () => pending };
+
+  let started = Date.now();
+  assert.equal(await waitForWorkspace(workspace, 100), null);
+  assert.ok(Date.now() - started >= 90);
+  started = Date.now();
+  assert.equal(await waitForWorkspace(workspace, 5_000), null);
+  assert.ok(Date.now() - started < 50, `두 번째 호출이 ${Date.now() - started}ms 기다렸습니다`);
+
+  const repo = { id: 1, path: "/x", name: "x", remote_url: null, added_at: "", synced_at: null };
+  release(repo);
+  await pending;
+  assert.equal(await waitForWorkspace(workspace, 5_000), repo);
 });

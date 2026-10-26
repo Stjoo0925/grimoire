@@ -46,7 +46,7 @@ grimoire doctor                       # 연결 상태 점검
 - 설정에는 **지금 실행 중인 node의 절대경로**가 들어갑니다. Claude Desktop·Cursor 같은 GUI 앱은 셸의 PATH를
   모르기 때문에 `"command": "node"`로 적으면 `spawn node ENOENT`로 연결이 안 됩니다. node 버전을
   바꿨다면 설정이 지금 쓰는 node를 가리키도록 `install`을 다시 하세요.
-- `GRIMOIRE_HOME`·`GRIMOIRE_ME`·`GRIMOIRE_AUTO_ADD`·`GRIMOIRE_UPDATE_CHECK`를 설정해 둔 상태라면 그 값도 같이 적혀,
+- `GRIMOIRE_HOME`·`GRIMOIRE_ME`·`GRIMOIRE_AUTO_ADD`·`GRIMOIRE_SYNC_ON_START`·`GRIMOIRE_UPDATE_CHECK`를 설정해 둔 상태라면 그 값도 같이 적혀,
   CLI와 MCP가 같은 DB를 보게 됩니다.
 - 다른 서버 항목은 그대로 두고 `grimoire` 항목만 넣습니다. 기존 파일은 `.bak`으로 백업하고, JSON이 깨져 있으면
   건드리지 않고 멈춥니다. 무엇을 쓸지 먼저 보려면 `--dry-run`을 붙이세요.
@@ -81,7 +81,7 @@ Grimoire가 **서버를 띄울 때 바로 등록하고, 다른 레포보다 먼�
 | `show_commit` | 커밋의 메시지·변경 파일·diff (로컬 레포에서 직접 읽음). diff는 기본 120줄이고, `paths`로 특정 파일만 볼 수 있음. `shas`(최대 5개)로 여러 커밋을 한 번에 받음(커밋당 diff 기본 40줄) |
 | `get_repo_overview` | 기술 스택(매니페스트 기준)·분기별 활동·많이 건드린 디렉터리·주요 작성자·최근 주요 커밋 |
 | `list_repos` | 인덱싱된 레포 목록 |
-| `add_repo` | 레포(또는 `scan: true`로 폴더 아래 레포 전부) 등록 + 인덱싱. 루트·홈 전체 스캔은 터미널의 `grimoire scan`으로 |
+| `add_repo` | 레포(또는 `scan: true`로 폴더 아래 레포 전부) 등록 + 인덱싱. 루트·루트 바로 아래 폴더·홈과 그 상위, 레포가 50개를 넘는 폴더의 스캔은 터미널의 `grimoire scan`으로 |
 | `record_note` | 대화 중 배운 것·결정을 노트로 저장 → 이후 검색 대상 |
 
 응답은 토큰을 아끼도록 최소 형태로 보냅니다. sha는 10자, 날짜는 일까지, 작성자는 내 커밋이면 `me`로 표시하고, 커밋 링크는 레포별 접두(`links`)를 한 번만 보냅니다.
@@ -176,6 +176,7 @@ grimoire update --dry-run  # 무엇을 실행할지만 보기
 - Grimoire가 외부로 보내는 요청은 하루 한 번의 업데이트 확인(GitHub API에 최신 릴리스 버전 조회)뿐입니다. 레포·커밋·질의 내용은 보내지 않으며, `GRIMOIRE_UPDATE_CHECK=0`으로 끌 수 있습니다.
 - **MCP로 외부 LLM 클라이언트에 연결하면 질의 결과(커밋 메시지·파일 경로·diff)는 그 LLM에 전달됩니다.**
   민감한 레포는 등록하지 말거나 `grimoire remove <repo>`로 빼세요.
+- macOS·Linux에서는 DB를 나만 읽을 수 있게(`chmod 600`) 만듭니다. Windows에서는 chmod가 의미 없어 사용자 프로필(`%USERPROFILE%\.grimoire`)의 NTFS 권한에 기대므로, `GRIMOIRE_HOME`을 공유 폴더로 지정하지 마세요.
 
 ## 개발
 

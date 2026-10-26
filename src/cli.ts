@@ -23,7 +23,7 @@ import { dbPath } from "./core/config";
 import { openDb, type DB } from "./core/db";
 import { myEmails, resolveAuthors } from "./core/identity";
 import { indexCommitCode } from "./core/diffs";
-import { addRepo, discoverRepos, findRepo, listRepos, removeRepo, syncRepo, type RepoRow } from "./core/indexer";
+import { addRepo, discoverRepos, listRepos, matchRepos, removeRepo, syncRepo, type RepoRow } from "./core/indexer";
 import { addNote } from "./core/notes";
 import { commitDetail, repoOverview, repoSummaries } from "./core/overview";
 import { search } from "./core/search";
@@ -134,7 +134,7 @@ async function main(argv: string[]): Promise<number> {
         print("");
         print(detail.patch ?? detail.patchNote ?? "");
         if (detail.patchTruncated) {
-          print(`… (diff ${detail.patchLines}줄 중 일부만 표시 — --lines로 늘리거나 --path로 파일을 고르세요)`);
+          print(`… (diff가 ${detail.patchLines - 1}줄보다 길어 일부만 표시 — --lines로 늘리거나 --path로 파일을 고르세요)`);
         }
         return 0;
       }
@@ -189,11 +189,23 @@ async function cmdInstall(client: string | undefined, project: string | undefine
     if (dryRun) {
       print(`[dry-run] ${target}에 다음을 넣습니다:`);
       print(result.command ?? JSON.stringify({ mcpServers: { grimoire: result.spec } }, null, 2));
+      if (result.permissions) {
+        print(
+          result.permissions.added.length > 0
+            ? `[dry-run] ${result.permissions.file}의 permissions.allow에 더합니다: ${result.permissions.added.join(", ")}`
+            : `[dry-run] ${result.permissions.file}: 읽기 도구 권한이 이미 있습니다`,
+        );
+      }
       return 0;
     }
     print(result.unchanged ? `이미 같은 설정입니다: ${target}` : `✓ ${client}에 등록했습니다: ${target}`);
     if (result.command) print(`  실행: ${result.command}`);
     if (result.backup) print(`  이전 설정 백업: ${result.backup}`);
+    if (result.permissions) {
+      const { file, added, backup } = result.permissions;
+      print(added.length > 0 ? `  읽기 도구 승인 생략: ${file}에 ${added.length}개 추가` : `  읽기 도구 권한: 이미 있음 (${file})`);
+      if (backup) print(`  이전 설정 백업: ${backup}`);
+    }
     print(`  node: ${result.spec.command}`);
     print(`  다음: ${result.next}`);
     print("  확인: grimoire doctor");
@@ -294,9 +306,12 @@ function need(value: string | undefined, what: string): string {
 }
 
 function requireRepo(db: DB, query: string): RepoRow {
-  const repo = findRepo(db, query);
-  if (!repo) throw new UsageError(`레포를 찾지 못했습니다: ${query} (grimoire repos로 확인)`);
-  return repo;
+  const matches = matchRepos(db, query);
+  if (matches.length === 0) throw new UsageError(`레포를 찾지 못했습니다: ${query} (grimoire repos로 확인)`);
+  if (matches.length > 1) {
+    throw new UsageError(`'${query}'와 맞는 레포가 여럿입니다: ${matches.map((repo) => repo.name).join(", ")} — 정확한 이름을 주세요`);
+  }
+  return matches[0];
 }
 
 function toInt(value: string | undefined): number | undefined {

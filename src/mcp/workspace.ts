@@ -40,6 +40,14 @@ export interface Workspace {
 /** 작업 레포 재동기화 간격 — 검색마다 git을 부르지 않게 */
 export const REFRESH_INTERVAL_MS = 15_000;
 
+/** 뒤에서 도는 작업을 서버가 종료 때 기다리고 멈출 수 있게 (server.ts) */
+export interface Background {
+  /** 서버 종료 신호 — 한 요청의 취소가 아니라 프로세스가 끝날 때만 취소된다 */
+  signal?: AbortSignal;
+  /** 진행 중인 작업으로 등록한다 (끝나면 저절로 빠진다) */
+  track?: (job: Promise<unknown>) => void;
+}
+
 /**
  * native는 Windows의 8.3 짧은 이름(C:\Users\RUNNER~1\…)까지 긴 이름으로 푼다 — git이 돌려주는 최상위 경로와 같은 꼴이 된다.
  * JS판 realpathSync는 심볼릭 링크만 풀고 짧은 이름은 그대로 둔다.
@@ -76,19 +84,29 @@ export async function resolveWorkspaceRoot(cwd: string, env: Env = process.env):
   return resolved;
 }
 
-export function startWorkspace(db: DB, root: string | null, env: Env, log: (line: string) => void): Workspace {
+export function startWorkspace(
+  db: DB,
+  root: string | null,
+  env: Env,
+  log: (line: string) => void,
+  background: Background = {},
+): Workspace {
   const disabled = env.GRIMOIRE_AUTO_ADD === "0";
   let started: Promise<RepoRow | null> | null = null;
   let lastSync = 0;
+  const { signal, track } = background;
 
   const sync = (repo: RepoRow) => {
     lastSync = Date.now();
-    return syncRepo(db, repo).then(
+    const job = syncRepo(db, repo, signal).then(
       (result) => {
         if (result.added > 0 || result.files > 0) log(`${repo.name}: 새 커밋 ${result.added}개, 바뀐 파일 ${result.files}개`);
         // 새 커밋의 diff 식별자는 뒤에서 채운다 — 검색은 기다리지 않는다
         if (result.added > 0) {
-          indexCommitCode(db, repo).catch((error) => log(`${repo.name} diff 색인 실패 — ${error instanceof Error ? error.message : error}`));
+          const diff = indexCommitCode(db, repo, signal).catch((error) =>
+            log(`${repo.name} diff 색인 실패 — ${error instanceof Error ? error.message : error}`),
+          );
+          track?.(diff);
         }
         return repo;
       },
@@ -97,6 +115,8 @@ export function startWorkspace(db: DB, root: string | null, env: Env, log: (line
         return repo;
       },
     );
+    track?.(job);
+    return job;
   };
 
   const run = (): Promise<RepoRow | null> => {
@@ -106,7 +126,7 @@ export function startWorkspace(db: DB, root: string | null, env: Env, log: (line
       void sync(known);
       return Promise.resolve(known);
     }
-    return addRepo(db, root).then(
+    return addRepo(db, root, signal).then(
       (repo) => {
         log(`작업 중인 프로젝트를 등록합니다: ${repo.name} (${root})`);
         return sync(repo);
@@ -137,15 +157,43 @@ export function startWorkspace(db: DB, root: string | null, env: Env, log: (line
   };
 }
 
-/** 시작시키고 기다린다 — 첫 인덱싱이 오래 걸려도 질의를 무한정 붙잡지 않는다 */
+/** 작업 레포별 기다림 상태 — 한 번 시간을 넘겼으면 첫 인덱싱이 끝날 때까지 다시 기다리지 않는다 */
+interface WaitState {
+  settled: boolean;
+  value: RepoRow | null;
+  gaveUp: boolean;
+}
+const waits = new WeakMap<Workspace, WaitState>();
+
+/**
+ * 시작시키고 기다린다 — 첫 인덱싱이 오래 걸려도 질의를 무한정 붙잡지 않는다.
+ * 한 번 timeoutMs를 넘겼으면 그 뒤 호출은 기다리지 않고 곧바로 null이다(호출마다 15초씩 늦어지지 않게).
+ * begin()이 실제로 풀리면 그때부터 다시 그 레포를 돌려준다.
+ */
 export async function waitForWorkspace(workspace: Workspace | undefined, timeoutMs: number): Promise<RepoRow | null> {
   if (!workspace) return null;
+  let state = waits.get(workspace);
+  const begun = workspace.begin();
+  if (!state) {
+    const created: WaitState = { settled: false, value: null, gaveUp: false };
+    waits.set(workspace, created);
+    begun.then(
+      (value) => Object.assign(created, { settled: true, value }),
+      () => Object.assign(created, { settled: true, value: null }),
+    );
+    state = created;
+  }
+  if (state.settled) return state.value;
+  if (state.gaveUp) return null;
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<null>((resolve) => {
-    timer = setTimeout(() => resolve(null), timeoutMs);
+    timer = setTimeout(() => {
+      state.gaveUp = true;
+      resolve(null);
+    }, timeoutMs);
   });
   try {
-    return await Promise.race([workspace.begin(), timeout]);
+    return await Promise.race([begun, timeout]);
   } finally {
     clearTimeout(timer);
   }

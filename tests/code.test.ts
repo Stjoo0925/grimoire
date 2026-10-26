@@ -36,6 +36,40 @@ test("extractSymbols: 언어별 선언과 라우트를 줄 번호와 함께", ()
   ]);
 });
 
+test("extractSymbols: 공백만 긴 줄에서 정규식이 폭주하지 않고, 수정자 붙은 선언은 그대로 뽑는다", () => {
+  // 예전 Java·Kotlin 패턴은 공백 399자 줄 하나에 ~10ms(O(n³) 백트래킹)였다 — 400줄이면 4초
+  for (const tail of ["", "x", "{"]) {
+    const content = Array.from({ length: 400 }, () => " ".repeat(399) + tail).join("\n");
+    const started = performance.now();
+    assert.deepEqual(extractSymbols(content), []);
+    const ms = performance.now() - started;
+    assert.ok(ms < 200, `공백 줄 400개(${JSON.stringify(tail)})에 ${Math.round(ms)}ms`);
+  }
+  assert.deepEqual(
+    extractSymbols(
+      [
+        "public final class OrderService {",
+        "  private static  final class Inner {}",
+        "data class Point(val x: Int)",
+        "    override suspend fun load() {}",
+        "fun main() {}",
+        "internal object Registry",
+        "export default async function* stream() {}",
+        "function * gen() {}",
+      ].join("\n"),
+    ),
+    [
+      { name: "OrderService", line: 1 },
+      { name: "Inner", line: 2 },
+      { name: "Point", line: 3 },
+      { name: "load", line: 4 },
+      { name: "Registry", line: 6 },
+      { name: "stream", line: 7 },
+      { name: "gen", line: 8 },
+    ],
+  );
+});
+
 test("splitIdentifier / headerComment / isIndexable", () => {
   assert.equal(splitIdentifier("requireFirestoreRateLimit"), "require firestore rate limit");
   assert.equal(splitIdentifier("services/api/conflict-resolver.ts"), "services api conflict resolver ts");

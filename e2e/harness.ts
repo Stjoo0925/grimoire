@@ -19,8 +19,11 @@ import { addCommit, tempDir } from "../tests/helpers";
 
 import { makeFixture, ME } from "./fixture";
 
-/** GUI 앱(Claude Desktop·Cursor)이 MCP 서버에 넘기는 수준의 PATH */
-const GUI_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
+/**
+ * GUI 앱(Claude Desktop·Cursor)이 MCP 서버에 넘기는 수준의 PATH.
+ * Windows의 GUI 앱은 레지스트리의 사용자·시스템 PATH를 그대로 받으므로 지금 PATH를 쓴다 — POSIX 경로로는 git을 못 찾는다.
+ */
+const GUI_PATH = process.platform === "win32" ? (process.env.PATH ?? "") : "/usr/bin:/bin:/usr/sbin:/sbin";
 const CONNECT_BUDGET_MS = 5_000;
 const SYNC_WAIT_MS = 10_000;
 const EXPECTED_TOOLS = ["search_memory", "show_commit", "get_repo_overview", "list_repos", "add_repo", "record_note"];
@@ -87,6 +90,15 @@ async function connect(
       ...(spec.env ?? {}),
       PATH: GUI_PATH,
       HOME: sandbox.home,
+      // Windows의 os.homedir()는 HOME이 아니라 USERPROFILE을 본다. SDK가 실제 USERPROFILE·APPDATA·LOCALAPPDATA를
+      // 물려주므로 샌드박스 값으로 덮어 실제 사용자 설정에 닿지 않게 한다
+      ...(process.platform === "win32"
+        ? {
+            USERPROFILE: sandbox.home,
+            APPDATA: path.join(sandbox.home, "AppData", "Roaming"),
+            LOCALAPPDATA: path.join(sandbox.home, "AppData", "Local"),
+          }
+        : {}),
       GRIMOIRE_HOME: sandbox.data,
       GRIMOIRE_ME: ME,
       // 하네스는 네트워크에 닿지 않는다 — 업데이트 확인은 단위 테스트에서 본다

@@ -26,6 +26,8 @@ jobs:
           - { os: ubuntu-latest, node: 22 }
           - { os: ubuntu-latest, node: 24 }
           - { os: macos-latest, node: 22 }
+          # Windows는 경로·홈 폴더(USERPROFILE·APPDATA)·PATH 처리가 달라 따로 돌린다
+          - { os: windows-latest, node: 22 }
     env:
       # CI에서는 GitHub 릴리스를 묻지 않는다
       GRIMOIRE_UPDATE_CHECK: "0"

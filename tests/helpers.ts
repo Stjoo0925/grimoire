@@ -8,8 +8,12 @@ import path from "node:path";
 
 import { openDb, type DB } from "../src/core/db";
 
+/**
+ * 실제 경로로 돌려준다 — Windows 러너의 TEMP는 8.3 짧은 이름(RUNNER~1)이라
+ * git이 돌려주는 긴 경로와 비교하면 같은 폴더인데도 문자열이 다르다.
+ */
 export function tempDir(prefix = "grimoire-test-"): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  return fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
 }
 
 export interface FakeCommit {

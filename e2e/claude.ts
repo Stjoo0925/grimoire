@@ -36,6 +36,12 @@ export interface ClaudeOptions {
   model?: string;
   budgetUsd?: string;
   timeoutMs?: number;
+  /** --settings 파일 — 훅 등 세션 설정을 이 파일 것으로 (사용자 설정과 섞이지 않게 --bare와 함께) */
+  settings?: string;
+  /** --bare: 훅·CLAUDE.md·사용자 MCP를 모두 끈 채 시작 (벤치는 늘 이걸로) */
+  bare?: boolean;
+  /** 작업 폴더 안 파일을 고치게 할 때 */
+  permissionMode?: string;
 }
 
 const DEFAULT_TIMEOUT_MS = 300_000;
@@ -58,6 +64,9 @@ export function runClaude(options: ClaudeOptions): Promise<AgentRun> {
     "--max-budget-usd",
     options.budgetUsd ?? "0.50",
     ...(options.model ? ["--model", options.model] : []),
+    ...(options.settings ? ["--settings", options.settings] : []),
+    ...(options.bare ? ["--bare"] : []),
+    ...(options.permissionMode ? ["--permission-mode", options.permissionMode] : []),
   ];
   const started = Date.now();
   return new Promise((resolve) => {

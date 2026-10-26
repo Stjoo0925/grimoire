@@ -8,6 +8,7 @@
  * 어떤 모드든 DB와 HOME은 임시 폴더로 갈아 끼운다 — 실제 ~/.grimoire와 사용자 레포는 건드리지 않는다.
  * 레포도 임시로 만든 고정 픽스처라 결과가 매번 같다.
  */
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
@@ -379,6 +380,56 @@ async function runScenario(spec: ServerSpec): Promise<StepResult[]> {
     } finally {
       fs.rmSync(quick.data, { recursive: true, force: true });
     }
+  });
+
+  await step("훅(PreToolUse): 편집 직전 맥락 — 공변경 있는 파일만, 세션당 한 번, 400자·JSON, exit 0", async () => {
+    // 훅은 MCP 세션이 아니라 Claude Code가 띄우는 별도 프로세스(dist/hook.js)다. 같은 샌드박스 DB를 본다.
+    const hook = path.join(path.dirname(spec.args[0]), "hook.js");
+    expect(fs.existsSync(hook), `${hook}가 없습니다`);
+    const env = { ...process.env, GRIMOIRE_HOME: sandbox.data, GRIMOIRE_ME: ME, GRIMOIRE_UPDATE_CHECK: "0" };
+    const run = (input: unknown) => {
+      const started = Date.now();
+      const result = spawnSync(spec.command, [hook], { input: typeof input === "string" ? input : JSON.stringify(input), env, encoding: "utf8", timeout: 10_000 });
+      return { status: result.status, stdout: result.stdout.trim(), ms: Date.now() - started };
+    };
+    const edit = (file: string, session = "e2e-1") => ({
+      hook_event_name: "PreToolUse",
+      session_id: session,
+      cwd: fixture.api,
+      tool_name: "Edit",
+      tool_input: { file_path: path.join(fixture.api, file), old_string: "a", new_string: "b" },
+    });
+    // 아직 공변경이 없는 파일 — Recent만 있으면 아무것도 내지 않는다
+    const quiet = run(edit("src/auth/refresh.ts"));
+    expect(quiet.status === 0 && quiet.stdout === "", `줄 것이 없는데 출력: ${quiet.stdout}`);
+    // refresh.ts와 session.ts가 세 번 같이 바뀌게 만들고 동기화
+    for (let i = 1; i <= 3; i++) {
+      addCommit(fixture.api, {
+        message: `feat(auth): 세션 갱신 ${i}`,
+        files: { "src/auth/refresh.ts": `export function rotate() {\n  return 'rotated${i}';\n}\n`, "src/auth/session.ts": `export const ttl = ${i};\n`, "tests/refresh.test.ts": `// ${i}\n` },
+        email: ME,
+        date: `2024-08-0${i}T10:00:00+09:00`,
+      });
+    }
+    spawnSync(spec.command, [spec.args[0], "sync"], { env, encoding: "utf8", timeout: 60_000 });
+    const first = run(edit("src/auth/refresh.ts", "e2e-2"));
+    expect(first.status === 0, `exit ${first.status}`);
+    const parsed = JSON.parse(first.stdout) as { hookSpecificOutput: { hookEventName: string; additionalContext: string } };
+    const text = parsed.hookSpecificOutput.additionalContext;
+    expect(parsed.hookSpecificOutput.hookEventName === "PreToolUse", first.stdout);
+    expect(text.includes("Co-changes: src/auth/session.ts"), `공변경이 없습니다:\n${text}`);
+    expect(text.includes("Tests: tests/refresh.test.ts"), `테스트 짝이 없습니다:\n${text}`);
+    expect(text.length <= 400, `${text.length}자 — 예산 400자`);
+    // 같은 세션 두 번째 → 없음. 깨진 stdin → exit 0, 출력 없음. 레포 밖 → 없음
+    const second = run(edit("src/auth/refresh.ts", "e2e-2"));
+    expect(second.stdout === "", `두 번째 호출에 출력: ${second.stdout}`);
+    const broken = run("{ not json");
+    expect(broken.status === 0 && broken.stdout === "", "깨진 입력에서 exit 0·무출력이어야 합니다");
+    const outside = run({ ...edit("x.ts"), tool_input: { file_path: path.join(sandbox.home, "x.ts") } });
+    expect(outside.stdout === "", "레포 밖 파일에 출력");
+    // 지연: 계획의 예산은 150ms(node 기동 포함). CI 러너는 느릴 수 있어 상한은 넉넉히 두고 실측을 적는다
+    expect(second.ms < 1500, `훅 ${second.ms}ms — 상한 1500ms`);
+    return `${text.length}자 · ${second.ms}ms (목표 150ms)`;
   });
 
   await step("stdout 오염 없음 (로그는 stderr로만)", async () => {

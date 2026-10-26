@@ -4,6 +4,7 @@
  * 각 점검은 독립적이다. 앞의 점검이 실패해도(예: 오래된 Node라 SQLite를 못 엶) 나머지는 계속 돈다.
  */
 import fs from "node:fs";
+import path from "node:path";
 
 import { dbPath, grimoireHome, type Env } from "../core/config";
 import { loadSqlite, MIN_NODE, openDb } from "../core/db";
@@ -11,6 +12,7 @@ import { runGit } from "../core/git";
 import { myEmails } from "../core/identity";
 import { listRepos } from "../core/indexer";
 import { compareVersions, RELEASES_URL, refreshUpdateCache, updateCheckEnabled, VERSION } from "../core/update";
+import { parseHookCommand, readInstalledHooks, settingsPath } from "./hooks";
 import { CLIENTS, configPath, hasCommand, readInstalled, run, SERVER_NAME } from "./install";
 
 export type Level = "ok" | "warn" | "fail";
@@ -177,6 +179,30 @@ async function clientChecks(options: DoctorOptions, env: Env): Promise<Check[]> 
       level: "warn",
       title: "어떤 MCP 클라이언트에도 아직 등록하지 않았습니다",
       fix: "grimoire install claude-code | claude-desktop | cursor",
+    });
+  }
+
+  // Claude Code 훅 — 설치돼 있으면 node·hook.js 경로가 살아 있는지
+  const hooks = readInstalledHooks(settingsPath(options.home));
+  if (hooks.length > 0) {
+    const parsed = parseHookCommand(hooks[0].command);
+    if (!parsed || !fs.existsSync(parsed.node) || !fs.existsSync(parsed.hook)) {
+      checks.push({
+        level: "fail",
+        title: "claude-code 훅: 실행 파일이나 hook.js를 찾을 수 없습니다",
+        detail: hooks[0].command,
+        fix: "grimoire install claude-code --hooks",
+      });
+    } else if (path.resolve(parsed.node) !== path.resolve(process.execPath)) {
+      checks.push({ level: "warn", title: "claude-code 훅: 지금과 다른 node로 등록돼 있습니다", detail: parsed.node, fix: "grimoire install claude-code --hooks" });
+    } else {
+      checks.push({ level: "ok", title: `claude-code 훅: ${hooks.map((hook) => hook.event).join(", ")}`, detail: parsed.hook });
+    }
+  } else {
+    checks.push({
+      level: "ok",
+      title: "claude-code 훅: 없음 (선택) — 편집 직전 맥락 주입·세션 캡처를 쓰려면",
+      fix: "grimoire install claude-code --hooks",
     });
   }
   return checks;

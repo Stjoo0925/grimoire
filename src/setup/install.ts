@@ -18,8 +18,8 @@ export const SERVER_NAME = "grimoire";
 export const CLIENTS = ["claude-code", "claude-desktop", "cursor"] as const;
 export type ClientName = (typeof CLIENTS)[number];
 
-/** 설정에 함께 옮겨 적는 환경 변수 — CLI와 MCP가 같은 DB·같은 "나"·같은 업데이트 설정을 보게 한다. */
-const FORWARDED_ENV = ["GRIMOIRE_HOME", "GRIMOIRE_ME", "GRIMOIRE_AUTO_ADD", "GRIMOIRE_UPDATE_CHECK"] as const;
+/** 설정에 함께 옮겨 적는 환경 변수 — CLI와 MCP·훅이 같은 DB·같은 "나"·같은 업데이트 설정을 보게 한다. */
+export const FORWARDED_ENV = ["GRIMOIRE_HOME", "GRIMOIRE_ME", "GRIMOIRE_AUTO_ADD", "GRIMOIRE_UPDATE_CHECK", "GRIMOIRE_CAPTURE"] as const;
 
 export interface ServerSpec {
   command: string;
@@ -146,6 +146,15 @@ export async function install(client: ClientName, options: InstallOptions): Prom
     return { client, file, backup: null, unchanged, next, spec };
   }
 
+  const backup = writeJsonFile(file, text, raw);
+  return { client, file, backup, unchanged: false, next, spec };
+}
+
+/**
+ * 설정 파일을 안전하게 갈아 끼운다 — 이전 내용은 `.bak`으로, 임시 파일 + rename, 권한 보존. 백업 경로(없으면 null)를 돌려준다.
+ * `raw`는 이전 내용(파일이 없었으면 null).
+ */
+export function writeJsonFile(file: string, text: string, raw: string | null): string | null {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   // rename은 새 파일을 만드는 것이라 권한을 따로 옮겨야 한다 (설정 파일은 보통 600)
   const mode = raw !== null ? fs.statSync(file).mode & 0o777 : 0o600;
@@ -159,7 +168,7 @@ export async function install(client: ClientName, options: InstallOptions): Prom
   fs.writeFileSync(temp, text, { mode });
   fs.chmodSync(temp, mode);
   fs.renameSync(temp, file);
-  return { client, file, backup, unchanged: false, next, spec };
+  return backup;
 }
 
 const NEXT_STEP: Record<ClientName, string> = {

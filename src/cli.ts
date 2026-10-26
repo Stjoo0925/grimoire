@@ -24,14 +24,14 @@ import { fileContext, formatFileContext } from "./core/context";
 import { openDb, type DB } from "./core/db";
 import { myEmails, resolveAuthors } from "./core/identity";
 import { indexCommitCode } from "./core/diffs";
-import { addRepo, discoverRepos, findRepo, listRepos, removeRepo, syncRepo, type RepoRow } from "./core/indexer";
+import { addRepo, discoverRepos, findRepo, listRepos, relativeToRepo, removeRepo, repoOfPath, syncRepo, type RepoRow } from "./core/indexer";
 import { addNote } from "./core/notes";
 import { commitDetail, repoOverview, repoSummaries } from "./core/overview";
 import { search } from "./core/search";
 import { pendingUpdate, refreshUpdateCache, VERSION } from "./core/update";
 import { runMcpServer } from "./mcp/server";
-import { relativeToRepo, repoOfPath } from "./mcp/tools";
 import { doctor, formatChecks } from "./setup/doctor";
+import { installHooks } from "./setup/hooks";
 import { CLIENTS, install, InstallError, type ClientName } from "./setup/install";
 import { runUpdate } from "./setup/update";
 
@@ -52,6 +52,8 @@ const HELP = `grimoire — 로컬 git 이력을 AI 코딩 도구의 기억으로
 MCP 연결:
   grimoire install <client>       설정 자동 작성  client: ${CLIENTS.join(" | ")}
                                   [--project <dir>] 프로젝트 범위  [--dry-run] 쓰지 않고 보기
+                                  [--hooks] claude-code: 편집 직전 맥락 주입·세션 캡처 훅을 ~/.claude/settings.json에
+                                  [--remove-hooks] 그 훅만 뺀다
   grimoire doctor                 연결 문제 진단
   grimoire mcp                    MCP 서버 (stdio) — 보통 클라이언트가 직접 띄웁니다
 
@@ -91,6 +93,8 @@ async function main(argv: string[]): Promise<number> {
       project: { type: "string" },
       "dry-run": { type: "boolean" },
       check: { type: "boolean" },
+      hooks: { type: "boolean" },
+      "remove-hooks": { type: "boolean" },
     },
   });
 
@@ -101,7 +105,13 @@ async function main(argv: string[]): Promise<number> {
     return checks.some((check) => check.level === "fail") ? 1 : 0;
   }
   if (command === "install") {
+    if (values.hooks || values["remove-hooks"]) return cmdInstallHooks(positionals[0], values["dry-run"], values["remove-hooks"]);
     return cmdInstall(positionals[0], values.project, values["dry-run"]);
+  }
+  if (command === "hook") {
+    // 설치 명령은 dist/hook.js를 직접 가리킨다(가벼운 진입점). 여기는 수동 확인용 — 같은 코드를 돌린다.
+    require("./hook");
+    return -1;
   }
   if (command === "update") {
     return runUpdate({ check: values.check, dryRun: values["dry-run"] });
@@ -208,6 +218,35 @@ async function cmdInstall(client: string | undefined, project: string | undefine
     if (result.backup) print(`  이전 설정 백업: ${result.backup}`);
     print(`  node: ${result.spec.command}`);
     print(`  다음: ${result.next}`);
+    print("  확인: grimoire doctor");
+    return 0;
+  } catch (error) {
+    if (error instanceof InstallError) {
+      console.error(error.message);
+      return 1;
+    }
+    throw error;
+  }
+}
+
+async function cmdInstallHooks(client: string | undefined, dryRun: boolean | undefined, remove: boolean | undefined): Promise<number> {
+  if (client !== "claude-code") throw new UsageError("훅은 claude-code에만 설치합니다: grimoire install claude-code --hooks");
+  try {
+    const result = await installHooks({ hookPath: path.join(path.dirname(__filename), "hook.js"), dryRun, remove });
+    if (dryRun) {
+      print(`[dry-run] ${result.file}의 hooks.${result.events.join("/")}에 ${remove ? "서 뺍니다" : "다음 명령을 넣습니다"}:`);
+      if (!remove) print(`  ${result.command}`);
+      return 0;
+    }
+    if (result.unchanged) print(`이미 같은 설정입니다: ${result.file}`);
+    else if (remove) print(`✓ 훅을 뺐습니다: ${result.file}`);
+    else {
+      print(`✓ Claude Code 훅을 넣었습니다: ${result.file}`);
+      print(`  이벤트: ${result.events.join(", ")}`);
+      print(`  명령: ${result.command}`);
+      print("  편집 직전에 그 파일의 최근 커밋·왜·같이 바뀌는 파일/테스트를 400자 안에 건넵니다. 끄려면 GRIMOIRE_HOOKS=0, 캡처만 끄려면 GRIMOIRE_CAPTURE=0.");
+    }
+    if (result.backup) print(`  이전 설정 백업: ${result.backup}`);
     print("  확인: grimoire doctor");
     return 0;
   } catch (error) {

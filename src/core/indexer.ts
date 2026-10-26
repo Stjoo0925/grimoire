@@ -109,6 +109,21 @@ export function findRepo(db: DB, query: string): RepoRow | null {
   return partial.length === 1 ? partial[0] : (partial[0] ?? null);
 }
 
+/** 절대경로가 속한 등록 레포 (가장 긴 경로가 이기게). 상대경로나 레포 밖이면 undefined. */
+export function repoOfPath(db: DB, target: string): RepoRow | undefined {
+  if (!path.isAbsolute(target)) return undefined;
+  const resolved = path.resolve(target);
+  return listRepos(db)
+    .filter((repo) => resolved === repo.path || resolved.startsWith(repo.path + path.sep))
+    .sort((a, b) => b.path.length - a.path.length)[0];
+}
+
+/** 레포 안 경로를 색인과 같은 꼴(레포 기준, POSIX 구분자)로 */
+export function relativeToRepo(repoPath: string, target: string): string {
+  const relative = path.isAbsolute(target) ? path.relative(repoPath, path.resolve(target)) : target;
+  return relative.split(path.sep).join("/").replace(/^\.\//, "");
+}
+
 /** 하위 디렉터리에서 git 레포를 찾는다 (레포 안으로는 더 내려가지 않는다). */
 export function discoverRepos(root: string, maxDepth = 4): string[] {
   const found: string[] = [];

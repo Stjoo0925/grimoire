@@ -20,7 +20,7 @@ import { fileContext } from "../core/context";
 import type { DB } from "../core/db";
 import { resolveAuthors } from "../core/identity";
 import { indexCommitCode } from "../core/diffs";
-import { addRepo, discoverRepos, findRepo, listRepos, syncRepo } from "../core/indexer";
+import { addRepo, discoverRepos, findRepo, listRepos, relativeToRepo, repoOfPath, syncRepo } from "../core/indexer";
 import { addNote } from "../core/notes";
 import { commitDetail, repoOverview, repoSummaries } from "../core/overview";
 import { search, type SearchHit } from "../core/search";
@@ -168,21 +168,6 @@ async function topDiff(db: DB, hit: SearchHit) {
     patch: detail.patch,
     ...(detail.patchTruncated ? { truncated: `${FULL_DIFF_LINES}/${detail.patchLines}줄 — 나머지는 show_commit` } : {}),
   };
-}
-
-/** 절대경로가 속한 등록 레포 (가장 긴 경로가 이기게) */
-export function repoOfPath(db: DB, target: string) {
-  if (!path.isAbsolute(target)) return undefined;
-  const resolved = path.resolve(target);
-  return listRepos(db)
-    .filter((repo) => resolved === repo.path || resolved.startsWith(repo.path + path.sep))
-    .sort((a, b) => b.path.length - a.path.length)[0];
-}
-
-/** 레포 안 경로를 색인과 같은 꼴(레포 기준, POSIX 구분자)로 */
-export function relativeToRepo(repoPath: string, target: string): string {
-  const relative = path.isAbsolute(target) ? path.relative(repoPath, path.resolve(target)) : target;
-  return relative.split(path.sep).join("/").replace(/^\.\//, "");
 }
 
 /** MCP로 scan하기엔 너무 넓은 곳: 파일 시스템 루트와 홈 디렉터리 자체 */

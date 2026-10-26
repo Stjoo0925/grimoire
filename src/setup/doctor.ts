@@ -11,7 +11,7 @@ import { runGit } from "../core/git";
 import { myEmails } from "../core/identity";
 import { listRepos } from "../core/indexer";
 import { compareVersions, RELEASES_URL, refreshUpdateCache, updateCheckEnabled, VERSION } from "../core/update";
-import { CLIENTS, configPath, hasCommand, readInstalled, run, SERVER_NAME } from "./install";
+import { CLIENTS, configPath, hasCommand, readInstalled, run, SERVER_NAME, staleDesktopConfigs } from "./install";
 
 export type Level = "ok" | "warn" | "fail";
 
@@ -149,10 +149,23 @@ async function clientChecks(options: DoctorOptions, env: Env): Promise<Check[]> 
   let anyInstalled = false;
 
   for (const client of CLIENTS) {
-    const file = configPath(client, { home: options.home });
+    const file = configPath(client, { home: options.home, env });
     if (!file) continue;
     const spec = fs.existsSync(file) ? readInstalled(file) : null;
-    if (!spec) continue;
+    if (!spec) {
+      // 앱이 설정 위치를 옮겼는데(Windows 3.1623+ 등) 예전 위치에만 등록돼 있으면 앱은 grimoire를 못 본다
+      const stale = client === "claude-desktop" ? staleDesktopConfigs({ home: options.home, env }).filter((other) => readInstalled(other)) : [];
+      if (stale.length > 0) {
+        anyInstalled = true;
+        checks.push({
+          level: "warn",
+          title: "claude-desktop: 앱이 읽지 않는 옛 설정 파일에만 등록돼 있습니다",
+          detail: `${stale.join(", ")}\n앱이 읽는 파일: ${file}`,
+          fix: "grimoire install claude-desktop",
+        });
+      }
+      continue;
+    }
     anyInstalled = true;
     checks.push(specCheck(client, file, spec, options.cliPath, env));
   }

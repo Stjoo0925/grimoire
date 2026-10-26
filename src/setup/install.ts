@@ -44,25 +44,20 @@ export function serverSpec(cliPath: string, env: Env = process.env, nodePath = p
   };
 }
 
+export interface ConfigPathOptions {
+  project?: string;
+  platform?: NodeJS.Platform;
+  home?: string;
+  /** CLAUDE_USER_DATA_DIR·APPDATA·LOCALAPPDATA를 읽을 환경. home을 따로 넘기고 env는 안 넘기면 빈 환경 (테스트가 진짜 설정을 보지 않게) */
+  env?: Env;
+}
+
 /** 클라이언트별 JSON 설정 파일 경로. claude-code는 프로젝트 범위(.mcp.json)일 때만 파일을 쓴다. */
-export function configPath(
-  client: ClientName,
-  options: { project?: string; platform?: NodeJS.Platform; home?: string; appData?: string; localAppData?: string } = {},
-): string | null {
-  const platform = options.platform ?? process.platform;
+export function configPath(client: ClientName, options: ConfigPathOptions = {}): string | null {
   const home = options.home ?? os.homedir();
   switch (client) {
     case "claude-desktop":
-      if (platform === "darwin") return path.join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json");
-      if (platform === "win32") {
-        // home을 따로 넘겼으면(테스트 등) 실제 %APPDATA%·%LOCALAPPDATA%를 보지 않고 그 home 아래에서 찾는다.
-        const localAppData = options.localAppData ?? (options.home === undefined ? process.env.LOCALAPPDATA : undefined);
-        const current = claudeDataConfig(localAppData ?? path.join(home, "AppData", "Local"));
-        if (current) return current;
-        const appData = options.appData ?? (options.home === undefined ? process.env.APPDATA : undefined);
-        return path.join(appData ?? path.join(home, "AppData", "Roaming"), "Claude", "claude_desktop_config.json");
-      }
-      return path.join(home, ".config", "Claude", "claude_desktop_config.json");
+      return path.join(desktopDataDir(options), "claude_desktop_config.json");
     case "cursor":
       return options.project ? path.join(options.project, ".cursor", "mcp.json") : path.join(home, ".cursor", "mcp.json");
     case "claude-code":
@@ -71,27 +66,73 @@ export function configPath(
 }
 
 /**
- * 요즘 Windows 앱은 설정을 `%LOCALAPPDATA%\Claude-Data\claude_<패키지 id>\`에 둔다 (스토어·설치판 모두).
- * 이 폴더가 있으면 앱은 %APPDATA%\Claude를 읽지 않는다. 여럿이면 설정 파일이 있는 쪽, 그중 최근에 바뀐 쪽.
+ * Claude Desktop의 데이터 폴더 (claude_desktop_config.json이 있는 곳).
+ *
+ *  - 모든 OS: `CLAUDE_USER_DATA_DIR`로 옮겼으면 그곳
+ *  - macOS: `~/Library/Application Support/Claude` (3.x에서도 그대로)
+ *  - Windows는 설치 방식·버전마다 다르다. 앞에서부터 **실제로 쓰고 있는 폴더**를 고른다.
+ *    1. `%LOCALAPPDATA%\Claude-Data\<패키지 패밀리, 소문자>` — 스토어/MSIX 3.1623+ (claude_pzs8sxrjxfjjc, anthropicpbc.claude_fnn82j28hfe8t)
+ *    2. `%LOCALAPPDATA%\Packages\<패키지 패밀리>\LocalCache\Roaming\Claude` — 그 전 MSIX (앱이 보는 %APPDATA%의 가상화 사본)
+ *    3. `%APPDATA%\Claude` — 일반 설치. 아무 흔적이 없을 때도 여기
+ *    Claude-Data 폴더가 비어 있는 채로 LocalCache를 쓰는 설치도 있어, 폴더가 있다는 것만으로는 고르지 않는다.
+ *  - Linux: `~/.config/Claude`
  */
-function claudeDataConfig(localAppData: string): string | null {
-  const root = path.join(localAppData, "Claude-Data");
+export function desktopDataDir(options: ConfigPathOptions = {}): string {
+  const platform = options.platform ?? process.platform;
+  const home = options.home ?? os.homedir();
+  const env = options.env ?? (options.home === undefined ? process.env : {});
+  const custom = env.CLAUDE_USER_DATA_DIR?.trim();
+  if (custom) return path.resolve(custom);
+  if (platform === "darwin") return path.join(home, "Library", "Application Support", "Claude");
+  if (platform !== "win32") return path.join(home, ".config", "Claude");
+
+  const candidates = windowsDataDirs(home, env);
+  return candidates.find(isLiveDataDir) ?? candidates[candidates.length - 1];
+}
+
+/** Windows에서 Claude Desktop 데이터 폴더가 될 수 있는 곳, 우선순위 순. 마지막은 항상 %APPDATA%\Claude */
+function windowsDataDirs(home: string, env: Env): string[] {
+  const localAppData = env.LOCALAPPDATA ?? path.join(home, "AppData", "Local");
+  return [
+    ...packageDirs(path.join(localAppData, "Claude-Data"), (name) => path.join(localAppData, "Claude-Data", name)),
+    ...packageDirs(path.join(localAppData, "Packages"), (name) => path.join(localAppData, "Packages", name, "LocalCache", "Roaming", "Claude")),
+    path.join(env.APPDATA ?? path.join(home, "AppData", "Roaming"), "Claude"),
+  ];
+}
+
+/** 앱이 읽지 않는 옛 위치의 Desktop 설정 파일들 (doctor가 "엉뚱한 곳에 등록됨"을 짚는 데 쓴다) */
+export function staleDesktopConfigs(options: ConfigPathOptions = {}): string[] {
+  const platform = options.platform ?? process.platform;
+  if (platform !== "win32") return [];
+  const env = options.env ?? (options.home === undefined ? process.env : {});
+  if (env.CLAUDE_USER_DATA_DIR?.trim()) return [];
+  const live = configPath("claude-desktop", options);
+  return windowsDataDirs(options.home ?? os.homedir(), env)
+    .map((dir) => path.join(dir, "claude_desktop_config.json"))
+    .filter((file) => file !== live && fs.existsSync(file));
+}
+
+/** Claude 패키지 패밀리로 보이는 하위 폴더들 (Claude_…, AnthropicPBC.Claude_… — 대소문자 무관), 최근에 바뀐 순 */
+function packageDirs(root: string, toDataDir: (name: string) => string): string[] {
   let names: string[];
   try {
     names = fs
       .readdirSync(root, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory() && entry.name.toLowerCase().startsWith("claude_"))
+      .filter((entry) => entry.isDirectory() && /(^|\.)claude_/i.test(entry.name))
       .map((entry) => entry.name);
   } catch {
-    return null;
+    return [];
   }
-  const candidates = names.map((name) => {
-    const file = path.join(root, name, "claude_desktop_config.json");
-    const stat = fs.statSync(file, { throwIfNoEntry: false });
-    return { file, mtime: stat?.mtimeMs ?? -1 };
-  });
-  candidates.sort((a, b) => b.mtime - a.mtime);
-  return candidates[0]?.file ?? null;
+  return names
+    .map((name) => toDataDir(name))
+    .map((dir) => ({ dir, mtime: fs.statSync(dir, { throwIfNoEntry: false })?.mtimeMs ?? -1 }))
+    .sort((a, b) => b.mtime - a.mtime)
+    .map((item) => item.dir);
+}
+
+/** 앱이 실제로 쓰는 데이터 폴더인지 — 옮겨 간 뒤의 옛 폴더에는 표시 파일(.user-data-left.*)만 남는다 */
+function isLiveDataDir(dir: string): boolean {
+  return ["claude_desktop_config.json", "config.json", "Local State"].some((name) => fs.existsSync(path.join(dir, name)));
 }
 
 /** 기존 설정 JSON에 grimoire 항목만 넣는다. 다른 키·다른 서버는 건드리지 않는다. */
@@ -169,7 +210,7 @@ export async function install(client: ClientName, options: InstallOptions): Prom
   }
 
   const next = NEXT_STEP[client];
-  const file = configPath(client, { project: options.project, home: options.home });
+  const file = configPath(client, { project: options.project, home: options.home, env: options.env });
 
   if (file === null) {
     // claude-code 사용자 범위: 설정 파일(~/.claude.json)을 직접 고치지 않고 공식 CLI에 맡긴다.

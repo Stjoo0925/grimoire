@@ -53,6 +53,14 @@ To run from source, clone it and run `npm install && npm run build && npm link`.
 - For Claude Code (all projects), the read-only tools (`search_memory`, `show_commit`, `get_repo_overview`, `list_repos`)
   are added to `permissions.allow` in `~/.claude/settings.json` (under `CLAUDE_CONFIG_DIR` if set), so searches don't ask for approval.
   Tools that write (`add_repo`, `record_note`) are left out. Existing rules and keys stay as they are, and the file is backed up as `.bak` the same way.
+- Claude Desktop keeps its config in a different place depending on OS, install type and version. Grimoire picks the folder the app is actually using:
+  - `CLAUDE_USER_DATA_DIR`, if set (any OS)
+  - macOS: `~/Library/Application Support/Claude/`
+  - Windows, in this order, taking the first that is in use: `%LOCALAPPDATA%\Claude-Data\<package>\` (Store/MSIX 3.1623+),
+    `%LOCALAPPDATA%\Packages\<package>\LocalCache\Roaming\Claude\` (older MSIX), `%APPDATA%\Claude\` (standard installer)
+  - Linux: `~/.config/Claude/`
+
+  `grimoire doctor` warns when Grimoire is only in an old file the app no longer reads.
 - Restart the client after installing (fully quit Claude Desktop with ⌘Q).
 
 ### When it won't connect — `grimoire doctor`

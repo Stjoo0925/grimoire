@@ -15,6 +15,7 @@ import {
   mergeServer,
   readOnlyPermissions,
   serverSpec,
+  staleDesktopConfigs,
 } from "../src/setup/install";
 import { makeRepo, memoryDb, tempDir } from "./helpers";
 
@@ -50,31 +51,77 @@ test("configPath: 플랫폼별 위치", () => {
     path.join("/h", "AppData", "Roaming", "Claude", "claude_desktop_config.json"),
   );
   assert.equal(
-    configPath("claude-desktop", { platform: "win32", home: "/h", appData: "/ad" }),
+    configPath("claude-desktop", { platform: "win32", home: "/h", env: { APPDATA: "/ad" } }),
     path.join("/ad", "Claude", "claude_desktop_config.json"),
   );
+  // CLAUDE_USER_DATA_DIR은 모든 OS에서 우선
+  for (const platform of ["darwin", "win32", "linux"] as const) {
+    assert.equal(
+      configPath("claude-desktop", { platform, home: "/h", env: { CLAUDE_USER_DATA_DIR: "/u" } }),
+      path.join(path.resolve("/u"), "claude_desktop_config.json"),
+    );
+  }
   assert.equal(configPath("cursor", { home: "/h" }), path.join("/h", ".cursor", "mcp.json"));
   assert.equal(configPath("cursor", { home: "/h", project: "/p" }), path.join("/p", ".cursor", "mcp.json"));
   assert.equal(configPath("claude-code", { home: "/h" }), null); // 사용자 범위는 claude CLI에 맡긴다
   assert.equal(configPath("claude-code", { home: "/h", project: "/p" }), path.join("/p", ".mcp.json"));
 });
 
-test("configPath(win32): Claude-Data\\claude_* 폴더가 있으면 그쪽, 여럿이면 설정이 있고 최근인 쪽", () => {
+/** Windows 데이터 폴더 하나를 "쓰는 중"으로 만든다 (앱이 남기는 Local State) */
+function liveDir(dir: string, configFile = false): string {
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, configFile ? "claude_desktop_config.json" : "Local State"), "{}");
+  return path.join(dir, "claude_desktop_config.json");
+}
+
+test("configPath(win32): 실제로 쓰는 폴더를 Claude-Data → MSIX LocalCache → %APPDATA% 순으로 고른다", () => {
   const home = tempDir();
-  const local = path.join(home, "AppData", "Local", "Claude-Data");
-  const legacy = path.join(home, "AppData", "Roaming", "Claude", "claude_desktop_config.json");
-  assert.equal(configPath("claude-desktop", { platform: "win32", home }), legacy);
+  const local = path.join(home, "AppData", "Local");
+  const roaming = path.join(home, "AppData", "Roaming", "Claude", "claude_desktop_config.json");
+  const desktop = () => configPath("claude-desktop", { platform: "win32", home });
+  assert.equal(desktop(), roaming);
 
-  // 설정 파일이 아직 없어도 폴더만 있으면 그 안에 만든다 — 앱은 이 폴더가 있으면 %APPDATA%를 읽지 않는다
-  fs.mkdirSync(path.join(local, "claude_old"), { recursive: true });
-  fs.mkdirSync(path.join(local, "README.txt.d"), { recursive: true }); // claude_로 시작하지 않는 건 무시
-  assert.equal(configPath("claude-desktop", { platform: "win32", home }), path.join(local, "claude_old", "claude_desktop_config.json"));
+  // 3.1623 전 MSIX: 앱은 가상화된 LocalCache를 읽는다. 빈 Claude-Data 폴더는 무시
+  fs.mkdirSync(path.join(local, "Claude-Data", "claude_pzs8sxrjxfjjc"), { recursive: true });
+  const msix = liveDir(path.join(local, "Packages", "Claude_pzs8sxrjxfjjc", "LocalCache", "Roaming", "Claude"));
+  fs.mkdirSync(path.join(local, "Packages", "Microsoft.Something_123"), { recursive: true }); // Claude 패키지가 아님
+  assert.equal(desktop(), msix);
 
-  fs.mkdirSync(path.join(local, "claude_new"));
-  const newer = path.join(local, "claude_new", "claude_desktop_config.json");
-  fs.writeFileSync(newer, JSON.stringify({ preferences: { x: 1 } }));
-  assert.equal(configPath("claude-desktop", { platform: "win32", home }), newer);
-  assert.equal(configPath("claude-desktop", { platform: "win32", home, localAppData: path.join(home, "nope") }), legacy);
+  // 3.1623+: 데이터가 Claude-Data로 옮겨 가면 그쪽 (설정 파일이 아직 없어도 Local State가 있으면)
+  const moved = liveDir(path.join(local, "Claude-Data", "claude_pzs8sxrjxfjjc"));
+  assert.equal(desktop(), moved);
+
+  // 다른 패키지 패밀리(AnthropicPBC.Claude_…)도 찾는다
+  const other = tempDir();
+  const pbc = liveDir(path.join(other, "AppData", "Local", "Claude-Data", "anthropicpbc.claude_fnn82j28hfe8t"), true);
+  assert.equal(configPath("claude-desktop", { platform: "win32", home: other }), pbc);
+
+  // 옛 위치에만 등록된 설정은 stale로 짚는다 (doctor용)
+  liveDir(path.dirname(roaming), true);
+  assert.deepEqual(staleDesktopConfigs({ platform: "win32", home }).sort(), [roaming]);
+  assert.deepEqual(staleDesktopConfigs({ platform: "darwin", home }), []);
+});
+
+test("doctor: 앱이 읽지 않는 옛 Desktop 설정에만 등록돼 있으면 알린다", async () => {
+  if (process.platform !== "win32") return; // doctor는 지금 플랫폼의 경로를 본다
+  const home = tempDir();
+  const cliPath = fakeCli();
+  const old = path.join(home, "AppData", "Roaming", "Claude", "claude_desktop_config.json");
+  fs.mkdirSync(path.dirname(old), { recursive: true });
+  fs.writeFileSync(old, JSON.stringify({ mcpServers: { grimoire: { command: process.execPath, args: [cliPath, "mcp"] } } }));
+  liveDir(path.join(home, "AppData", "Local", "Claude-Data", "claude_pkg"));
+
+  const offline = (async () => {
+    throw new Error("down");
+  }) as unknown as typeof fetch;
+  const env = { GRIMOIRE_HOME: path.join(home, ".grimoire"), GRIMOIRE_ME: "me@example.com" };
+  const checks = await doctor({ cliPath, env, home, fetchImpl: offline });
+  assert.ok(checks.some((c) => c.level === "warn" && c.title.includes("옛 설정 파일")), formatChecks(checks));
+
+  await install("claude-desktop", { cliPath, env, home });
+  const fixed = await doctor({ cliPath, env, home, fetchImpl: offline });
+  assert.ok(fixed.some((c) => c.level === "ok" && c.title === "claude-desktop: 등록됨"), formatChecks(fixed));
+  assert.ok(!fixed.some((c) => c.title.includes("옛 설정 파일")));
 });
 
 test("install claude-desktop: Claude-Data 설정의 다른 키(preferences 등)를 보존한다", async () => {

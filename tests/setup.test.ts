@@ -26,15 +26,28 @@ test("serverSpec: node 절대경로와 필요한 환경 변수만 적는다", ()
 });
 
 test("configPath: 플랫폼별 위치", () => {
+  // 기대값도 path.join으로 만든다 — Windows에서는 구분자가 \
   assert.equal(
     configPath("claude-desktop", { platform: "darwin", home: "/h" }),
-    "/h/Library/Application Support/Claude/claude_desktop_config.json",
+    path.join("/h", "Library", "Application Support", "Claude", "claude_desktop_config.json"),
   );
-  assert.equal(configPath("claude-desktop", { platform: "linux", home: "/h" }), "/h/.config/Claude/claude_desktop_config.json");
-  assert.equal(configPath("cursor", { home: "/h" }), "/h/.cursor/mcp.json");
-  assert.equal(configPath("cursor", { home: "/h", project: "/p" }), "/p/.cursor/mcp.json");
+  assert.equal(
+    configPath("claude-desktop", { platform: "linux", home: "/h" }),
+    path.join("/h", ".config", "Claude", "claude_desktop_config.json"),
+  );
+  // home을 넘기면 실제 %APPDATA%가 아니라 그 home 아래를 본다 (테스트가 진짜 설정을 덮어쓰지 않게)
+  assert.equal(
+    configPath("claude-desktop", { platform: "win32", home: "/h" }),
+    path.join("/h", "AppData", "Roaming", "Claude", "claude_desktop_config.json"),
+  );
+  assert.equal(
+    configPath("claude-desktop", { platform: "win32", home: "/h", appData: "/ad" }),
+    path.join("/ad", "Claude", "claude_desktop_config.json"),
+  );
+  assert.equal(configPath("cursor", { home: "/h" }), path.join("/h", ".cursor", "mcp.json"));
+  assert.equal(configPath("cursor", { home: "/h", project: "/p" }), path.join("/p", ".cursor", "mcp.json"));
   assert.equal(configPath("claude-code", { home: "/h" }), null); // 사용자 범위는 claude CLI에 맡긴다
-  assert.equal(configPath("claude-code", { home: "/h", project: "/p" }), "/p/.mcp.json");
+  assert.equal(configPath("claude-code", { home: "/h", project: "/p" }), path.join("/p", ".mcp.json"));
 });
 
 test("mergeServer: 다른 서버와 다른 키는 그대로 둔다", () => {
@@ -70,9 +83,11 @@ test("install: 설정 파일을 만들고, 백업하고, 두 번째는 그대로
   fs.writeFileSync(cursorFile, JSON.stringify({ mcpServers: { other: { command: "x" } } }), { mode: 0o600 });
   const cursor = await install("cursor", { cliPath, env: {}, home });
   assert.equal(cursor.backup, `${cursorFile}.bak`);
-  // 권한 보존 (rename으로 갈아 끼워도 600 유지)
-  assert.equal(fs.statSync(cursorFile).mode & 0o777, 0o600);
-  assert.equal(fs.statSync(cursor.backup!).mode & 0o777, 0o600);
+  // 권한 보존 (rename으로 갈아 끼워도 600 유지) — Windows에는 POSIX 권한이 없어 건너뛴다
+  if (process.platform !== "win32") {
+    assert.equal(fs.statSync(cursorFile).mode & 0o777, 0o600);
+    assert.equal(fs.statSync(cursor.backup!).mode & 0o777, 0o600);
+  }
   const merged = JSON.parse(fs.readFileSync(cursorFile, "utf8"));
   assert.deepEqual(Object.keys(merged.mcpServers).sort(), ["grimoire", "other"]);
 

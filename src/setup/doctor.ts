@@ -1,12 +1,12 @@
 /**
  * `grimoire doctor` — 연결이 안 될 때 원인을 한 번에 보여 준다.
  *
- * 각 점검은 독립적이다. 앞의 점검이 실패해도(예: SQLite 모듈 로드 실패) 나머지는 계속 돈다.
+ * 각 점검은 독립적이다. 앞의 점검이 실패해도(예: 오래된 Node라 SQLite를 못 엶) 나머지는 계속 돈다.
  */
 import fs from "node:fs";
 
 import { dbPath, grimoireHome, type Env } from "../core/config";
-import { loadSqlite, openDb } from "../core/db";
+import { loadSqlite, MIN_NODE, openDb } from "../core/db";
 import { runGit } from "../core/git";
 import { myEmails } from "../core/identity";
 import { listRepos } from "../core/indexer";
@@ -38,24 +38,29 @@ export async function doctor(options: DoctorOptions): Promise<Check[]> {
   // 0. Grimoire 버전 (GitHub 릴리스 기준)
   checks.push(await versionCheck(env, options.fetchImpl));
 
-  // 1. Node와 네이티브 SQLite 모듈
-  const major = Number(process.versions.node.split(".")[0]);
+  // 1. Node와 내장 SQLite(node:sqlite) — 검색이 FTS5에 기대므로 가상 테이블까지 만들어 본다
   checks.push(
-    major >= 20
+    compareVersions(process.versions.node, MIN_NODE) >= 0
       ? { level: "ok", title: `Node ${process.version}`, detail: process.execPath }
-      : { level: "fail", title: `Node ${process.version} — 20 이상이 필요합니다`, detail: process.execPath },
+      : { level: "fail", title: `Node ${process.version} — ${MIN_NODE} 이상이 필요합니다`, detail: process.execPath },
   );
   let sqliteOk = false;
   try {
-    loadSqlite();
-    sqliteOk = true;
-    checks.push({ level: "ok", title: "SQLite 모듈 로드", detail: `ABI ${process.versions.modules}` });
+    const probe = new (loadSqlite().DatabaseSync)(":memory:");
+    try {
+      probe.exec("CREATE VIRTUAL TABLE probe USING fts5(text)");
+      const { version } = probe.prepare("SELECT sqlite_version() AS version").get() as { version: string };
+      sqliteOk = true;
+      checks.push({ level: "ok", title: "SQLite (node:sqlite, FTS5)", detail: `SQLite ${version}` });
+    } finally {
+      probe.close();
+    }
   } catch (error) {
     checks.push({
       level: "fail",
-      title: "SQLite 모듈을 열지 못했습니다",
+      title: "SQLite를 열지 못했습니다",
       detail: error instanceof Error ? error.message : String(error),
-      fix: "npm rebuild better-sqlite3",
+      fix: `Node ${MIN_NODE} 이상을 설치하고 'grimoire install'을 다시 하세요`,
     });
   }
 
@@ -200,7 +205,7 @@ function specCheck(
   if (spec.command !== process.execPath) {
     return {
       level: "warn",
-      title: `${client}: 지금과 다른 node로 등록돼 있습니다 — SQLite 모듈이 안 맞으면 시작에 실패합니다`,
+      title: `${client}: 지금과 다른 node로 등록돼 있습니다 — 그 node가 오래되면 시작에 실패합니다`,
       detail: `${spec.command} (지금: ${process.execPath})`,
       fix,
     };

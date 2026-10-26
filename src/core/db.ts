@@ -7,27 +7,101 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import type BetterSqlite3 from "better-sqlite3";
+import type * as NodeSqlite from "node:sqlite";
 
-export type DB = BetterSqlite3.Database;
+/** node:sqlite가 들어간 첫 버전(플래그 없이) — package.json engines와 맞춘다 */
+export const MIN_NODE = "22.13.0";
 
 /**
- * better-sqlite3는 네이티브 모듈이라 빌드할 때의 Node로만 열린다.
- * 모듈 최상단이 아니라 여기서 늦게 불러야 `grimoire doctor`가 이 실패를 진단할 수 있다.
+ * Node 내장 SQLite(node:sqlite). 네이티브 모듈을 따로 빌드하지 않으므로 node를 바꿔도 다시 설치할 필요가 없다.
+ * 모듈 최상단이 아니라 여기서 늦게 불러야 `grimoire doctor`가 오래된 Node를 진단할 수 있다.
+ * 불러올 때 한 번 나오는 ExperimentalWarning은 CLI 출력만 어지럽히므로 그것만 삼킨다.
  */
-export function loadSqlite(): typeof BetterSqlite3 {
+export function loadSqlite(): typeof NodeSqlite {
+  const emitWarning = process.emitWarning;
+  process.emitWarning = function (this: NodeJS.Process, warning: string | Error, ...rest: unknown[]) {
+    const text = typeof warning === "string" ? warning : warning.message;
+    const type = typeof rest[0] === "string" ? rest[0] : (rest[0] as { type?: string } | undefined)?.type;
+    if (type === "ExperimentalWarning" && /SQLite/.test(text)) return;
+    return (emitWarning as (...args: unknown[]) => void).call(this, warning, ...rest);
+  } as typeof process.emitWarning;
   try {
-    return require("better-sqlite3") as typeof BetterSqlite3;
+    return require("node:sqlite") as typeof NodeSqlite;
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (/NODE_MODULE_VERSION|was compiled against a different Node\.js version/.test(message)) {
-      throw new Error(
-        `SQLite 모듈이 지금 Node(${process.version}, ${process.execPath})와 맞지 않습니다. ` +
-          "설치할 때 쓴 node로 실행하거나, 이 node로 'npm rebuild better-sqlite3'를 실행한 뒤 " +
-          "'grimoire install'을 다시 하세요.",
-      );
-    }
-    throw error;
+    throw new Error(
+      `지금 Node(${process.version}, ${process.execPath})에는 내장 SQLite(node:sqlite)가 없습니다. ` +
+        `Node ${MIN_NODE} 이상으로 실행한 뒤 'grimoire install'을 다시 하세요.`,
+      { cause: error },
+    );
+  } finally {
+    process.emitWarning = emitWarning;
+  }
+}
+
+/** 준비된 문장. 행 모양은 SQL을 쓴 호출부가 정하므로 unknown으로 돌려준다. */
+export interface Statement {
+  run(...params: NodeSqlite.SQLInputValue[]): NodeSqlite.StatementResultingChanges;
+  get(...params: NodeSqlite.SQLInputValue[]): unknown;
+  all(...params: NodeSqlite.SQLInputValue[]): unknown[];
+}
+
+/**
+ * 연결 하나. 호출부가 쓰던 모양(prepare·exec·pragma·transaction)을 node:sqlite 위에 그대로 둔다.
+ */
+export class DB {
+  private depth = 0;
+
+  constructor(private readonly raw: NodeSqlite.DatabaseSync) {}
+
+  /** node:sqlite는 행을 null 프로토타입 객체로 주므로, 응답에 그대로 실려도 되게 보통 객체로 바꾼다 */
+  prepare(sql: string): Statement {
+    const statement = this.raw.prepare(sql);
+    return {
+      run: (...params) => statement.run(...params),
+      get: (...params) => {
+        const row = statement.get(...params);
+        return row && { ...row };
+      },
+      all: (...params) => statement.all(...params).map((row) => ({ ...row })),
+    };
+  }
+
+  exec(sql: string): void {
+    this.raw.exec(sql);
+  }
+
+  /** PRAGMA를 실행하고 첫 행의 첫 값을 돌려준다 (설정만 하는 PRAGMA면 undefined) */
+  pragma(source: string): unknown {
+    const row = this.raw.prepare(`PRAGMA ${source}`).get();
+    return row ? Object.values(row)[0] : undefined;
+  }
+
+  /**
+   * fn을 트랜잭션으로 감싼 함수를 돌려준다. 던지면 되돌린다.
+   * 트랜잭션 안에서 또 부르면 SAVEPOINT로 안쪽만 되돌릴 수 있게 한다.
+   */
+  transaction<T>(fn: () => T): () => T {
+    return () => {
+      const name = `grimoire_${this.depth}`;
+      const nested = this.depth > 0;
+      this.raw.exec(nested ? `SAVEPOINT ${name}` : "BEGIN");
+      this.depth++;
+      let result: T;
+      try {
+        result = fn();
+      } catch (error) {
+        this.depth--;
+        this.raw.exec(nested ? `ROLLBACK TO ${name}; RELEASE ${name}` : "ROLLBACK");
+        throw error;
+      }
+      this.depth--;
+      this.raw.exec(nested ? `RELEASE ${name}` : "COMMIT");
+      return result;
+    };
+  }
+
+  close(): void {
+    this.raw.close();
   }
 }
 
@@ -150,8 +224,8 @@ const MIGRATIONS: string[] = [
 
 export function openDb(file: string): DB {
   if (file !== ":memory:") makePrivate(file);
-  const Database = loadSqlite();
-  const db = new Database(file);
+  const { DatabaseSync } = loadSqlite();
+  const db = new DB(new DatabaseSync(file));
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
   db.pragma("busy_timeout = 5000");
@@ -178,7 +252,7 @@ function makePrivate(file: string): void {
 }
 
 function migrate(db: DB): void {
-  const current = db.pragma("user_version", { simple: true }) as number;
+  const current = db.pragma("user_version") as number;
   for (let version = current; version < MIGRATIONS.length; version++) {
     db.transaction(() => {
       db.exec(MIGRATIONS[version]);

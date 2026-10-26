@@ -215,9 +215,35 @@ test("파일 DB: 두 연결이 동시에 열려도 쓰기가 보인다 (WAL)", a
   await syncRepo(writer, repo);
   const count = reader.prepare("SELECT COUNT(*) AS n FROM commits").get() as { n: number };
   assert.equal(count.n, 4);
-  assert.equal(reader.pragma("journal_mode", { simple: true }), "wal");
+  assert.equal(reader.pragma("journal_mode"), "wal");
   writer.close();
   reader.close();
+});
+
+test("DB.transaction: 던지면 되돌리고, 안쪽 트랜잭션은 안쪽만 되돌린다", () => {
+  const db = memoryDb();
+  const insert = db.prepare("INSERT INTO notes (text, source, created_at) VALUES (?, 'test', '2026-01-01')");
+  const count = () => (db.prepare("SELECT COUNT(*) AS n FROM notes").get() as { n: number }).n;
+
+  assert.throws(
+    db.transaction(() => {
+      insert.run("a");
+      throw new Error("boom");
+    }),
+    /boom/,
+  );
+  assert.equal(count(), 0);
+
+  db.transaction(() => {
+    insert.run("outer");
+    assert.throws(
+      db.transaction(() => {
+        insert.run("inner");
+        throw new Error("inner");
+      }),
+    );
+  })();
+  assert.deepEqual(db.prepare("SELECT text FROM notes").all(), [{ text: "outer" }]);
 });
 
 test("discoverRepos: 하위 레포를 찾되 레포 안으로는 내려가지 않는다", () => {

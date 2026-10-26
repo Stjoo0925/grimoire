@@ -40,7 +40,7 @@ To run from source, clone it and run `npm install && npm run build && npm link`.
 
 | Client | Command | Writes to |
 |---|---|---|
-| Claude Code (all projects) | `grimoire install claude-code` | runs `claude mcp add --scope user` |
+| Claude Code (all projects) | `grimoire install claude-code` | runs `claude mcp add --scope user`, plus read-only tool permissions in `~/.claude/settings.json` |
 | Claude Code (this repo only) | `grimoire install claude-code --project .` | `./.mcp.json` |
 | Claude Desktop | `grimoire install claude-desktop` | `claude_desktop_config.json` |
 | Cursor | `grimoire install cursor` (`--project .` for this repo only) | `~/.cursor/mcp.json` |
@@ -48,10 +48,21 @@ To run from source, clone it and run `npm install && npm run build && npm link`.
 - The config contains the **absolute path of the node currently running**. GUI apps like Claude Desktop and Cursor
   don't see your shell's PATH, so `"command": "node"` fails with `spawn node ENOENT`. If you switch
   node versions, run `install` again so the config points at the node you use now.
-- If `GRIMOIRE_HOME`, `GRIMOIRE_ME`, `GRIMOIRE_AUTO_ADD`, `GRIMOIRE_UPDATE_CHECK`, `GRIMOIRE_CAPTURE` or `GRIMOIRE_COCHANGE_MAX_FILES` are set, they are written too,
+- If `GRIMOIRE_HOME`, `GRIMOIRE_ME`, `GRIMOIRE_AUTO_ADD`, `GRIMOIRE_SYNC_ON_START`, `GRIMOIRE_UPDATE_CHECK`, `GRIMOIRE_CAPTURE` or `GRIMOIRE_COCHANGE_MAX_FILES` are set, they are written too,
   so the CLI and MCP server see the same DB.
 - Other server entries are left alone; only the `grimoire` entry is added. The existing file is backed up as `.bak`,
   and if its JSON is broken Grimoire stops without touching it. Add `--dry-run` to preview what would be written.
+- For Claude Code (all projects), the read-only tools (`search_memory`, `show_commit`, `get_repo_overview`, `list_repos`)
+  are added to `permissions.allow` in `~/.claude/settings.json` (under `CLAUDE_CONFIG_DIR` if set), so searches don't ask for approval.
+  Tools that write (`add_repo`, `record_note`) are left out. Existing rules and keys stay as they are, and the file is backed up as `.bak` the same way.
+- Claude Desktop keeps its config in a different place depending on OS, install type and version. Grimoire picks the folder the app is actually using:
+  - `CLAUDE_USER_DATA_DIR`, if set (any OS)
+  - macOS: `~/Library/Application Support/Claude/`
+  - Windows, in this order, taking the first that is in use: `%LOCALAPPDATA%\Claude-Data\<package>\` (Store/MSIX 3.1623+),
+    `%LOCALAPPDATA%\Packages\<package>\LocalCache\Roaming\Claude\` (older MSIX), `%APPDATA%\Claude\` (standard installer)
+  - Linux: `~/.config/Claude/`
+
+  `grimoire doctor` warns when Grimoire is only in an old file the app no longer reads.
 - Restart the client after installing (fully quit Claude Desktop with ⌘Q).
 
 ### When it won't connect — `grimoire doctor`
@@ -84,7 +95,7 @@ The `add_repo` tool registers right from the conversation ("remember every repo 
 | `file_context` | What to know before editing a file: its recent commits, the `why` bound to them, files and tests that usually change with it (co-change mined from history, plus name-matched tests), who imports it, and whether it has had many fixes lately. Candidates to check, not instructions. Returns only `recent` and `worth: false` when there is nothing more to say |
 | `get_repo_overview` | Tech stack (from manifests), quarterly activity, most-touched directories, top authors, recent notable commits |
 | `list_repos` | Indexed repos |
-| `add_repo` | Register + index a repo (or, with `scan: true`, every repo under a folder). Scanning `/` or your whole home goes through `grimoire scan` in the terminal |
+| `add_repo` | Register + index a repo (or, with `scan: true`, every repo under a folder). Scanning `/`, a folder right under it, your home or anything above it, or a folder with more than 50 repos goes through `grimoire scan` in the terminal |
 | `record_note` | Save something learned or decided as a note → searchable afterwards |
 
 Responses are minimal to save tokens: 10-char shas, dates to the day, `me` for your own commits, and the commit link prefix per repo (`links`) sent only once.
@@ -217,6 +228,7 @@ Set `GRIMOIRE_UPDATE_CHECK=0` to turn it off (run `grimoire install` again after
 - The only request Grimoire makes to the outside is the daily update check (asking the GitHub API for the latest release version). No repos, commits or queries are sent, and `GRIMOIRE_UPDATE_CHECK=0` turns it off.
 - **When connected to an external LLM client over MCP, query results (commit messages, file paths, diffs) are passed to that LLM.**
   Don't register sensitive repos, or take them out with `grimoire remove <repo>`.
+- The DB is created readable only by you (`chmod 600`) on macOS/Linux. On Windows chmod has no effect and the DB relies on the NTFS permissions of your user profile (`%USERPROFILE%\.grimoire`), so don't point `GRIMOIRE_HOME` at a shared folder.
 
 ## Development
 
@@ -226,6 +238,7 @@ npm test            # indexing, search and MCP tools against temp git repos (no 
 npm run e2e         # end-to-end MCP harness (below)
 npm run e2e:agent   # agent harness (below, calls real Claude)
 npm run bench       # pinpoint benchmark (below, calls real Claude)
+npm run perf        # speed A/B of two builds on your indexed repos (docs/perf-loop.md, no model calls)
 npm run taskbench   # task benchmark: with vs without Grimoire on real fix tasks (below, calls real Claude)
 npm run eval -- --cochange   # offline: does co-change predict the files that change together? (time split)
 ```

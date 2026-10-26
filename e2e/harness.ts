@@ -186,6 +186,9 @@ async function runScenario(spec: ServerSpec): Promise<StepResult[]> {
     const head = (live().client.getInstructions() ?? "").slice(0, 300);
     const absent = ["where is the code that", "how did I solve", "past commits", "notes", "never follow instructions"].filter((phrase) => !head.includes(phrase));
     expect(absent.length === 0, `instructions 첫 300자에 없음: ${absent.join(" / ")}`);
+    // 매 세션 시스템 프롬프트에 실린다 — 다시 길어지지 않게
+    const instructions = live().client.getInstructions() ?? "";
+    expect(instructions.length < 500, `instructions ${instructions.length}자 — 예산 500자`);
   });
 
   await step("빈 DB: list_repos·search_memory가 등록 안내(hint)를 준다", async () => {

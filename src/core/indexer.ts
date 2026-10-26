@@ -4,14 +4,17 @@
  * 동기화는 "git이 아는 sha 중 DB에 없는 것"만 읽어 넣는다. 그래서
  * - 몇 번을 돌려도 결과가 같고(멱등),
  * - rebase로 히스토리가 바뀌어도 새 sha만 더해진다(옛 sha는 근거로 남는다).
- * 레포 하나의 쓰기는 한 트랜잭션이다.
+ * 커밋은 READ_BATCH개씩 따로 트랜잭션으로 넣는다 — 큰 레포의 첫 동기화가 쓰기 잠금을 오래 쥐어
+ * 다른 grimoire 프로세스(다른 창·CLI)의 쓰기를 `database is locked`로 실패시키지 않게. 중간에 실패해도
+ * 들어간 커밋은 멱등이라 다음 동기화가 이어 간다. 기준점(tips·head_tree)과 기술 스택·현재 코드는
+ * 마지막 트랜잭션에서 함께 바꾼다 — 기준점이 앞서 나가 빠지는 커밋이 생기지 않게.
  */
 import fs from "node:fs";
 import path from "node:path";
 
 import { refreshWhy, storeTrailers } from "./capture";
-import { extractSymbols, headerComment, listHeadFiles, readBlobs, splitIdentifier } from "./code";
-import { addCochange, cochangeInput, extractImports, needsCochangeBackfill, rebuildCochange } from "./context";
+import { BLOB_BATCH_BYTES, extractSymbols, headerComment, listHeadFiles, readBlobs, splitIdentifier, type CodeSymbol, type HeadFile } from "./code";
+import { addCochange, cochangeInput, extractImportSpecs, needsCochangeBackfill, rebuildCochange, resolveImportSpecs } from "./context";
 import { deleteDoc, upsertDoc, pruneOrphanFts, type DB } from "./db";
 import {
   headTree,
@@ -23,6 +26,7 @@ import {
   refTips,
   remoteUrl,
   repoRoot,
+  throwIfCancelled,
   type GitCommit,
 } from "./git";
 import { isMeaningfulSubject } from "./meaningful";
@@ -67,8 +71,8 @@ export interface SyncResult {
   files: number;
 }
 
-export async function addRepo(db: DB, dir: string): Promise<RepoRow> {
-  const root = await repoRoot(path.resolve(dir));
+export async function addRepo(db: DB, dir: string, signal?: AbortSignal): Promise<RepoRow> {
+  const root = await repoRoot(path.resolve(dir), signal);
   if (!root) throw new Error(`git 레포가 아닙니다: ${dir}`);
 
   const existing = db.prepare("SELECT * FROM repos WHERE path = ?").get(root) as
@@ -76,9 +80,12 @@ export async function addRepo(db: DB, dir: string): Promise<RepoRow> {
     | undefined;
   if (existing) return existing;
 
+  const remote = await remoteUrl(root, signal);
+  throwIfCancelled(signal);
+  // 다른 프로세스가 그 사이 같은 레포를 넣었을 수 있다 — 있으면 그대로 쓴다
   db.prepare(
-    "INSERT INTO repos (path, name, remote_url, added_at) VALUES (?, ?, ?, ?)",
-  ).run(root, path.basename(root), await remoteUrl(root), new Date().toISOString());
+    "INSERT OR IGNORE INTO repos (path, name, remote_url, added_at) VALUES (?, ?, ?, ?)",
+  ).run(root, path.basename(root), remote, new Date().toISOString());
   return db.prepare("SELECT * FROM repos WHERE path = ?").get(root) as RepoRow;
 }
 
@@ -93,22 +100,24 @@ export function listRepos(db: DB): RepoRow[] {
   return db.prepare("SELECT * FROM repos ORDER BY name").all() as RepoRow[];
 }
 
-/** 이름·경로·원격 URL 일부로 레포를 찾는다. 여럿이면 정확한 이름 일치를 우선. */
-export function findRepo(db: DB, query: string): RepoRow | null {
+/**
+ * 이름·경로·원격 URL 일부와 맞는 레포들. 정확한 이름·경로 일치가 있으면 그것 하나만.
+ * 여럿이면 호출부가 후보를 보여 주고 고르게 한다 (findRepo는 모호하면 null).
+ */
+export function matchRepos(db: DB, query: string): RepoRow[] {
   const repos = listRepos(db);
   const q = query.trim().toLowerCase();
-  if (!q) return null;
+  if (!q) return [];
   const exact = repos.find(
     (repo) => repo.name.toLowerCase() === q || repo.path.toLowerCase() === q,
   );
-  if (exact) return exact;
-  const partial = repos.filter(
+  if (exact) return [exact];
+  return repos.filter(
     (repo) =>
       repo.name.toLowerCase().includes(q) ||
       repo.path.toLowerCase().includes(q) ||
       (repo.remote_url ?? "").toLowerCase().includes(q),
   );
-  return partial.length === 1 ? partial[0] : (partial[0] ?? null);
 }
 
 /** 절대경로가 속한 등록 레포 (가장 긴 경로가 이기게). 상대경로나 레포 밖이면 undefined. */
@@ -129,10 +138,20 @@ export function relativeToRepo(repoPath: string, target: string): string {
   return relative.split(path.sep).join("/").replace(/^\.\//, "").replace(NESTED_WORKTREE, "");
 }
 
-/** 하위 디렉터리에서 git 레포를 찾는다 (레포 안으로는 더 내려가지 않는다). */
-export function discoverRepos(root: string, maxDepth = 4): string[] {
+/** 이름·경로·원격 URL 일부로 레포 하나를 찾는다. 정확한 일치가 우선이고, 부분 일치가 여럿이면(모호) null. */
+export function findRepo(db: DB, query: string): RepoRow | null {
+  const matches = matchRepos(db, query);
+  return matches.length === 1 ? matches[0] : null;
+}
+
+/**
+ * 하위 디렉터리에서 git 레포를 찾는다 (레포 안으로는 더 내려가지 않는다).
+ * limit을 주면 그보다 하나 더 찾은 데서 멈춘다 — 호출부가 "너무 많다"를 알 수 있을 만큼만 걷는다.
+ */
+export function discoverRepos(root: string, maxDepth = 4, limit = Infinity): string[] {
   const found: string[] = [];
   const walk = (dir: string, depth: number) => {
+    if (found.length > limit) return;
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -160,11 +179,11 @@ export function discoverRepos(root: string, maxDepth = 4): string[] {
  */
 const syncing = new Map<string, Promise<SyncResult>>();
 
-export function syncRepo(db: DB, repo: RepoRow): Promise<SyncResult> {
+export function syncRepo(db: DB, repo: RepoRow, signal?: AbortSignal): Promise<SyncResult> {
   const previous = syncing.get(repo.path) ?? Promise.resolve(null);
   const next = previous.then(
-    () => syncRepoNow(db, repo),
-    () => syncRepoNow(db, repo),
+    () => syncRepoNow(db, repo, signal),
+    () => syncRepoNow(db, repo, signal),
   );
   syncing.set(repo.path, next);
   const clear = () => {
@@ -174,7 +193,7 @@ export function syncRepo(db: DB, repo: RepoRow): Promise<SyncResult> {
   return next;
 }
 
-async function syncRepoNow(db: DB, repo: RepoRow): Promise<SyncResult> {
+async function syncRepoNow(db: DB, repo: RepoRow, signal?: AbortSignal): Promise<SyncResult> {
   if (!fs.existsSync(repo.path)) {
     throw new Error(`레포 경로가 사라졌습니다: ${repo.path} (grimoire remove로 정리하세요)`);
   }
@@ -183,26 +202,41 @@ async function syncRepoNow(db: DB, repo: RepoRow): Promise<SyncResult> {
   const saved = db.prepare("SELECT tips, head_tree FROM repos WHERE id = ?").get(repo.id) as
     | { tips: string | null; head_tree: string | null }
     | undefined;
-  const tips = await refTips(repo.path);
-  const fresh = await newShas(db, repo, saved?.tips ?? null, tips);
+  // 서로 기다릴 필요 없는 git 호출은 함께 띄운다 — 프로세스 띄우기가 호출마다 20ms 안팎이라(Windows),
+  // 바뀐 것 없는 재동기화는 거의 이 셋이 전부다 (npm run perf: 재동기화 시간)
+  const [tips, tree, remote] = await Promise.all([refTips(repo.path, signal), headTree(repo.path, signal), remoteUrl(repo.path, signal)]);
+  const fresh = await newShas(db, repo, saved?.tips ?? null, tips, signal);
 
-  const commits: GitCommit[] = [];
-  for (let start = 0; start < fresh.length; start += READ_BATCH) {
-    commits.push(...(await readCommits(repo.path, fresh.slice(start, start + READ_BATCH))));
-  }
-  // HEAD 트리가 그대로면 현재 코드·기술 스택도 그대로다
-  const tree = await headTree(repo.path);
+  // 커밋은 읽은 묶음마다 따로 쓴다 — 쓰기 잠금을 짧게 쥐고, 전 커밋을 메모리에 모아 두지 않는다.
+  // 트랜잭션은 동기라 아래 기술 스택·코드 읽기와 겹쳐 돌아도 서로 섞이지 않는다
+  const writeFresh = async (backfill: boolean) => {
+    let added = 0;
+    for (let start = 0; start < fresh.length; start += READ_BATCH) {
+      const batch = await readCommits(repo.path, fresh.slice(start, start + READ_BATCH), signal);
+      throwIfCancelled(signal);
+      db.transaction(() => {
+        for (const commit of batch) {
+          // 공변경은 새로 들어간 커밋만 더한다 — 옛 DB는 끝에 전체를 다시 만들므로 여기서는 건너뛴다
+          if (insertCommit(db, repo, commit) && !backfill) addCochange(db, repo.id, cochangeInput(commit, isMeaningfulSubject(commit.subject)));
+        }
+      })();
+      added += batch.length;
+    }
+    return added;
+  };
+  // HEAD 트리가 그대로면 현재 코드·기술 스택도 그대로다. 커밋·기술 스택·코드 읽기는 서로 독립이라 함께 돌린다
   const treeChanged = tree === null || tree !== saved?.head_tree;
-  const tech = treeChanged ? await readTechStack(repo.path) : null;
-  const remote = await remoteUrl(repo.path);
-  const code: CodeChanges = treeChanged ? await readChangedCode(db, repo) : { changed: [], removed: [], present: new Set() };
+  // 옛 DB(마이그레이션 직후)면 있는 커밋으로 공변경 표를 끝에 다시 만들고, 아니면 새 커밋을 하나씩 더한다 (context.ts)
+  const backfill = needsCochangeBackfill(db, repo.id);
+  const [added, tech, code] = await Promise.all([
+    writeFresh(backfill),
+    treeChanged ? readTechStack(repo.path, signal) : null,
+    treeChanged ? readChangedCode(db, repo, signal) : { changed: [], removed: [], present: new Set<string>() },
+  ]);
+  // git 실패를 기본값으로 삼키는 함수들이 있어, 취소됐으면 그 기본값을 쓰기 전에 멈춘다
+  throwIfCancelled(signal);
 
   db.transaction(() => {
-    // 옛 DB(마이그레이션 직후)면 있는 커밋으로 공변경 표를 먼저 만들고, 새 커밋은 하나씩 더한다 (context.ts)
-    const backfill = needsCochangeBackfill(db, repo.id);
-    for (const commit of commits) {
-      if (insertCommit(db, repo, commit) && !backfill) addCochange(db, repo.id, cochangeInput(commit, isMeaningfulSubject(commit.subject)));
-    }
     if (backfill) rebuildCochange(db, repo.id);
     backfillTrailers(db, repo);
 
@@ -230,7 +264,7 @@ async function syncRepoNow(db: DB, repo: RepoRow): Promise<SyncResult> {
   const count = (sql: string) => (db.prepare(sql).get(repo.id) as { n: number }).n;
   return {
     repo: repo.name,
-    added: commits.length,
+    added,
     total: count("SELECT COUNT(*) AS n FROM commits WHERE repo_id = ?"),
     tech: count("SELECT COUNT(DISTINCT tech) AS n FROM repo_tech WHERE repo_id = ?"),
     files: code.changed.length,
@@ -241,22 +275,31 @@ async function syncRepoNow(db: DB, repo: RepoRow): Promise<SyncResult> {
  * DB에 없는 새 sha. ref 끝 커밋이 지난번과 같으면 git을 더 부르지 않고, 달라졌으면 그 뒤 커밋만 받는다.
  * 기준점이 없거나(첫 동기화·옛 DB) 지난 끝 커밋이 사라졌으면 전체 목록과 DB를 비교한다.
  */
-async function newShas(db: DB, repo: RepoRow, savedTips: string | null, tips: string[]): Promise<string[]> {
+async function newShas(
+  db: DB,
+  repo: RepoRow,
+  savedTips: string | null,
+  tips: string[],
+  signal?: AbortSignal,
+): Promise<string[]> {
   const previous = parseTips(savedTips);
   if (previous && previous.length === tips.length && previous.every((sha, index) => sha === tips[index])) return [];
   let candidates: string[] | null = null;
   if (previous && previous.length > 0) {
     try {
-      candidates = await listNewShas(repo.path, previous);
+      candidates = await listNewShas(repo.path, previous, signal);
     } catch {
+      throwIfCancelled(signal);
       candidates = null; // 지난 끝 커밋이 사라짐 → 전체 비교
     }
   }
   if (candidates === null) {
+    const all = await listShas(repo.path, signal);
+    // 목록을 받은 뒤에 읽는다 — 그 사이 다른 묶음이 들어갔어도 중복으로 읽지 않게
     const known = new Set(
       (db.prepare("SELECT sha FROM commits WHERE repo_id = ?").all(repo.id) as { sha: string }[]).map((row) => row.sha),
     );
-    return (await listShas(repo.path)).filter((sha) => !known.has(sha));
+    return all.filter((sha) => !known.has(sha));
   }
   // rebase로 같은 커밋이 다른 ref에서 다시 닿는 경우 등 — 이미 있는 것은 뺀다
   const exists = db.prepare("SELECT 1 FROM commits WHERE repo_id = ? AND sha = ?");
@@ -273,26 +316,73 @@ function parseTips(value: string | null): string[] | null {
   }
 }
 
+/** 바뀐 파일에서 미리 뽑아 둔 것 — 내용 자체는 들고 있지 않는다 */
+interface ChangedFile {
+  path: string;
+  blob: string;
+  lines: number;
+  symbols: CodeSymbol[];
+  header: string;
+  /** import 지정자(원문) — 경로는 트랜잭션 안에서 HEAD 파일 집합으로 푼다 (context.ts) */
+  imports: string[];
+}
+
 interface CodeChanges {
-  changed: { path: string; blob: string; content: string }[];
+  changed: ChangedFile[];
   removed: string[];
   /** HEAD의 색인 대상 경로 전부 — import 대상을 푸는 데 쓴다 */
   present: Set<string>;
 }
 
-/** HEAD의 파일 중 blob이 바뀐 것만 읽는다 (트랜잭션 밖 — git 호출이 느릴 수 있어서) */
-async function readChangedCode(db: DB, repo: RepoRow): Promise<CodeChanges> {
-  const head = await listHeadFiles(repo.path);
+/** blob 크기 합계가 BLOB_BATCH_BYTES를 넘지 않게 나눈다 (cat-file 출력이 버퍼 하나에 올라오므로) */
+export function blobBatches(files: HeadFile[], maxBytes = BLOB_BATCH_BYTES): HeadFile[][] {
+  const batches: HeadFile[][] = [];
+  let current: HeadFile[] = [];
+  let bytes = 0;
+  for (const file of files) {
+    if (current.length > 0 && bytes + file.size > maxBytes) {
+      batches.push(current);
+      current = [];
+      bytes = 0;
+    }
+    current.push(file);
+    bytes += file.size;
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
+}
+
+/**
+ * HEAD의 파일 중 blob이 바뀐 것만 읽는다 (트랜잭션 밖 — git 호출이 느릴 수 있어서).
+ * 묶음별로 읽어 심볼·머리 주석을 바로 뽑고 내용은 버린다 — 트랜잭션 안에서는 INSERT만 한다.
+ */
+async function readChangedCode(db: DB, repo: RepoRow, signal?: AbortSignal): Promise<CodeChanges> {
+  const head = await listHeadFiles(repo.path, signal);
   const known = new Map(
     (db.prepare("SELECT path, blob FROM code_files WHERE repo_id = ?").all(repo.id) as { path: string; blob: string }[]).map(
       (row) => [row.path, row.blob],
     ),
   );
   const stale = head.filter((file) => known.get(file.path) !== file.blob);
-  const contents = await readBlobs(repo.path, [...new Set(stale.map((file) => file.blob))]);
+  // 같은 내용(blob)의 파일은 한 번만 읽는다
+  const unique = [...new Map(stale.map((file) => [file.blob, file])).values()];
+  const extracted = new Map<string, Omit<ChangedFile, "path" | "blob">>();
+  for (const batch of blobBatches(unique)) {
+    const contents = await readBlobs(repo.path, batch.map((file) => file.blob), signal);
+    for (const file of batch) {
+      const content = contents.get(file.blob) ?? "";
+      extracted.set(file.blob, {
+        lines: content.split("\n").length,
+        symbols: extractSymbols(content),
+        header: headerComment(content),
+        imports: extractImportSpecs(file.path, content),
+      });
+    }
+  }
   const present = new Set(head.map((file) => file.path));
+  const empty = { lines: 1, symbols: [], header: "", imports: [] };
   return {
-    changed: stale.map((file) => ({ path: file.path, blob: file.blob, content: contents.get(file.blob) ?? "" })),
+    changed: stale.map((file) => ({ path: file.path, blob: file.blob, ...(extracted.get(file.blob) ?? empty) })),
     removed: [...known.keys()].filter((file) => !present.has(file)),
     present,
   };
@@ -308,12 +398,11 @@ function applyCode(db: DB, repo: RepoRow, code: CodeChanges): void {
   const insertImport = db.prepare("INSERT OR IGNORE INTO file_imports (repo_id, path, target) VALUES (?, ?, ?)");
   const now = new Date().toISOString();
   for (const file of code.changed) {
-    const symbols = extractSymbols(file.content);
-    const header = headerComment(file.content);
-    upsert.run(repo.id, file.path, file.blob, file.content.split("\n").length, JSON.stringify(symbols), header);
+    const { symbols, header } = file;
+    upsert.run(repo.id, file.path, file.blob, file.lines, JSON.stringify(symbols), header);
     // 레포 안 import만 — "누가 나를 쓰나"(usedBy)와 공변경의 import 이웃 신호 (context.ts)
     clearImports.run(repo.id, file.path);
-    for (const target of extractImports(file.path, file.content, code.present)) insertImport.run(repo.id, file.path, target);
+    for (const target of resolveImportSpecs(file.path, file.imports, code.present)) insertImport.run(repo.id, file.path, target);
     upsertDoc(db, {
       kind: "file",
       ref: file.path,
@@ -392,8 +481,9 @@ function insertCommit(db: DB, repo: RepoRow, commit: GitCommit): boolean {
     insertions,
     deletions,
     isMeaningfulSubject(commit.subject) ? 1 : 0,
-  ).changes;
-  if (inserted === 0) return false;
+  );
+  // 이미 있던 커밋(다른 프로세스가 먼저 넣음)이면 파일·문서도 이미 같은 트랜잭션으로 들어가 있다 — 중복 행을 만들지 않는다
+  if (inserted.changes === 0) return false;
 
   const insertFile = db.prepare(
     "INSERT INTO commit_files (repo_id, sha, path, insertions, deletions) VALUES (?, ?, ?, ?, ?)",
@@ -432,14 +522,14 @@ interface TechItem {
 }
 
 /** HEAD의 의존성 매니페스트 → 정규화된 기술 목록 */
-async function readTechStack(dir: string): Promise<TechItem[]> {
-  const manifests = (await listFiles(dir))
+async function readTechStack(dir: string, signal?: AbortSignal): Promise<TechItem[]> {
+  const manifests = (await listFiles(dir, signal))
     .filter((file) => MANIFEST_NAMES.has(path.posix.basename(file)) && !VENDORED.test(file))
     .slice(0, MANIFESTS_MAX);
 
   const items: TechItem[] = [];
   for (const manifestPath of manifests) {
-    const content = await readFileAtHead(dir, manifestPath);
+    const content = await readFileAtHead(dir, manifestPath, signal);
     if (!content) continue;
     for (const dependency of parseManifest(manifestPath, content)) {
       const tech = canonicalTech(dependency.raw);

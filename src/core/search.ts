@@ -121,14 +121,17 @@ function rerankByCoverage(db: DB, concepts: string[][], candidates: Candidate[])
     ),
   );
 
+  // 개념마다 맞는 문서를 한 번에 받아 문서 수(df)와 후보 매칭을 함께 얻는다.
+  // "MATCH ? AND rowid IN (후보)"로 거르면 FTS5가 후보마다 식을 다시 풀어 질의당 수십~수백 ms가 든다
+  // (npm run perf: 재정렬이 검색 시간의 86%) — 전체 매칭 목록을 받아 JS에서 겹치는 편이 훨씬 싸다.
+  const matching = db.prepare("SELECT rowid AS id FROM docs_fts WHERE docs_fts MATCH ?");
   for (const terms of concepts) {
     const expr = conceptExpression(terms);
-    const df = (db.prepare("SELECT COUNT(*) AS n FROM docs_fts WHERE docs_fts MATCH ?").get(`{title body paths}: (${expr})`) as { n: number }).n;
+    const all = matching.all(`{title body paths}: (${expr})`) as { id: number }[];
+    const df = all.length;
     if (df === 0) continue;
     const weight = Math.log(1 + total / df) ** 2;
-    const matched = db
-      .prepare(`SELECT rowid AS id FROM docs_fts WHERE docs_fts MATCH ? AND rowid IN (${placeholders})`)
-      .all(`{title body paths}: (${expr})`, ...ids) as { id: number }[];
+    const matched = all.filter((row) => score.has(row.id));
     for (const row of matched) {
       const nameWords = fileNames.get(row.id);
       const inName = nameWords?.some((word) => terms.some((term) => word.startsWith(term.toLowerCase())));
@@ -212,6 +215,8 @@ export interface SearchHit {
   touched?: { file: string; names: string[] }[];
   /** kind='commit'일 때: 커밋에 묶인 의도 한 줄 (세션 프롬프트·Why 트레일러, capture.ts) */
   why?: string;
+  /** kind='note'일 때: 누가 남겼나 — me(터미널 grimoire note) | ai(MCP record_note). AI가 쓴 노트를 사람의 결정과 구분하게 */
+  by?: "me" | "ai";
 }
 
 export interface SearchResult {
@@ -233,6 +238,8 @@ export function search(db: DB, query: string, options: SearchOptions = {}): Sear
   const concepts = queryConcepts(query);
   const match = buildMatchExpression(query);
   if (match) {
+    // ORDER BY bm25(…)로 쓰면 SQLite가 맞는 행 전부에 snippet()을 계산한 뒤 정렬한다. FTS5의 rank로 정렬하면
+    // FTS5가 안에서 정렬해 LIMIT만큼만 꺼내므로 snippet은 남는 행에만 든다 (결과 같음, 이 질의 −34%).
     const candidates = (expression: string, weights: string, count: number) =>
       db
         .prepare(
@@ -240,8 +247,8 @@ export function search(db: DB, query: string, options: SearchOptions = {}): Sear
              FROM docs_fts f
              JOIN docs d ON d.id = f.rowid
              LEFT JOIN commits c ON d.kind = 'commit' AND c.repo_id = d.repo_id AND c.sha = d.ref
-            WHERE docs_fts MATCH ? ${where}
-            ORDER BY bm25(docs_fts, ${weights})
+            WHERE docs_fts MATCH ? AND f.rank MATCH 'bm25(${weights})' ${where}
+            ORDER BY f.rank
             LIMIT ?`,
         )
         .all(expression, ...params, count) as Candidate[];
@@ -471,8 +478,10 @@ function toHit(
   }
 
   if (doc.kind === "note") {
+    const note = db.prepare("SELECT source FROM notes WHERE id = ?").get(Number(doc.ref)) as { source: string } | undefined;
     return {
       ...base,
+      by: note?.source === "cli" ? "me" : "ai",
       author: null,
       snippet: snippet ?? doc.body.slice(0, 240),
       files: [],

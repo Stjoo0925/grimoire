@@ -17,6 +17,7 @@ import readline from "node:readline";
 
 import { extractSymbols, isIndexable, SOURCE_EXT, splitIdentifier } from "./code";
 import type { DB } from "./db";
+import { CancelledError, gitError, GIT_TIMEOUT_MS } from "./git";
 
 /** git 한 번에 넘길 커밋 수 (쓰기 트랜잭션 단위이기도 하다) */
 const BATCH = 200;
@@ -142,9 +143,19 @@ export class DiffParser {
   }
 }
 
-/** 커밋들의 diff를 git에서 흘려 받아 식별자를 뽑는다 (출력을 메모리에 다 올리지 않는다) */
-export function readCommitCode(dir: string, shas: string[]): Promise<CommitCode[]> {
+/** diff 한 묶음(BATCH 커밋)을 읽는 시간 상한 — 커밋이 많이 모여 git 한 번보다 길 수 있어 넉넉히 */
+const DIFF_TIMEOUT_MS = 5 * GIT_TIMEOUT_MS;
+
+/**
+ * 커밋들의 diff를 git에서 흘려 받아 식별자를 뽑는다 (출력을 메모리에 다 올리지 않는다).
+ * signal(서버 종료 등)이 취소되거나 DIFF_TIMEOUT_MS를 넘기면 git을 끝낸다.
+ */
+export function readCommitCode(dir: string, shas: string[], signal?: AbortSignal): Promise<CommitCode[]> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new CancelledError());
+      return;
+    }
     const pathspecs = [...SOURCE_EXT].map((ext) => `*${ext}`);
     const child = spawn(
       "git",
@@ -153,22 +164,33 @@ export function readCommitCode(dir: string, shas: string[]): Promise<CommitCode[
         "log", "--no-walk=unsorted", "--stdin", "-p", "-U0", "--no-color", "--no-ext-diff", "--no-renames",
         "--format=%x1e%H", "--", ...pathspecs,
       ],
-      { cwd: dir, stdio: ["pipe", "pipe", "pipe"] },
+      { cwd: dir, stdio: ["pipe", "pipe", "pipe"], timeout: DIFF_TIMEOUT_MS, signal },
     );
     const parser = new DiffParser();
     let stderr = "";
-    child.stderr.on("data", (chunk) => (stderr += chunk));
+    let settled = false;
+    child.stderr.on("data", (chunk) => {
+      if (stderr.length < 4096) stderr += chunk;
+    });
     const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
     lines.on("line", (line) => parser.line(line));
-    child.on("error", reject);
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      reject(gitError("log -p", dir, error, stderr, signal));
+    });
     child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
       if (code !== 0) {
-        reject(new Error(`git log -p 실패 (${dir}): ${stderr.trim() || code}`));
+        const reason = code === null ? `${DIFF_TIMEOUT_MS / 1000}초 안에 끝나지 않아 중단` : `종료 코드 ${code}`;
+        reject(gitError("log -p", dir, new Error(reason), stderr, signal));
         return;
       }
       parser.flush();
       resolve(parser.done);
     });
+    child.stdin.on("error", () => undefined);
     child.stdin.end(shas.join("\n") + "\n");
   });
 }
@@ -180,15 +202,15 @@ const running = new Map<string, Promise<number>>();
  * 레포의 아직 diff를 안 읽은 커밋(최신부터)을 채운다. 돌려주는 값은 채운 커밋 수.
  * 이미 돌고 있으면 그 작업을 기다린다. 레포가 사라졌거나 git이 실패하면 남은 커밋은 다음 기회로 미룬다.
  */
-export function indexCommitCode(db: DB, repo: { id: number; path: string }): Promise<number> {
+export function indexCommitCode(db: DB, repo: { id: number; path: string }, signal?: AbortSignal): Promise<number> {
   const existing = running.get(repo.path);
   if (existing) return existing;
-  const job = run(db, repo).finally(() => running.delete(repo.path));
+  const job = run(db, repo, signal).finally(() => running.delete(repo.path));
   running.set(repo.path, job);
   return job;
 }
 
-async function run(db: DB, repo: { id: number; path: string }): Promise<number> {
+async function run(db: DB, repo: { id: number; path: string }, signal?: AbortSignal): Promise<number> {
   const pending = db.prepare(
     "SELECT sha FROM commits WHERE repo_id = ? AND code_state = 0 ORDER BY authored_at DESC LIMIT ?",
   );
@@ -199,7 +221,7 @@ async function run(db: DB, repo: { id: number; path: string }): Promise<number> 
   for (;;) {
     const shas = (pending.all(repo.id, BATCH) as { sha: string }[]).map((row) => row.sha);
     if (shas.length === 0) return total;
-    const results = new Map((await readCommitCode(repo.path, shas)).map((item) => [item.sha, item]));
+    const results = new Map((await readCommitCode(repo.path, shas, signal)).map((item) => [item.sha, item]));
     db.transaction(() => {
       for (const sha of shas) {
         // git이 내용 없는 커밋(소스 변경 없음)은 머리만 주거나 아예 빼므로, 결과가 없어도 끝난 것으로 표시한다

@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 
-import { openDb } from "../src/core/db";
-import { addRepo, discoverRepos, listRepos, removeRepo, syncRepo } from "../src/core/indexer";
+import { isBusyError, openDb } from "../src/core/db";
+import { addRepo, blobBatches, discoverRepos, findRepo, listRepos, matchRepos, removeRepo, syncRepo } from "../src/core/indexer";
 import { indexCommitCode } from "../src/core/diffs";
-import { addNote } from "../src/core/notes";
+import { addNote, TAG_CHARS, TAGS_MAX } from "../src/core/notes";
 import { commitDetail, repoOverview } from "../src/core/overview";
 import { buildMatchExpression, search, stripParticle } from "../src/core/search";
-import { callTool, ToolError } from "../src/mcp/tools";
+import { slimCommit } from "../src/mcp/format";
+import { callTool, describeError, isTooBroad, MAX_SCAN_REPOS, ToolError, TOOLS } from "../src/mcp/tools";
 import { addCommit, git, makeRepo, memoryDb, tempDir } from "./helpers";
 
 function sampleRepo(name = "shop-api"): string {
@@ -297,4 +299,135 @@ test("검색: 제목·본문·경로에 없는 지워진 함수 이름은 diff �
   await indexCommitCode(db, repo);
   const titles = search(db, "applyLegacyCoupon").hits.map((hit) => hit.title);
   assert.deepEqual(titles.sort(), ["feat: 쿠폰", "refactor: 정리"]);
+});
+
+test("add_repo scan: 홈의 조상·루트 바로 아래는 거절하고, 레포가 너무 많으면 터미널로 안내한다", async () => {
+  const home = os.homedir();
+  const root = path.parse(home).root;
+  assert.equal(isTooBroad(root), true);
+  assert.equal(isTooBroad(home), true);
+  assert.equal(isTooBroad(path.dirname(home)), true); // /home, /Users, C:\Users
+  assert.equal(isTooBroad(path.join(root, "opt")), true); // 루트 바로 아래
+  assert.equal(isTooBroad(path.join(home, "work")), false);
+  assert.equal(isTooBroad(tempDir()), false);
+
+  const db = memoryDb();
+  const context = { db, me: [], cwd: home };
+  await assert.rejects(callTool(context, "add_repo", { path: "~/..", scan: true }), /스캔하지는 않습니다/);
+  const rootChild = [path.join(root, "Windows"), "/usr", "/tmp", "/opt"].find((dir) => fs.existsSync(dir) && path.dirname(path.resolve(dir)) === path.parse(path.resolve(dir)).root);
+  if (rootChild) await assert.rejects(callTool(context, "add_repo", { path: rootChild, scan: true }), /스캔하지는 않습니다/);
+
+  // .git 폴더만 있어도 레포로 센다 — 상한 + 1개
+  const many = tempDir();
+  for (let index = 0; index <= MAX_SCAN_REPOS; index++) fs.mkdirSync(path.join(many, `r${index}`, ".git"), { recursive: true });
+  assert.equal(discoverRepos(many, 4, MAX_SCAN_REPOS).length, MAX_SCAN_REPOS + 1); // 상한을 넘으면 더 걷지 않는다
+  await assert.rejects(callTool(context, "add_repo", { path: many, scan: true }), /50개를 넘습니다[\s\S]*grimoire scan/);
+  assert.equal(listRepos(db).length, 0);
+});
+
+test("record_note tags: 개수·길이 상한을 넘으면 잘라서 저장한다", async () => {
+  const db = memoryDb();
+  const context = { db, me: [], cwd: process.cwd() };
+  const schema = TOOLS.find((tool) => tool.name === "record_note")!.inputSchema.properties.tags;
+  assert.equal(schema.maxItems, TAGS_MAX);
+  assert.equal(schema.items.maxLength, TAG_CHARS);
+
+  await assert.rejects(callTool(context, "record_note", { text: "x", tags: "a b" }), /배열/);
+  const recorded = (await callTool(context, "record_note", { text: "긴 태그", tags: Array.from({ length: 20_000 }, () => "y".repeat(200)) })) as { id: number };
+  const stored = db.prepare("SELECT tags FROM notes WHERE id = ?").get(recorded.id) as { tags: string };
+  assert.equal(stored.tags.split(" ").length, TAGS_MAX);
+  assert.ok(stored.tags.split(" ").every((tag) => tag.length === TAG_CHARS));
+  const note = addNote(db, { text: "많은 태그", tags: Array.from({ length: 1000 }, (_, i) => `tag${i}`), source: "cli" });
+  assert.equal(note.tags.split(" ").length, TAGS_MAX);
+  const longest = db.prepare("SELECT MAX(LENGTH(tags)) AS n FROM notes").get() as { n: number };
+  assert.ok(longest.n <= TAGS_MAX * (TAG_CHARS + 1), `tags ${longest.n}자`);
+});
+
+test("노트 검색 결과에 누가 남겼는지(by: me | ai)가 실린다", async () => {
+  const db = memoryDb();
+  const context = { db, me: ["me@example.com"], cwd: process.cwd() };
+  addNote(db, { text: "결정: 캐시는 Redis\n사람이 남김", source: "cli" });
+  await callTool(context, "record_note", { text: "결정: 캐시는 메모리\nAI가 남김" });
+  const result = (await callTool(context, "search_memory", { query: "캐시", kind: "note" })) as { hits: { title: string; by: string }[] };
+  const by = Object.fromEntries(result.hits.map((hit) => [hit.title, hit.by]));
+  assert.deepEqual(by, { "결정: 캐시는 Redis": "me", "결정: 캐시는 메모리": "ai" });
+  assert.ok(JSON.stringify(result.hits[0]).length < 260);
+});
+
+test("레포 이름이 여럿과 부분 일치하면 고르지 않고 후보를 알린다", async () => {
+  const db = memoryDb();
+  await syncRepo(db, await addRepo(db, sampleRepo("shop-api")));
+  await syncRepo(db, await addRepo(db, sampleRepo("shop-web")));
+  assert.equal(findRepo(db, "shop"), null);
+  assert.deepEqual(matchRepos(db, "shop").map((repo) => repo.name), ["shop-api", "shop-web"]);
+  assert.equal(findRepo(db, "shop-api")?.name, "shop-api");
+  assert.equal(findRepo(db, "web")?.name, "shop-web");
+  const context = { db, me: [], cwd: process.cwd() };
+  await assert.rejects(callTool(context, "get_repo_overview", { repo: "shop" }), /여럿입니다: shop-api, shop-web/);
+  await assert.rejects(callTool(context, "record_note", { text: "x", repo: "shop" }), ToolError);
+});
+
+test("show_commit: diff는 보낼 만큼만 읽고(잘림 표시), 취소된 요청은 git을 부르지 않는다", async () => {
+  const db = memoryDb();
+  const dir = sampleRepo();
+  addCommit(dir, { message: "feat: 큰 파일", files: { "src/big.ts": Array.from({ length: 300 }, (_, i) => `export const v${i} = ${i};`).join("\n") } });
+  await syncRepo(db, await addRepo(db, dir));
+  const sha = (db.prepare("SELECT sha FROM commits WHERE subject = 'feat: 큰 파일'").get() as { sha: string }).sha;
+
+  const detail = await commitDetail(db, sha, { maxDiffLines: 20 });
+  assert.ok(!("error" in detail));
+  if ("error" in detail) return;
+  assert.equal(detail.patchTruncated, true);
+  assert.equal(detail.patch?.split("\n").length, 20);
+  assert.equal(detail.patchLines, 21);
+  assert.match(detail.patch ?? "", /^diff --git/);
+  assert.match(slimCommit(detail, []).truncated ?? "", /20줄만 보냄/);
+  const whole = await commitDetail(db, sha, { maxDiffLines: 3000 });
+  assert.ok(!("error" in whole) && !whole.patchTruncated && (whole.patch ?? "").includes("v299"));
+
+  const aborted = new AbortController();
+  aborted.abort();
+  const context = { db, me: [], cwd: dir };
+  await assert.rejects(callTool(context, "show_commit", { sha }, aborted.signal), /요청이 취소되었습니다/);
+  await assert.rejects(callTool(context, "add_repo", { path: dir }, aborted.signal), /요청이 취소되었습니다/);
+});
+
+test("다른 프로세스가 쓰기 잠금을 쥐면 record_note는 잠깐 다시 해 보고 친절한 오류를 낸다", async () => {
+  const file = path.join(tempDir(), "g.db");
+  const holder = openDb(file);
+  const db = openDb(file);
+  db.pragma("busy_timeout = 50");
+  holder.exec("BEGIN IMMEDIATE");
+  try {
+    let caught: unknown;
+    try {
+      addNote(db, { text: "x", source: "cli" });
+    } catch (error) {
+      caught = error;
+    }
+    assert.equal(isBusyError(caught), true);
+    assert.match(describeError(caught).message, /다른 grimoire 프로세스가 DB를 쓰는 중/);
+    await assert.rejects(callTool({ db, me: [], cwd: process.cwd() }, "record_note", { text: "잠긴 동안" }), (error: unknown) => {
+      assert.ok(error instanceof ToolError);
+      assert.match((error as Error).message, /잠시 후 다시 시도하세요/);
+      return true;
+    });
+  } finally {
+    holder.exec("ROLLBACK");
+  }
+  // 잠금이 풀리면 그대로 된다
+  assert.equal(((await callTool({ db, me: [], cwd: process.cwd() }, "record_note", { text: "풀린 뒤" })) as { recorded: boolean }).recorded, true);
+  // 알 수 없는 내부 오류는 메시지를 그대로 내보내지 않는다
+  assert.deepEqual(describeError(new Error("SQLITE internal /secret/path")), { message: "내부 오류 — 서버 로그(stderr)를 확인하세요.", known: false });
+  assert.match(describeError(Object.assign(new Error("spawn git ENOENT"), { code: "ENOENT", syscall: "spawn git" })).message, /git을 찾을 수 없습니다/);
+  assert.match(describeError(new Error("x", { cause: Object.assign(new Error("y"), { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" }) })).message, /출력이 너무 커서/);
+  holder.close();
+  db.close();
+});
+
+test("blobBatches: blob 크기 합계가 상한을 넘지 않게 나눈다", () => {
+  const file = (size: number, index: number) => ({ path: `f${index}`, blob: `b${index}`, size });
+  const batches = blobBatches([60, 30, 20, 100, 5].map(file), 100);
+  assert.deepEqual(batches.map((batch) => batch.map((item) => item.size)), [[60, 30], [20], [100], [5]]);
+  assert.deepEqual(blobBatches([]), []);
 });

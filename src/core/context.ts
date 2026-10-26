@@ -198,40 +198,51 @@ const PY_ABSOLUTE = /^\s*(?:from\s+([\w.]+)\s+import\b|import\s+([\w.]+))/gm;
 const RESOLVE_EXT = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".svelte", ".py"];
 
 /**
- * 파일 하나의 레포 안 import 대상 경로. 상대 경로(JS/TS/Python)와 레포 루트 기준의 Python 절대 모듈만 다룬다 —
- * 외부 패키지는 버린다. 확장자 생략·index·__init__은 `known`(HEAD의 색인 파일 집합)으로 푼다.
+ * 파일 하나의 import 지정자(원문). 상대 경로(JS/TS)와 Python의 상대·절대 모듈만 — 외부 패키지는 여기서 버린다.
+ * 내용을 읽는 자리(색인)와 경로를 푸는 자리(트랜잭션 안, HEAD 파일 집합이 있는 곳)가 달라 둘로 나눴다.
+ * 꼴: "js:<spec>" · "pyrel:<dots>|<module>" · "pyabs:<module>"
  */
-export function extractImports(file: string, content: string, known: Set<string>): string[] {
-  const dir = path.posix.dirname(file);
-  const out = new Set<string>();
-  const resolveJs = (spec: string) => {
-    if (!spec.startsWith(".")) return;
-    const base = path.posix.normalize(path.posix.join(dir, spec));
-    const target = resolveCandidates(base, known);
-    if (target && target !== file) out.add(target);
-  };
-  const resolvePy = (dots: string, module: string) => {
-    let base = dir;
-    for (let i = 1; i < dots.length; i++) base = path.posix.dirname(base);
-    const rel = module.replace(/\./g, "/");
-    const joined = rel ? path.posix.normalize(path.posix.join(base, rel)) : base;
-    const target = resolveCandidates(joined, known, true);
-    if (target && target !== file) out.add(target);
-  };
+export function extractImportSpecs(file: string, content: string): string[] {
   const ext = path.posix.extname(file).toLowerCase();
+  const out = new Set<string>();
   if (ext === ".py") {
-    for (const match of content.matchAll(PY_RELATIVE)) resolvePy(match[1], match[2]);
+    for (const match of content.matchAll(PY_RELATIVE)) out.add(`pyrel:${match[1]}|${match[2]}`);
     for (const match of content.matchAll(PY_ABSOLUTE)) {
       const module = match[1] ?? match[2];
-      if (!module) continue;
-      const target = resolveCandidates(module.replace(/\./g, "/"), known, true);
-      if (target && target !== file) out.add(target);
+      if (module) out.add(`pyabs:${module}`);
     }
     return [...out];
   }
   if (!SOURCE_EXT.has(ext)) return [];
-  for (const pattern of IMPORT_PATTERNS) for (const match of content.matchAll(pattern)) resolveJs(match[1]);
+  for (const pattern of IMPORT_PATTERNS) for (const match of content.matchAll(pattern)) if (match[1].startsWith(".")) out.add(`js:${match[1]}`);
   return [...out];
+}
+
+/** 지정자 → 레포 안 경로. 확장자 생략·index·__init__은 `known`(HEAD의 색인 파일 집합)으로 푼다. */
+export function resolveImportSpecs(file: string, specs: string[], known: Set<string>): string[] {
+  const dir = path.posix.dirname(file);
+  const out = new Set<string>();
+  for (const spec of specs) {
+    let target: string | null = null;
+    if (spec.startsWith("js:")) {
+      target = resolveCandidates(path.posix.normalize(path.posix.join(dir, spec.slice(3))), known);
+    } else if (spec.startsWith("pyrel:")) {
+      const [dots, module] = spec.slice(6).split("|");
+      let base = dir;
+      for (let i = 1; i < dots.length; i++) base = path.posix.dirname(base);
+      const rel = module.replace(/\./g, "/");
+      target = resolveCandidates(rel ? path.posix.normalize(path.posix.join(base, rel)) : base, known, true);
+    } else if (spec.startsWith("pyabs:")) {
+      target = resolveCandidates(spec.slice(6).replace(/\./g, "/"), known, true);
+    }
+    if (target && target !== file) out.add(target);
+  }
+  return [...out];
+}
+
+/** 파일 하나의 레포 안 import 대상 경로 (둘을 이어 붙인 것 — 테스트·CLI용) */
+export function extractImports(file: string, content: string, known: Set<string>): string[] {
+  return resolveImportSpecs(file, extractImportSpecs(file, content), known);
 }
 
 function resolveCandidates(base: string, known: Set<string>, python = false): string | null {

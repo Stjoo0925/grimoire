@@ -11,7 +11,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type { Env } from "../core/config";
-import { writeJsonFile, InstallError, FORWARDED_ENV } from "./install";
+import { FORWARDED_ENV, InstallError, planJson, writeJson } from "./install";
 
 export interface HookCommand {
   type: "command";
@@ -93,24 +93,11 @@ export async function installHooks(options: HooksInstallOptions): Promise<HooksI
   }
   const file = settingsPath(options.home);
   const command = hookCommand(hookPath, options.env);
-  let existing: unknown = {};
-  let raw: string | null = null;
-  if (fs.existsSync(file)) {
-    raw = fs.readFileSync(file, "utf8");
-    if (raw.trim()) {
-      try {
-        existing = JSON.parse(raw);
-      } catch {
-        throw new InstallError(`설정 파일이 올바른 JSON이 아니라 건드리지 않았습니다: ${file}`);
-      }
-    }
-  }
-  const merged = mergeHooks(existing, command, options.remove);
-  const unchanged = raw !== null && JSON.stringify(existing) === JSON.stringify(merged);
+  // install.ts와 같은 계획·쓰기 — 깨진 JSON이면 건드리지 않고 멈추고, .bak을 남기고, 임시 파일 + rename
+  const plan = planJson(file, (existing) => mergeHooks(existing, command, options.remove));
   const events = HOOK_EVENTS.map((item) => item.event);
-  if (options.dryRun || unchanged) return { file, backup: null, unchanged, command, events };
-  const backup = writeJsonFile(file, JSON.stringify(merged, null, 2) + "\n", raw);
-  return { file, backup, unchanged: false, command, events };
+  if (options.dryRun || plan.unchanged) return { file, backup: null, unchanged: plan.unchanged, command, events };
+  return { file, backup: writeJson(plan), unchanged: false, command, events };
 }
 
 /** settings.json에 적힌 우리 훅 명령들 (doctor용). 없으면 빈 배열. */

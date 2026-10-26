@@ -8,7 +8,7 @@
 import { execFile } from "node:child_process";
 import path from "node:path";
 
-import { runGit } from "./git";
+import { CancelledError, gitError, GIT_BULK_TIMEOUT_MS, runGit } from "./git";
 
 /** 색인할 소스 확장자 */
 export const SOURCE_EXT = new Set([
@@ -43,11 +43,12 @@ export function isIndexable(file: string, size: number): boolean {
 }
 
 /** HEAD 트리의 색인 대상 파일 (경로·blob sha·크기) */
-export async function listHeadFiles(dir: string): Promise<HeadFile[]> {
+export async function listHeadFiles(dir: string, signal?: AbortSignal): Promise<HeadFile[]> {
   let out: string;
   try {
-    out = await runGit(dir, ["ls-tree", "-r", "-l", "-z", "HEAD"]);
-  } catch {
+    out = await runGit(dir, ["ls-tree", "-r", "-l", "-z", "HEAD"], undefined, signal, GIT_BULK_TIMEOUT_MS);
+  } catch (error) {
+    if (error instanceof CancelledError) throw error;
     return []; // 커밋이 없는 레포
   }
   const files: HeadFile[] = [];
@@ -61,11 +62,14 @@ export async function listHeadFiles(dir: string): Promise<HeadFile[]> {
   return files.slice(0, MAX_FILES);
 }
 
-/** blob 여러 개를 git cat-file --batch 한 번으로 읽는다 */
-export async function readBlobs(dir: string, blobs: string[]): Promise<Map<string, string>> {
+/**
+ * blob 여러 개를 git cat-file --batch 한 번으로 읽는다. 출력 전체가 버퍼 하나에 올라오므로
+ * 호출부가 크기 합계를 BLOB_BATCH_BYTES 안으로 나눠 부른다 (indexer.ts readChangedCode).
+ */
+export async function readBlobs(dir: string, blobs: string[], signal?: AbortSignal): Promise<Map<string, string>> {
   const contents = new Map<string, string>();
   if (blobs.length === 0) return contents;
-  const out = await runGitBuffer(dir, ["cat-file", "--batch"], blobs.join("\n") + "\n");
+  const out = await runGitBuffer(dir, ["cat-file", "--batch"], blobs.join("\n") + "\n", signal);
   let offset = 0;
   while (offset < out.length) {
     const headerEnd = out.indexOf(0x0a, offset);
@@ -84,26 +88,38 @@ export async function readBlobs(dir: string, blobs: string[]): Promise<Map<strin
   return contents;
 }
 
-function runGitBuffer(dir: string, args: string[], input: string): Promise<Buffer> {
+/** readBlobs 한 번에 읽을 blob 크기 합계 상한 — 파일 하나는 MAX_FILE_BYTES 이하라 버퍼는 이 근처에서 멈춘다 */
+export const BLOB_BATCH_BYTES = 64 * 1024 * 1024;
+
+function runGitBuffer(dir: string, args: string[], input: string, signal?: AbortSignal): Promise<Buffer> {
   // runGit은 utf8 문자열을 돌려주지만 cat-file은 크기 단위가 바이트라 버퍼가 필요하다
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new CancelledError());
+      return;
+    }
     const child = execFile(
       "git",
       args,
-      { cwd: dir, maxBuffer: 512 * 1024 * 1024, encoding: "buffer" },
+      { cwd: dir, maxBuffer: 2 * BLOB_BATCH_BYTES, encoding: "buffer", timeout: GIT_BULK_TIMEOUT_MS, signal },
       (error, stdout, stderr) => {
-        if (error) reject(new Error(`git ${args[0]} 실패 (${dir}): ${String(stderr).trim() || error.message}`));
+        if (error) reject(gitError(args[0], dir, error, String(stderr), signal));
         else resolve(stdout);
       },
     );
+    child.stdin?.on("error", () => undefined);
     child.stdin?.end(input);
   });
 }
 
-/** 언어 무관 선언 패턴 — 줄 단위로 맞춘다 */
+/**
+ * 언어 무관 선언 패턴 — 줄 단위로 맞춘다.
+ * 같은 공백을 여러 수량자가 나눠 가질 수 있는 꼴(`\s*(?:a|\s)*\s*`)은 공백 줄에서 백트래킹이 폭주한다(O(n³)).
+ * 수정자는 "낱말 + \s+" 단위로만 반복하고, 그룹 안에 맨 `\s` 대안을 두지 않는다 (tests/code.test.ts가 시간을 잰다).
+ */
 const DECLARATIONS: RegExp[] = [
   // JS/TS
-  /^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)/,
+  /^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*(?:\*\s*)?([A-Za-z_$][\w$]*)/,
   /^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)/,
   /^\s*(?:export\s+)?(?:declare\s+)?(?:interface|type|enum)\s+([A-Za-z_$][\w$]*)/,
   /^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(?:async\s*)?(?:\(|function|[A-Za-z_$][\w$]*\s*=>)/,
@@ -118,8 +134,8 @@ const DECLARATIONS: RegExp[] = [
   /^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_]\w*)/,
   /^\s*(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum|trait)\s+([A-Za-z_]\w*)/,
   // Java / Kotlin / Swift / C#
-  /^\s*(?:public|private|protected|internal|open|data|sealed|abstract|static|final|\s)*\s*(?:class|interface|object|struct|record)\s+([A-Za-z_]\w*)/,
-  /^\s*(?:public|private|protected|internal|override|suspend|static|\s)*\s*fun\s+([A-Za-z_]\w*)/,
+  /^\s*(?:(?:public|private|protected|internal|open|data|sealed|abstract|static|final)\s+)*(?:class|interface|object|struct|record)\s+([A-Za-z_]\w*)/,
+  /^\s*(?:(?:public|private|protected|internal|override|suspend|static)\s+)*fun\s+([A-Za-z_]\w*)/,
   // Ruby / PHP
   /^\s*def\s+(?:self\.)?([A-Za-z_]\w*[?!]?)/,
   /^\s*(?:public\s+|private\s+|protected\s+|static\s+)*function\s+([A-Za-z_]\w*)/,
@@ -138,7 +154,8 @@ export function extractSymbols(content: string): CodeSymbol[] {
   const lines = content.split("\n");
   for (let index = 0; index < lines.length && symbols.length < MAX_SYMBOLS; index++) {
     const line = lines[index];
-    if (line.length > 400) continue;
+    // 공백뿐인 줄은 패턴을 돌릴 필요가 없다 (값싼 조기 종료)
+    if (line.length > 400 || !line.trim()) continue;
     for (const pattern of ROUTES) {
       const match = pattern.exec(line);
       if (match) {

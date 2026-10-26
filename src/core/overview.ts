@@ -4,7 +4,7 @@
 import fs from "node:fs";
 
 import type { DB } from "./db";
-import { commitWebUrl, lineCounts, showCommit } from "./git";
+import { CancelledError, commitWebUrl, lineCounts, showCommit } from "./git";
 import type { RepoRow } from "./indexer";
 import { displayName } from "./tech/canonical";
 
@@ -150,7 +150,10 @@ export interface CommitDetail {
   patch: string | null;
   patchTruncated: boolean;
   patchNote?: string;
-  /** 잘리기 전 diff 전체 줄 수 */
+  /**
+   * 읽은 diff 줄 수. 잘리지 않았으면 전체 줄 수, 잘렸으면(patchTruncated) 하한이다 —
+   * 큰 커밋을 메모리에 다 올리지 않으려고 보낼 만큼 + 1줄에서 읽기를 멈춘다.
+   */
   patchLines: number;
   /** paths로 좁혔을 때 실제로 고른 파일 */
   selectedFiles?: string[];
@@ -184,7 +187,7 @@ export function findCommits(db: DB, shaPrefix: string, repoId?: number) {
 export async function commitDetail(
   db: DB,
   shaPrefix: string,
-  options: { repoId?: number; maxDiffLines?: number; paths?: string[] } = {},
+  options: { repoId?: number; maxDiffLines?: number; paths?: string[]; signal?: AbortSignal } = {},
 ): Promise<CommitDetail | { error: string; candidates?: string[] }> {
   const matches = findCommits(db, shaPrefix, options.repoId);
   if (matches.length === 0) return { error: `커밋을 찾지 못했습니다: ${shaPrefix}` };
@@ -201,7 +204,7 @@ export async function commitDetail(
   // 줄 수는 색인하지 않는다 — 이 커밋 하나만 지금 센다 (레포가 없으면 옛 색인 값이 있으면 그것을 쓴다)
   if (fs.existsSync(row.repo_path)) {
     try {
-      const counts = new Map((await lineCounts(row.repo_path, row.sha)).map((file) => [file.path, file]));
+      const counts = new Map((await lineCounts(row.repo_path, row.sha, options.signal)).map((file) => [file.path, file]));
       for (const file of files) {
         const count = counts.get(file.path);
         if (!count) continue;
@@ -209,7 +212,8 @@ export async function commitDetail(
         file.deletions = count.deletions;
         file.binary = count.insertions === null;
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof CancelledError) throw error;
       // 줄 수 없이 경로만 보여 준다
     }
   }
@@ -249,11 +253,12 @@ export async function commitDetail(
     patchNote = `로컬 레포가 없어 diff를 읽지 못했습니다: ${row.repo_path}`;
   } else {
     try {
-      const lines = (await showCommit(row.repo_path, row.sha, selectedFiles)).replace(/^\n+/, "").split("\n");
-      patchLines = lines.length;
-      patchTruncated = lines.length > maxLines;
-      patch = lines.slice(0, maxLines).join("\n");
+      const shown = await showCommit(row.repo_path, row.sha, selectedFiles, { maxLines, signal: options.signal });
+      patchTruncated = shown.truncated;
+      patchLines = shown.lines.length + (shown.truncated ? 1 : 0);
+      patch = shown.lines.join("\n");
     } catch (error) {
+      if (error instanceof CancelledError) throw error;
       patchNote = error instanceof Error ? error.message : "git show 실패";
     }
   }

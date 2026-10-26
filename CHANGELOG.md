@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/Stjoo0925/grimoire/compare/v0.6.0...v0.6.1) (2026-10-26)
+
+
+### 버그 수정
+
+* Windows에서 e2e·테스트가 돌게 하고 CI에 Windows를 더한다 ([#11](https://github.com/Stjoo0925/grimoire/issues/11)) ([94dd30f](https://github.com/Stjoo0925/grimoire/commit/94dd30f2fc866ec5ac1775add800b395bf05379c))
+
 ## [0.6.0](https://github.com/Stjoo0925/grimoire/compare/v0.5.0...v0.6.0) (2026-10-26)
 
 

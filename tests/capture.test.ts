@@ -182,3 +182,45 @@ test("트레일러가 있는 커밋: 색인 때 commit_context·agent_signal·[w
   assert.equal((await syncRepo(db, repo)).added, 0);
   void git;
 });
+
+test("SessionStart 요약과 막혔을 때 2단계 — 각각 600자·1200자 안에서 한 번만", async () => {
+  const db = memoryDb();
+  const dir = makeRepo(
+    [
+      { message: "feat: 시작", files: { "src/a.ts": "export const a = 1;\n", "tests/a.test.ts": "// t\n" }, date: "2024-01-01T10:00:00+09:00" },
+      { message: "fix(a): 경계값 처리\n\nRejected: 음수 입력 금지 | 호출부가 음수를 쓴다\nTested: npm test", files: { "src/a.ts": "export const a = 2;\n" }, date: "2024-02-01T10:00:00+09:00" },
+    ],
+    "start",
+  );
+  const repo = await addRepo(db, dir);
+  await syncRepo(db, repo);
+  const env = { GRIMOIRE_HOME: tempDir("grimoire-start-home-") };
+  const context = { db, env, me: ["me@example.com"] };
+
+  const start = await handleHook(context, event(dir, "st-1", { hook_event_name: "SessionStart", source: "startup" }));
+  assert.ok(start?.stdout, "요약이 없습니다");
+  assert.match(start!.stdout!, /^Grimoire: start — recent commits \(me\)\n/);
+  assert.match(start!.stdout!, /fix\(a\): 경계값 처리/);
+  assert.match(start!.stdout!, /file_context before editing/);
+  assert.ok(start!.stdout!.length <= 600);
+  assert.equal(await handleHook(context, event(dir, "st-1", { hook_event_name: "SessionStart", source: "resume" })), null);
+  assert.equal(await handleHook(context, event(tempDir(), "st-1", { hook_event_name: "SessionStart", source: "startup" })), null, "등록 레포 밖");
+
+  // 편집 뒤 첫 실패한 검증 → 2단계 한 번. 두 번째 실패엔 없음
+  const session = "st-2";
+  await handleHook(context, event(dir, session, { hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: path.join(dir, "src/a.ts"), old_string: "2", new_string: "3" } }));
+  const fail = { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: "npm test" }, tool_response: { stdout: "", stderr: "Error: 1 failing" } } as const;
+  const first = await handleHook(context, event(dir, session, fail));
+  assert.ok(first?.json, "2단계 맥락이 없습니다");
+  const text = first!.json!.hookSpecificOutput.additionalContext;
+  assert.equal(first!.json!.hookSpecificOutput.hookEventName, "PostToolUse");
+  assert.match(text, /first failing check/);
+  assert.match(text, /src\/a\.ts:/);
+  assert.match(text, /rejected: 음수 입력 금지/);
+  assert.match(text, /verified: /);
+  assert.ok(text.length <= 1200, `${text.length}자`);
+  assert.equal(await handleHook(context, event(dir, session, fail)), null, "두 번째 실패에는 다시 내지 않는다");
+  // 통과한 검증은 기록만
+  assert.equal(await handleHook(context, event(dir, "st-3", { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: "npm test" }, tool_response: { stdout: "ok", stderr: "" } })), null);
+  assert.equal(pendingEvents(db, "st-3", repo.id).length, 1);
+});

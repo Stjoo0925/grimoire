@@ -12,6 +12,7 @@ import path from "node:path";
 
 import { dbPath, grimoireHome, type Env } from "./core/config";
 import { openDb } from "./core/db";
+import { myEmails } from "./core/identity";
 import { handleHook, type HookInput } from "./hook/runner";
 
 /** 자체 타임아웃 — Claude Code의 timeout보다 짧게, 느린 디스크에서도 편집을 붙잡지 않게 */
@@ -67,10 +68,8 @@ async function main(): Promise<void> {
     log(env, `bad stdin: ${error instanceof Error ? error.message : error}`);
     return;
   }
-  const me = (env.GRIMOIRE_ME ?? "")
-    .split(",")
-    .map((item) => item.trim().toLowerCase())
-    .filter(Boolean);
+  // "나" — GRIMOIRE_ME가 있으면 그것, 없으면 git config user.email (CLI·MCP와 같은 규칙)
+  const me = await myEmails(env);
   let db;
   try {
     db = openDb(dbPath(env));

@@ -15,14 +15,18 @@ import path from "node:path";
 
 import {
   bindToCommit,
+  commitContextOf,
   commitSucceeded,
   isGitCommit,
+  isSymptomOnly,
   isVerifyCommand,
   lineHashes,
+  pendingEvents,
   pruneEvents,
   recordEvent,
   recordPrompt,
   verifyOutcome,
+  whyLine,
 } from "../core/capture";
 import { isIndexable } from "../core/code";
 import { grimoireHome, type Env } from "../core/config";
@@ -191,10 +195,14 @@ async function postToolUse(context: HookContext, input: HookInput): Promise<Hook
     const text = `${command.trim().slice(0, 200)} → ${outcome.ok ? "pass" : "fail"}${outcome.tail ? ` :: ${outcome.tail}` : ""}`;
     recordEvent(context.db, { sessionId: input.session_id, repoId: repo.id, kind: "verify", text });
     if (!outcome.ok) {
+      // 막혔을 때 2단계(§3-5): 이 세션의 첫 번째 실패한 검증 뒤 한 번만, 편집 중인 파일들의 왜·검증·버린 편집을 건넨다.
+      // 막히지 않은 세션에는 비용이 없다. (REM: "막혔을 때 한 번" > "첫 편집 때 바로" > "항상 고정")
       const state = loadSession(context.env, input.session_id);
       if (!state.struggled) {
         state.struggled = true;
         saveSession(context.env, input.session_id, state);
+        const text = struggleContext(context, repo, input.session_id);
+        if (text) return { json: { hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: text } } };
       }
     }
   }
@@ -220,11 +228,85 @@ function newText(toolInput: Record<string, unknown>): string {
   return "";
 }
 
+/** 막혔을 때 2단계의 글자 예산과 커밋 수 */
+const STRUGGLE_BUDGET = 1_200;
+const STRUGGLE_COMMITS = 3;
+
+function struggleContext(context: HookContext, repo: RepoRow, sessionId: string): string {
+  const edited = [...new Set(pendingEvents(context.db, sessionId, repo.id).filter((event) => event.kind === "edit" && event.path).map((event) => event.path as string))];
+  if (edited.length === 0) return "";
+  const lines: string[] = [`Grimoire: first failing check in this session — what past commits on the files you're editing recorded`];
+  const seen = new Set<string>();
+  for (const file of edited.slice(0, 5)) {
+    const recent = context.db
+      .prepare(
+        `SELECT c.sha FROM commit_files f JOIN commits c ON c.repo_id = f.repo_id AND c.sha = f.sha
+          WHERE f.repo_id = ? AND f.path = ? AND c.meaningful = 1 ORDER BY c.authored_at DESC LIMIT 5`,
+      )
+      .all(repo.id, file) as { sha: string }[];
+    for (const { sha } of recent) {
+      if (seen.has(sha) || seen.size >= STRUGGLE_COMMITS) continue;
+      const view = commitContextOf(context.db, repo.id, sha);
+      if (!view) continue;
+      seen.add(sha);
+      const why = whyLine(context.db, repo.id, sha, 160);
+      lines.push(`${sha.slice(0, 10)} ${file}:`);
+      if (why) lines.push(`  why: ${why}`);
+      const verify = [...view.verify.slice(-2), ...view.trailers.filter((trailer) => trailer.key === "tested").map((trailer) => trailer.value)];
+      if (verify.length > 0) lines.push(`  verified: ${verify.join(" · ").slice(0, 200)}`);
+      if (view.dropped.length > 0) lines.push(`  dropped (edited then left out of the commit): ${view.dropped.slice(0, 4).join(", ")}`);
+      const rejected = view.trailers.filter((trailer) => trailer.key === "rejected" || trailer.key === "constraint").slice(0, 2);
+      for (const trailer of rejected) lines.push(`  ${trailer.key}: ${trailer.value.slice(0, 160)}`);
+    }
+  }
+  if (lines.length === 1) return "";
+  const text = lines.join("\n");
+  return text.length > STRUGGLE_BUDGET ? `${text.slice(0, STRUGGLE_BUDGET - 1)}…` : text;
+}
+
+/** 세션 시작 요약의 글자 예산 */
+const START_BUDGET = 600;
+
+/**
+ * SessionStart(startup·clear·compact): 작업 레포의 "지난 세션 이후 내 커밋 + 묶인 왜 + 커밋 안 된 편집"을 600자 안에
+ * plain stdout으로 (이 이벤트는 stdout이 그대로 컨텍스트가 된다). resume은 세션 파일을 이어 쓸 뿐 다시 내지 않는다.
+ */
 function sessionStart(context: HookContext, input: HookInput): HookOutput | null {
   pruneSessions(context.env);
   pruneEvents(context.db);
   if (input.source === "resume") return null;
-  return null;
+  const repo = sessionRepo(context, input);
+  if (!repo) return null;
+  const mine = context.me.map((email) => email.toLowerCase());
+  const recent = context.db
+    .prepare(
+      `SELECT sha, authored_at AS date, author_email AS email, subject FROM commits
+        WHERE repo_id = ? AND meaningful = 1 ${mine.length > 0 ? `AND author_email IN (${mine.map(() => "?").join(", ")})` : ""}
+        ORDER BY authored_at DESC LIMIT 3`,
+    )
+    .all(repo.id, ...mine) as { sha: string; date: string; email: string; subject: string }[];
+  if (recent.length === 0) return null;
+  const lines = [`Grimoire: ${repo.name} — recent commits${mine.length > 0 ? " (me)" : ""}`];
+  for (const commit of recent) {
+    const why = whyLine(context.db, repo.id, commit.sha, 100);
+    lines.push(`${commit.sha.slice(0, 10)} ${commit.date.slice(0, 10)} "${commit.subject.length > 70 ? `${commit.subject.slice(0, 69)}…` : commit.subject}"${why && !isSymptomOnly(why) ? ` — why: ${why}` : ""}`);
+  }
+  // 이 레포에서 커밋에 묶이지 않은 채 남은 편집(이전 세션들) — 끝내지 못한 작업의 흔적
+  const uncommitted = context.db
+    .prepare(
+      `SELECT DISTINCT path FROM session_events e WHERE repo_id = ? AND kind = 'edit' AND path IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM session_events c WHERE c.session_id = e.session_id AND c.repo_id = e.repo_id AND c.kind = 'commit' AND c.at > e.at)
+        ORDER BY at DESC LIMIT 5`,
+    )
+    .all(repo.id) as { path: string }[];
+  if (uncommitted.length > 0) lines.push(`Edited but not committed in earlier sessions: ${uncommitted.map((row) => row.path).join(", ")}`);
+  lines.push("Use file_context before editing; search_memory for \"where/how did I…\".");
+  let text = lines.join("\n");
+  while (text.length > START_BUDGET && lines.length > 2) {
+    lines.splice(lines.length - 2, 1);
+    text = lines.join("\n");
+  }
+  return { stdout: text };
 }
 
 function preToolUse(context: HookContext, input: HookInput): HookOutput | null {

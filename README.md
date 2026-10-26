@@ -38,7 +38,7 @@ To run from source, clone it and run `npm install && npm run build && npm link`.
 
 | Client | Command | Writes to |
 |---|---|---|
-| Claude Code (all projects) | `grimoire install claude-code` | runs `claude mcp add --scope user` |
+| Claude Code (all projects) | `grimoire install claude-code` | runs `claude mcp add --scope user`, plus read-only tool permissions in `~/.claude/settings.json` |
 | Claude Code (this repo only) | `grimoire install claude-code --project .` | `./.mcp.json` |
 | Claude Desktop | `grimoire install claude-desktop` | `claude_desktop_config.json` |
 | Cursor | `grimoire install cursor` (`--project .` for this repo only) | `~/.cursor/mcp.json` |
@@ -50,6 +50,9 @@ To run from source, clone it and run `npm install && npm run build && npm link`.
   so the CLI and MCP server see the same DB.
 - Other server entries are left alone; only the `grimoire` entry is added. The existing file is backed up as `.bak`,
   and if its JSON is broken Grimoire stops without touching it. Add `--dry-run` to preview what would be written.
+- For Claude Code (all projects), the read-only tools (`search_memory`, `show_commit`, `get_repo_overview`, `list_repos`)
+  are added to `permissions.allow` in `~/.claude/settings.json` (under `CLAUDE_CONFIG_DIR` if set), so searches don't ask for approval.
+  Tools that write (`add_repo`, `record_note`) are left out. Existing rules and keys stay as they are, and the file is backed up as `.bak` the same way.
 - Restart the client after installing (fully quit Claude Desktop with ⌘Q).
 
 ### When it won't connect — `grimoire doctor`

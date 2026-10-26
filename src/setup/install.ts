@@ -6,6 +6,9 @@
  *  - SQLite는 node 내장(node:sqlite)이라, 등록한 node가 지원 버전 이상이기만 하면 된다.
  * 기존 설정 파일은 다른 서버 항목을 그대로 두고 grimoire 항목만 넣거나 바꾼다.
  * 덮어쓰기 전에 `.bak`을 남기고, 임시 파일 + rename으로 쓴다.
+ *
+ * claude-code 사용자 범위는 읽기 전용 도구(readOnlyHint)를 `~/.claude/settings.json`의 `permissions.allow`에도 더한다.
+ * 검색할 때마다 승인 창이 뜨지 않게 — 쓰기 도구(add_repo·record_note)는 넣지 않는다.
  */
 import { execFile } from "node:child_process";
 import fs from "node:fs";
@@ -13,6 +16,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type { Env } from "../core/config";
+import { TOOLS } from "../mcp/tools";
 
 export const SERVER_NAME = "grimoire";
 export const CLIENTS = ["claude-code", "claude-desktop", "cursor"] as const;
@@ -75,6 +79,33 @@ export function mergeServer(existing: unknown, spec: ServerSpec): Record<string,
   return base;
 }
 
+/** Claude Code 권한 규칙 이름 — 확인 없이 불러도 되는 읽기 도구만 */
+export function readOnlyPermissions(): string[] {
+  return TOOLS.filter((tool) => "annotations" in tool && "readOnlyHint" in tool.annotations && tool.annotations.readOnlyHint).map(
+    (tool) => `mcp__${SERVER_NAME}__${tool.name}`,
+  );
+}
+
+/** Claude Code 사용자 설정 파일. CLAUDE_CONFIG_DIR을 쓰면 그 아래 */
+export function claudeSettingsPath(options: { env?: Env; home?: string } = {}): string {
+  const dir = options.env?.CLAUDE_CONFIG_DIR?.trim();
+  return path.join(dir ? path.resolve(dir) : path.join(options.home ?? os.homedir(), ".claude"), "settings.json");
+}
+
+/** 기존 settings.json의 permissions.allow에 빠진 규칙만 더한다. 다른 키·다른 규칙·순서는 그대로 둔다. */
+export function mergePermissions(existing: unknown, rules: string[]): Record<string, unknown> {
+  const base = existing && typeof existing === "object" && !Array.isArray(existing) ? { ...(existing as Record<string, unknown>) } : {};
+  const permissions =
+    base.permissions && typeof base.permissions === "object" && !Array.isArray(base.permissions)
+      ? { ...(base.permissions as Record<string, unknown>) }
+      : {};
+  const allow = Array.isArray(permissions.allow) ? [...(permissions.allow as unknown[])] : [];
+  for (const rule of rules) if (!allow.includes(rule)) allow.push(rule);
+  permissions.allow = allow;
+  base.permissions = permissions;
+  return base;
+}
+
 export interface InstallResult {
   client: ClientName;
   /** 쓴 파일 (claude CLI로 등록했으면 null) */
@@ -86,6 +117,8 @@ export interface InstallResult {
   command?: string;
   /** 사용자가 할 일 (재시작 등) */
   next: string;
+  /** claude-code 사용자 범위: settings.json에 더한 권한 규칙 (dry-run이면 더할 규칙) */
+  permissions?: { file: string; added: string[]; backup: string | null };
 }
 
 export interface InstallOptions {
@@ -96,6 +129,8 @@ export interface InstallOptions {
   /** 파일을 쓰지 않고 무엇을 할지만 돌려준다 */
   dryRun?: boolean;
   home?: string;
+  /** 외부 명령 실행 (테스트에서 claude CLI 대신) */
+  runCommand?: typeof run;
 }
 
 export class InstallError extends Error {}
@@ -113,19 +148,48 @@ export async function install(client: ClientName, options: InstallOptions): Prom
     // claude-code 사용자 범위: 설정 파일(~/.claude.json)을 직접 고치지 않고 공식 CLI에 맡긴다.
     const args = claudeAddArgs(spec);
     const command = ["claude", ...args].map(shellQuote).join(" ");
-    if (options.dryRun) return { client, file: null, backup: null, unchanged: false, command, next, spec };
-    if (!(await hasCommand("claude"))) {
+    // 권한은 claude 등록 전에 읽어 둔다 — settings.json이 깨져 있으면 아무것도 하지 않고 멈추게
+    const settingsFile = claudeSettingsPath({ env: options.env, home: options.home });
+    const rules = readOnlyPermissions();
+    const settings = planJson(settingsFile, (existing) => mergePermissions(existing, rules));
+    const before = settings.existing as { permissions?: { allow?: unknown } };
+    const had = Array.isArray(before?.permissions?.allow) ? (before.permissions.allow as unknown[]) : [];
+    const added = rules.filter((rule) => !had.includes(rule));
+    if (options.dryRun) {
+      return { client, file: null, backup: null, unchanged: false, command, next, spec, permissions: { file: settingsFile, added, backup: null } };
+    }
+    const exec = options.runCommand ?? run;
+    if (!(await hasCommand("claude", exec))) {
       throw new InstallError(
         "claude 명령을 찾지 못했습니다. Claude Code를 설치한 뒤 다시 하거나, 아래 명령을 직접 실행하세요:\n  " +
           command +
           "\n또는 프로젝트 범위로 설치: grimoire install claude-code --project <레포 경로>",
       );
     }
-    await run("claude", ["mcp", "remove", "--scope", "user", SERVER_NAME]).catch(() => undefined);
-    await run("claude", args);
-    return { client, file: null, backup: null, unchanged: false, command, next, spec };
+    await exec("claude", ["mcp", "remove", "--scope", "user", SERVER_NAME]).catch(() => undefined);
+    await exec("claude", args);
+    const backup = settings.unchanged ? null : writeJson(settings);
+    return { client, file: null, backup: null, unchanged: false, command, next, spec, permissions: { file: settingsFile, added, backup } };
   }
 
+  const plan = planJson(file, (existing) => mergeServer(existing, spec));
+  if (options.dryRun || plan.unchanged) {
+    return { client, file, backup: null, unchanged: plan.unchanged, next, spec };
+  }
+  return { client, file, backup: writeJson(plan), unchanged: false, next, spec };
+}
+
+interface JsonPlan {
+  file: string;
+  /** 지금 파일 내용 (없으면 null) */
+  raw: string | null;
+  existing: unknown;
+  text: string;
+  unchanged: boolean;
+}
+
+/** 설정 JSON을 읽어 바꿀 내용을 만든다. 깨진 JSON이면 건드리지 않고 멈춘다. */
+function planJson(file: string, merge: (existing: unknown) => Record<string, unknown>): JsonPlan {
   let existing: unknown = {};
   let raw: string | null = null;
   if (fs.existsSync(file)) {
@@ -138,14 +202,13 @@ export async function install(client: ClientName, options: InstallOptions): Prom
       }
     }
   }
-
-  const merged = mergeServer(existing, spec);
-  const text = JSON.stringify(merged, null, 2) + "\n";
+  const merged = merge(existing);
   const unchanged = raw !== null && JSON.stringify(existing) === JSON.stringify(merged);
-  if (options.dryRun || unchanged) {
-    return { client, file, backup: null, unchanged, next, spec };
-  }
+  return { file, raw, existing, text: JSON.stringify(merged, null, 2) + "\n", unchanged };
+}
 
+/** 계획대로 쓴다. 기존 파일이 있으면 `.bak`을 남기고 그 경로를 돌려준다. */
+function writeJson({ file, raw, text }: JsonPlan): string | null {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   // rename은 새 파일을 만드는 것이라 권한을 따로 옮겨야 한다 (설정 파일은 보통 600)
   const mode = raw !== null ? fs.statSync(file).mode & 0o777 : 0o600;
@@ -159,7 +222,7 @@ export async function install(client: ClientName, options: InstallOptions): Prom
   fs.writeFileSync(temp, text, { mode });
   fs.chmodSync(temp, mode);
   fs.renameSync(temp, file);
-  return { client, file, backup, unchanged: false, next, spec };
+  return backup;
 }
 
 const NEXT_STEP: Record<ClientName, string> = {
@@ -187,8 +250,8 @@ function shellQuote(value: string): string {
   return /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-export function hasCommand(command: string): Promise<boolean> {
-  return run(command, ["--version"]).then(
+export function hasCommand(command: string, exec: typeof run = run): Promise<boolean> {
+  return exec(command, ["--version"]).then(
     () => true,
     () => false,
   );

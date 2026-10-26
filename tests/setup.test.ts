@@ -6,7 +6,16 @@ import { test } from "node:test";
 import { openDb } from "../src/core/db";
 import { callTool, emptyHint } from "../src/mcp/tools";
 import { doctor, formatChecks } from "../src/setup/doctor";
-import { configPath, install, InstallError, mergeServer, serverSpec } from "../src/setup/install";
+import {
+  claudeSettingsPath,
+  configPath,
+  install,
+  InstallError,
+  mergePermissions,
+  mergeServer,
+  readOnlyPermissions,
+  serverSpec,
+} from "../src/setup/install";
 import { makeRepo, memoryDb, tempDir } from "./helpers";
 
 /** 설치 대상이 될 가짜 CLI 파일 */
@@ -105,6 +114,90 @@ test("install: 깨진 JSON·빌드 안 된 CLI는 건드리지 않고 멈춘다"
   await assert.rejects(install("cursor", { cliPath: fakeCli(), env: {}, home }), InstallError);
   assert.equal(fs.readFileSync(file, "utf8"), "{ broken");
   await assert.rejects(install("cursor", { cliPath: path.join(home, "nope.js"), env: {}, home }), /npm run build/);
+});
+
+test("readOnlyPermissions: 읽기 도구만 Claude Code 규칙 이름으로", () => {
+  assert.deepEqual(readOnlyPermissions(), [
+    "mcp__grimoire__search_memory",
+    "mcp__grimoire__show_commit",
+    "mcp__grimoire__get_repo_overview",
+    "mcp__grimoire__list_repos",
+  ]);
+});
+
+test("mergePermissions: 빠진 규칙만 더하고 다른 설정·규칙은 그대로 둔다", () => {
+  const merged = mergePermissions(
+    { theme: "dark", permissions: { defaultMode: "auto", allow: ["Bash(git:*)", "mcp__grimoire__list_repos"], deny: ["x"] } },
+    ["mcp__grimoire__search_memory", "mcp__grimoire__list_repos"],
+  );
+  assert.deepEqual(merged, {
+    theme: "dark",
+    permissions: { defaultMode: "auto", allow: ["Bash(git:*)", "mcp__grimoire__list_repos", "mcp__grimoire__search_memory"], deny: ["x"] },
+  });
+  assert.deepEqual(mergePermissions(null, ["a"]), { permissions: { allow: ["a"] } });
+});
+
+test("claudeSettingsPath: ~/.claude 아래, CLAUDE_CONFIG_DIR이 있으면 그 아래", () => {
+  assert.equal(claudeSettingsPath({ home: "/h" }), path.join("/h", ".claude", "settings.json"));
+  assert.equal(claudeSettingsPath({ home: "/h", env: { CLAUDE_CONFIG_DIR: "/c" } }), path.join(path.resolve("/c"), "settings.json"));
+});
+
+test("install claude-code(사용자 범위): claude CLI로 등록하고 settings.json에 읽기 권한을 더한다", async () => {
+  const home = tempDir();
+  const cliPath = fakeCli();
+  const calls: string[][] = [];
+  const runCommand = async (command: string, args: string[]) => {
+    calls.push([command, ...args]);
+    return "";
+  };
+  const settingsFile = path.join(home, ".claude", "settings.json");
+  fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
+  fs.writeFileSync(settingsFile, JSON.stringify({ permissions: { defaultMode: "auto", allow: ["Bash(git:*)"] }, theme: "dark" }));
+
+  // dry-run은 claude도 부르지 않고 파일도 그대로
+  const dry = await install("claude-code", { cliPath, env: {}, home, dryRun: true, runCommand });
+  assert.equal(dry.permissions?.added.length, 4);
+  assert.equal(calls.length, 0);
+  assert.equal(JSON.parse(fs.readFileSync(settingsFile, "utf8")).permissions.allow.length, 1);
+
+  const first = await install("claude-code", { cliPath, env: {}, home, runCommand });
+  assert.ok(calls.some((call) => call.slice(0, 5).join(" ") === "claude mcp add --scope user"), JSON.stringify(calls));
+  assert.equal(first.permissions?.file, settingsFile);
+  assert.equal(first.permissions?.backup, `${settingsFile}.bak`);
+  const written = JSON.parse(fs.readFileSync(settingsFile, "utf8"));
+  assert.equal(written.theme, "dark");
+  assert.equal(written.permissions.defaultMode, "auto");
+  assert.deepEqual(written.permissions.allow, ["Bash(git:*)", ...readOnlyPermissions()]);
+
+  // 두 번째는 더할 것이 없다 — 파일도 다시 쓰지 않는다
+  fs.rmSync(`${settingsFile}.bak`);
+  const again = await install("claude-code", { cliPath, env: {}, home, runCommand });
+  assert.deepEqual(again.permissions?.added, []);
+  assert.equal(again.permissions?.backup, null);
+  assert.equal(fs.existsSync(`${settingsFile}.bak`), false);
+});
+
+test("install claude-code(사용자 범위): settings.json이 깨져 있으면 claude 등록도 하지 않는다", async () => {
+  const home = tempDir();
+  const settingsFile = path.join(home, ".claude", "settings.json");
+  fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
+  fs.writeFileSync(settingsFile, "{ broken");
+  const calls: string[][] = [];
+  const runCommand = async (command: string, args: string[]) => {
+    calls.push([command, ...args]);
+    return "";
+  };
+  await assert.rejects(install("claude-code", { cliPath: fakeCli(), env: {}, home, runCommand }), InstallError);
+  assert.equal(calls.length, 0);
+  assert.equal(fs.readFileSync(settingsFile, "utf8"), "{ broken");
+
+  // settings.json이 없으면 새로 만든다
+  const fresh = tempDir();
+  const created = await install("claude-code", { cliPath: fakeCli(), env: {}, home: fresh, runCommand });
+  assert.equal(created.permissions?.backup, null);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(fresh, ".claude", "settings.json"), "utf8")), {
+    permissions: { allow: readOnlyPermissions() },
+  });
 });
 
 test("doctor: README식 'node' 설정과 빈 DB를 짚어 낸다", async () => {

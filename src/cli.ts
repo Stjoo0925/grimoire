@@ -189,11 +189,23 @@ async function cmdInstall(client: string | undefined, project: string | undefine
     if (dryRun) {
       print(`[dry-run] ${target}에 다음을 넣습니다:`);
       print(result.command ?? JSON.stringify({ mcpServers: { grimoire: result.spec } }, null, 2));
+      if (result.permissions) {
+        print(
+          result.permissions.added.length > 0
+            ? `[dry-run] ${result.permissions.file}의 permissions.allow에 더합니다: ${result.permissions.added.join(", ")}`
+            : `[dry-run] ${result.permissions.file}: 읽기 도구 권한이 이미 있습니다`,
+        );
+      }
       return 0;
     }
     print(result.unchanged ? `이미 같은 설정입니다: ${target}` : `✓ ${client}에 등록했습니다: ${target}`);
     if (result.command) print(`  실행: ${result.command}`);
     if (result.backup) print(`  이전 설정 백업: ${result.backup}`);
+    if (result.permissions) {
+      const { file, added, backup } = result.permissions;
+      print(added.length > 0 ? `  읽기 도구 승인 생략: ${file}에 ${added.length}개 추가` : `  읽기 도구 권한: 이미 있음 (${file})`);
+      if (backup) print(`  이전 설정 백업: ${backup}`);
+    }
     print(`  node: ${result.spec.command}`);
     print(`  다음: ${result.next}`);
     print("  확인: grimoire doctor");

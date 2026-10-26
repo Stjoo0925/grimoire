@@ -46,7 +46,7 @@ To run from source, clone it and run `npm install && npm run build && npm link`.
 - The config contains the **absolute path of the node currently running**. GUI apps like Claude Desktop and Cursor
   don't see your shell's PATH, so `"command": "node"` fails with `spawn node ENOENT`. If you switch
   node versions, run `install` again so the config points at the node you use now.
-- If `GRIMOIRE_HOME`, `GRIMOIRE_ME`, `GRIMOIRE_AUTO_ADD` or `GRIMOIRE_UPDATE_CHECK` are set, they are written too,
+- If `GRIMOIRE_HOME`, `GRIMOIRE_ME`, `GRIMOIRE_AUTO_ADD`, `GRIMOIRE_SYNC_ON_START` or `GRIMOIRE_UPDATE_CHECK` are set, they are written too,
   so the CLI and MCP server see the same DB.
 - Other server entries are left alone; only the `grimoire` entry is added. The existing file is backed up as `.bak`,
   and if its JSON is broken Grimoire stops without touching it. Add `--dry-run` to preview what would be written.
@@ -92,7 +92,7 @@ The `add_repo` tool registers right from the conversation ("remember every repo 
 | `show_commit` | Message, changed files and diff of a commit (read straight from the local repo). The diff defaults to 120 lines; `paths` narrows it to specific files. `shas` (up to 5) returns several commits in one call, 40 diff lines each by default |
 | `get_repo_overview` | Tech stack (from manifests), quarterly activity, most-touched directories, top authors, recent notable commits |
 | `list_repos` | Indexed repos |
-| `add_repo` | Register + index a repo (or, with `scan: true`, every repo under a folder). Scanning `/` or your whole home goes through `grimoire scan` in the terminal |
+| `add_repo` | Register + index a repo (or, with `scan: true`, every repo under a folder). Scanning `/`, a folder right under it, your home or anything above it, or a folder with more than 50 repos goes through `grimoire scan` in the terminal |
 | `record_note` | Save something learned or decided as a note → searchable afterwards |
 
 Responses are minimal to save tokens: 10-char shas, dates to the day, `me` for your own commits, and the commit link prefix per repo (`links`) sent only once.
@@ -188,6 +188,7 @@ Set `GRIMOIRE_UPDATE_CHECK=0` to turn it off (run `grimoire install` again after
 - The only request Grimoire makes to the outside is the daily update check (asking the GitHub API for the latest release version). No repos, commits or queries are sent, and `GRIMOIRE_UPDATE_CHECK=0` turns it off.
 - **When connected to an external LLM client over MCP, query results (commit messages, file paths, diffs) are passed to that LLM.**
   Don't register sensitive repos, or take them out with `grimoire remove <repo>`.
+- The DB is created readable only by you (`chmod 600`) on macOS/Linux. On Windows chmod has no effect and the DB relies on the NTFS permissions of your user profile (`%USERPROFILE%\.grimoire`), so don't point `GRIMOIRE_HOME` at a shared folder.
 
 ## Development
 

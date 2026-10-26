@@ -16,15 +16,16 @@ import os from "node:os";
 import path from "node:path";
 
 import { isIndexable } from "../core/code";
-import type { DB } from "../core/db";
+import { isBusyError, type DB } from "../core/db";
 import { resolveAuthors } from "../core/identity";
 import { indexCommitCode } from "../core/diffs";
-import { addRepo, discoverRepos, findRepo, listRepos, syncRepo } from "../core/indexer";
-import { addNote } from "../core/notes";
+import { CancelledError } from "../core/git";
+import { addRepo, discoverRepos, listRepos, matchRepos, syncRepo } from "../core/indexer";
+import { addNote, TAG_CHARS, TAGS_MAX } from "../core/notes";
 import { commitDetail, repoOverview, repoSummaries } from "../core/overview";
 import { search, type SearchHit } from "../core/search";
 import { slimCommit, slimOverview, slimRepos, slimSearch, type Detail } from "./format";
-import { waitForWorkspace, type Workspace } from "./workspace";
+import { waitForWorkspace, type Background, type Workspace } from "./workspace";
 
 export interface ToolContext {
   db: DB;
@@ -36,6 +37,8 @@ export interface ToolContext {
   updateHint?: () => string | undefined;
   /** 작업 중인 프로젝트 (서버가 채움, workspace.ts) */
   workspace?: Workspace;
+  /** 요청이 끝난 뒤에도 도는 작업(add_repo의 diff 색인)의 종료 신호·추적 (서버가 채움) */
+  background?: Background;
 }
 
 /** 새 작업 레포의 첫 인덱싱을 검색이 기다려 주는 상한 */
@@ -136,7 +139,7 @@ export const TOOLS = [
       properties: {
         text: { type: "string", description: "line 1 = title" },
         repo: { type: "string" },
-        tags: { type: "array", items: { type: "string" } },
+        tags: { type: "array", items: { type: "string", maxLength: TAG_CHARS }, maxItems: TAGS_MAX },
       },
       required: ["text"],
     },
@@ -146,23 +149,34 @@ export const TOOLS = [
 /** detail=full에서 1위 커밋에 붙이는 diff 줄 수 */
 const FULL_DIFF_LINES = 120;
 
-async function topDiff(db: DB, hit: SearchHit) {
+async function topDiff(db: DB, hit: SearchHit, signal?: AbortSignal) {
   const repo = hit.repoPath ? (db.prepare("SELECT id FROM repos WHERE path = ?").get(hit.repoPath) as { id: number } | undefined) : undefined;
   // 질문과 맞는 순서로 정렬된 변경 파일 중 소스 파일 앞쪽만
   const paths = hit.files.filter((file) => isIndexable(file, 0)).slice(0, 3);
-  const detail = await commitDetail(db, hit.ref, { repoId: repo?.id, maxDiffLines: FULL_DIFF_LINES, paths });
+  const detail = await commitDetail(db, hit.ref, { repoId: repo?.id, maxDiffLines: FULL_DIFF_LINES, paths, signal });
   if ("error" in detail || !detail.patch) return undefined;
   return {
     sha: hit.ref.slice(0, 10),
     patch: detail.patch,
-    ...(detail.patchTruncated ? { truncated: `${FULL_DIFF_LINES}/${detail.patchLines}줄 — 나머지는 show_commit` } : {}),
+    ...(detail.patchTruncated ? { truncated: `${FULL_DIFF_LINES}줄 넘음 — 나머지는 show_commit` } : {}),
   };
 }
 
-/** MCP로 scan하기엔 너무 넓은 곳: 파일 시스템 루트와 홈 디렉터리 자체 */
-function isTooBroad(dir: string): boolean {
-  const resolved = path.resolve(dir);
-  return resolved === path.parse(resolved).root || resolved === path.resolve(os.homedir());
+/** MCP scan 한 번으로 등록하는 레포 수 상한 — 넘으면 터미널 grimoire scan으로 안내한다 */
+export const MAX_SCAN_REPOS = 50;
+
+/**
+ * MCP로 scan하기엔 너무 넓은 곳: 파일 시스템 루트, 루트 바로 아래(/home·/opt·C:\Users·D:\x),
+ * 홈 디렉터리와 그 조상(~/.. 등). 터미널 grimoire scan은 사용자가 직접 치는 명령이라 막지 않는다.
+ */
+export function isTooBroad(dir: string): boolean {
+  // Windows 경로는 대소문자를 가리지 않는다
+  const norm = (value: string) => (process.platform === "win32" ? path.resolve(value).toLowerCase() : path.resolve(value));
+  const resolved = norm(dir);
+  const root = norm(path.parse(resolved).root);
+  if (resolved === root || path.dirname(resolved) === root) return true;
+  const home = norm(os.homedir());
+  return home === resolved || home.startsWith(resolved.endsWith(path.sep) ? resolved : resolved + path.sep);
 }
 
 export type ToolName = (typeof TOOLS)[number]["name"];
@@ -176,6 +190,48 @@ const num = (value: unknown): number | undefined =>
 
 export class ToolError extends Error {}
 
+const BUSY_MESSAGE = "다른 grimoire 프로세스가 DB를 쓰는 중입니다. 잠시 후 다시 시도하세요.";
+const CANCELLED_MESSAGE = "요청이 취소되었습니다";
+/** record_note가 DB 잠금에 걸렸을 때 다시 해 보는 횟수와 간격 */
+const NOTE_RETRIES = 2;
+const NOTE_RETRY_MS = 200;
+
+/** 원인 사슬(cause)까지 보며 조건에 맞는 오류가 있는가 */
+function causedBy(error: unknown, test: (error: Error & { code?: unknown; syscall?: unknown; killed?: unknown }) => boolean): boolean {
+  let current: unknown = error;
+  for (let depth = 0; current instanceof Error && depth < 5; depth++) {
+    if (test(current)) return true;
+    current = current.cause;
+  }
+  return false;
+}
+
+const isCancelled = (error: unknown) => causedBy(error, (item) => item instanceof CancelledError || item.name === "AbortError");
+
+/**
+ * 도구 오류 → 클라이언트(AI)에 보낼 문장. ToolError와 알려진 원인(DB 잠금·git 없음·출력 초과·시간 초과·취소)은
+ * 사용자용 문장으로, 나머지는 내부 메시지를 그대로 내보내지 않고 일반 문장으로 바꾼다(전체 오류는 서버가 stderr에 남긴다).
+ * known=false면 예상하지 못한 오류다.
+ */
+export function describeError(error: unknown): { message: string; known: boolean } {
+  if (error instanceof ToolError) return { message: error.message, known: true };
+  if (isCancelled(error)) return { message: CANCELLED_MESSAGE, known: true };
+  if (causedBy(error, isBusyError)) return { message: BUSY_MESSAGE, known: true };
+  if (causedBy(error, (item) => item.code === "ENOENT" && String(item.syscall ?? "").startsWith("spawn"))) {
+    return { message: "git을 찾을 수 없습니다 — git을 설치하고 PATH에 있는지 확인하세요 (grimoire doctor).", known: true };
+  }
+  if (causedBy(error, (item) => item.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" || item.code === "ENOBUFS")) {
+    return { message: "출력이 너무 커서 읽지 못했습니다 — paths·max_diff_lines로 범위를 좁혀 보세요.", known: true };
+  }
+  if (causedBy(error, (item) => item.killed === true)) {
+    // 명령마다 상한이 달라(GIT_TIMEOUT_MS·GIT_BULK_TIMEOUT_MS) 숫자는 적지 않는다
+    return { message: "git이 시간 안에 끝나지 않아 멈췄습니다. 잠시 후 다시 시도하세요.", known: true };
+  }
+  return { message: "내부 오류 — 서버 로그(stderr)를 확인하세요.", known: false };
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /** show_commit shas: 한 번에 받는 커밋 수와 커밋당 기본 diff 줄 수 */
 const MAX_SHAS = 5;
 const MULTI_DIFF_LINES = 40;
@@ -183,8 +239,23 @@ const MULTI_DIFF_LINES = 40;
 /** 검색 결과 기본 개수 — 응답 토큰을 아끼려고 코어 기본값(10)보다 작게 */
 const SEARCH_LIMIT = 8;
 
-/** 도구를 실행하고 JSON 직렬화 가능한(간결한) 결과를 돌려준다. 잘못된 인자는 ToolError. */
-export async function callTool(context: ToolContext, name: string, args: Args = {}): Promise<unknown> {
+/**
+ * 도구를 실행하고 JSON 직렬화 가능한(간결한) 결과를 돌려준다. 잘못된 인자는 ToolError.
+ * signal은 이 요청의 취소 신호다 — 이 요청을 위해 부르는 git에만 넘기고, 뒤에서 계속 도는 작업에는 넘기지 않는다.
+ * DB 잠금(다른 grimoire 프로세스가 쓰는 중)과 취소는 ToolError로 바꿔 알린다.
+ */
+export async function callTool(context: ToolContext, name: string, args: Args = {}, signal?: AbortSignal): Promise<unknown> {
+  try {
+    return await runTool(context, name, args, signal);
+  } catch (error) {
+    if (error instanceof ToolError) throw error;
+    if (isCancelled(error)) throw new ToolError(CANCELLED_MESSAGE, { cause: error });
+    if (causedBy(error, isBusyError)) throw new ToolError(BUSY_MESSAGE, { cause: error });
+    throw error;
+  }
+}
+
+async function runTool(context: ToolContext, name: string, args: Args, signal: AbortSignal | undefined): Promise<unknown> {
   const { db, me } = context;
   // 새 작업 레포가 첫 인덱싱 중이면 (상한 안에서) 기다렸다가 답한다
   const current = await waitForWorkspace(context.workspace, WORKSPACE_WAIT_MS);
@@ -196,9 +267,13 @@ export async function callTool(context: ToolContext, name: string, args: Args = 
   const repoFilter = (value: unknown) => {
     const query = str(value);
     if (!query) return undefined;
-    const repo = findRepo(db, query);
-    if (!repo) throw new ToolError(`레포를 찾지 못했습니다: ${query}. list_repos로 목록을 확인하세요.`);
-    return repo;
+    const matches = matchRepos(db, query);
+    if (matches.length === 0) throw new ToolError(`레포를 찾지 못했습니다: ${query}. list_repos로 목록을 확인하세요.`);
+    if (matches.length > 1) {
+      // 조용히 첫 번째를 고르면 엉뚱한 레포를 보거나 노트를 남긴다 — 후보를 보여 주고 고르게 한다
+      throw new ToolError(`'${query}'와 맞는 레포가 여럿입니다: ${matches.map((repo) => repo.name).join(", ")}. 정확한 이름을 주세요.`);
+    }
+    return matches[0];
   };
 
   switch (name) {
@@ -225,7 +300,7 @@ export async function callTool(context: ToolContext, name: string, args: Args = 
       const slim = slimSearch(result, me, detail);
       // full: 1위 커밋의 diff를 소스 파일 위주로 붙인다 — show_commit을 따로 부르지 않게
       const top = detail === "full" ? result.hits.find((hit) => hit.kind === "commit") : undefined;
-      const diff = top ? await topDiff(db, top) : undefined;
+      const diff = top ? await topDiff(db, top, signal) : undefined;
       return withHint({ ...(current ? { current: current.name } : {}), ...slim, ...(diff ? { diff } : {}) });
     }
     case "show_commit": {
@@ -242,14 +317,14 @@ export async function callTool(context: ToolContext, name: string, args: Args = 
           : [];
       const repoId = repoFilter(args.repo)?.id;
       if (shas.length === 0) {
-        const detail = await commitDetail(db, sha!, { repoId, maxDiffLines: num(args.max_diff_lines), paths });
+        const detail = await commitDetail(db, sha!, { repoId, maxDiffLines: num(args.max_diff_lines), paths, signal });
         if ("error" in detail) throw new ToolError([detail.error, ...(detail.candidates ?? [])].join("\n"));
         return slimCommit(detail, me);
       }
       // 여러 커밋 한 번에 — 검색 결과 상위 몇 개를 왕복 없이 비교할 때. 응답이 커지지 않게 커밋당 diff를 줄인다
       const commits = await Promise.all(
         shas.map(async (item) => {
-          const detail = await commitDetail(db, item, { repoId, maxDiffLines: num(args.max_diff_lines) ?? MULTI_DIFF_LINES, paths });
+          const detail = await commitDetail(db, item, { repoId, maxDiffLines: num(args.max_diff_lines) ?? MULTI_DIFF_LINES, paths, signal });
           return "error" in detail ? { sha: item, error: [detail.error, ...(detail.candidates ?? [])].join("\n") } : slimCommit(detail, me);
         }),
       );
@@ -271,17 +346,25 @@ export async function callTool(context: ToolContext, name: string, args: Args = 
       if (args.scan === true && isTooBroad(dir)) {
         throw new ToolError(`${dir} 전체를 스캔하지는 않습니다. 레포들이 든 하위 폴더를 지정하거나, 터미널에서 'grimoire scan ${dir}'를 실행하세요.`);
       }
-      const dirs = args.scan === true ? discoverRepos(dir) : [dir];
+      const dirs = args.scan === true ? discoverRepos(dir, undefined, MAX_SCAN_REPOS) : [dir];
       if (dirs.length === 0) throw new ToolError(`git 레포를 찾지 못했습니다: ${dir}`);
+      // 도구 호출 하나가 수백 레포를 색인하며 분 단위로 붙잡히지 않게
+      if (dirs.length > MAX_SCAN_REPOS) {
+        throw new ToolError(`${dir} 아래 레포가 ${MAX_SCAN_REPOS}개를 넘습니다. 더 좁은 폴더를 지정하거나, 터미널에서 'grimoire scan ${dir}'를 실행하세요.`);
+      }
       const added: unknown[] = [];
       const failed: { path: string; error: string }[] = [];
       for (const repoDir of dirs) {
         try {
-          const repo = await addRepo(db, repoDir);
-          added.push(await syncRepo(db, repo));
-          // diff 식별자는 뒤에서 — 등록 응답을 붙잡지 않는다
-          indexCommitCode(db, repo).catch((error) => console.error(`[grimoire] ${repo.name} diff 색인 실패`, error));
+          const repo = await addRepo(db, repoDir, signal);
+          added.push(await syncRepo(db, repo, signal));
+          // diff 식별자는 뒤에서 — 등록 응답을 붙잡지 않는다. 이 요청이 취소돼도 멈추지 않고 서버 종료 때만 멈춘다
+          const job = indexCommitCode(db, repo, context.background?.signal).catch((error) =>
+            console.error(`[grimoire] ${repo.name} diff 색인 실패 —`, error instanceof Error ? error.message : error),
+          );
+          context.background?.track?.(job);
         } catch (error) {
+          if (isCancelled(error) || causedBy(error, isBusyError)) throw error;
           failed.push({ path: repoDir, error: error instanceof Error ? error.message : String(error) });
         }
       }
@@ -291,9 +374,20 @@ export async function callTool(context: ToolContext, name: string, args: Args = 
     case "record_note": {
       const text = str(args.text);
       if (!text) throw new ToolError("text가 필요합니다");
-      const tags = Array.isArray(args.tags) ? args.tags.filter((tag): tag is string => typeof tag === "string") : [];
-      const note = addNote(db, { text, repoId: repoFilter(args.repo)?.id ?? null, tags, source: "mcp" });
-      return { recorded: true, id: note.id, createdAt: note.created_at };
+      if (args.tags !== undefined && !Array.isArray(args.tags)) throw new ToolError("tags는 문자열 배열이어야 합니다");
+      // 상한(TAGS_MAX개·TAG_CHARS자)을 넘으면 오류 대신 자른다 — 거대한 배열을 끝까지 훑지도 않는다
+      const tags = (args.tags ?? []).slice(0, TAGS_MAX).filter((tag): tag is string => typeof tag === "string");
+      const repoId = repoFilter(args.repo)?.id ?? null;
+      // 다른 grimoire 프로세스가 쓰는 중이면 잠깐 뒤 다시 — 사용자가 남기라고 한 노트라 바로 실패시키지 않는다
+      for (let attempt = 0; ; attempt++) {
+        try {
+          const note = addNote(db, { text, repoId, tags, source: "mcp" });
+          return { recorded: true, id: note.id, createdAt: note.created_at };
+        } catch (error) {
+          if (!isBusyError(error) || attempt >= NOTE_RETRIES) throw error;
+          await sleep(NOTE_RETRY_MS);
+        }
+      }
     }
     default:
       throw new ToolError(`알 수 없는 도구: ${name}`);

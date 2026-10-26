@@ -23,7 +23,7 @@ import { dbPath } from "./core/config";
 import { openDb, type DB } from "./core/db";
 import { myEmails, resolveAuthors } from "./core/identity";
 import { indexCommitCode } from "./core/diffs";
-import { addRepo, discoverRepos, findRepo, listRepos, removeRepo, syncRepo, type RepoRow } from "./core/indexer";
+import { addRepo, discoverRepos, listRepos, matchRepos, removeRepo, syncRepo, type RepoRow } from "./core/indexer";
 import { addNote } from "./core/notes";
 import { commitDetail, repoOverview, repoSummaries } from "./core/overview";
 import { search } from "./core/search";
@@ -134,7 +134,7 @@ async function main(argv: string[]): Promise<number> {
         print("");
         print(detail.patch ?? detail.patchNote ?? "");
         if (detail.patchTruncated) {
-          print(`… (diff ${detail.patchLines}줄 중 일부만 표시 — --lines로 늘리거나 --path로 파일을 고르세요)`);
+          print(`… (diff가 ${detail.patchLines - 1}줄보다 길어 일부만 표시 — --lines로 늘리거나 --path로 파일을 고르세요)`);
         }
         return 0;
       }
@@ -306,9 +306,12 @@ function need(value: string | undefined, what: string): string {
 }
 
 function requireRepo(db: DB, query: string): RepoRow {
-  const repo = findRepo(db, query);
-  if (!repo) throw new UsageError(`레포를 찾지 못했습니다: ${query} (grimoire repos로 확인)`);
-  return repo;
+  const matches = matchRepos(db, query);
+  if (matches.length === 0) throw new UsageError(`레포를 찾지 못했습니다: ${query} (grimoire repos로 확인)`);
+  if (matches.length > 1) {
+    throw new UsageError(`'${query}'와 맞는 레포가 여럿입니다: ${matches.map((repo) => repo.name).join(", ")} — 정확한 이름을 주세요`);
+  }
+  return matches[0];
 }
 
 function toInt(value: string | undefined): number | undefined {

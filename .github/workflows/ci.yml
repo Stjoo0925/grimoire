@@ -39,7 +39,8 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
-      - run: npm ci
+      # 의존성의 설치 스크립트는 돌리지 않는다 — lockfile에 hasInstallScript인 패키지가 없어 결과는 같다
+      - run: npm ci --ignore-scripts
       - run: npm run typecheck
       - run: npm test
       - run: npm run e2e

@@ -212,6 +212,8 @@ export interface SearchHit {
   also?: string[];
   /** kind='commit'일 때: diff에서 바뀐 선언 — 파일별 이름 (diffs.ts가 뒤에서 채운다, 아직이면 빈 배열) */
   touched?: { file: string; names: string[] }[];
+  /** kind='note'일 때: 누가 남겼나 — me(터미널 grimoire note) | ai(MCP record_note). AI가 쓴 노트를 사람의 결정과 구분하게 */
+  by?: "me" | "ai";
 }
 
 export interface SearchResult {
@@ -473,8 +475,10 @@ function toHit(
   }
 
   if (doc.kind === "note") {
+    const note = db.prepare("SELECT source FROM notes WHERE id = ?").get(Number(doc.ref)) as { source: string } | undefined;
     return {
       ...base,
+      by: note?.source === "cli" ? "me" : "ai",
       author: null,
       snippet: snippet ?? doc.body.slice(0, 240),
       files: [],

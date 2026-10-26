@@ -33,6 +33,8 @@ test("serverSpec: node 절대경로와 필요한 환경 변수만 적는다", ()
   assert.deepEqual(spec.args, [path.resolve("dist/cli.js"), "mcp"]);
   assert.deepEqual(spec.env, { GRIMOIRE_HOME: path.resolve("rel/home"), GRIMOIRE_ME: "a@x.com" });
   assert.equal(serverSpec("x", {}, "/n").env, undefined);
+  // 기동 동기화를 끈 설정도 GUI 클라이언트까지 간다
+  assert.deepEqual(serverSpec("x", { GRIMOIRE_SYNC_ON_START: "0", GRIMOIRE_AUTO_ADD: "0" }, "/n").env, { GRIMOIRE_AUTO_ADD: "0", GRIMOIRE_SYNC_ON_START: "0" });
 });
 
 test("configPath: 플랫폼별 위치", () => {

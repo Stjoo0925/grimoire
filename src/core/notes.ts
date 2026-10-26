@@ -21,13 +21,18 @@ export interface NoteRow {
 
 const NOTE_MAX = 4000;
 const TITLE_MAX = 120;
+/** 태그 수와 태그 하나의 길이 상한 — 태그는 검색 본문에도 들어가므로 노트 하나가 색인을 부풀리지 않게 */
+export const TAGS_MAX = 20;
+export const TAG_CHARS = 40;
 
 export function addNote(db: DB, input: NoteInput): NoteRow {
   const text = input.text.trim().slice(0, NOTE_MAX);
   if (!text) throw new Error("노트 내용이 비어 있습니다");
+  // 넘치면 오류 대신 자른다 (앞의 TAGS_MAX개, 각 TAG_CHARS자)
   const tags = (input.tags ?? [])
-    .map((tag) => tag.trim().toLowerCase())
+    .map((tag) => tag.trim().toLowerCase().slice(0, TAG_CHARS).trim())
     .filter(Boolean)
+    .slice(0, TAGS_MAX)
     .join(" ");
   const createdAt = new Date().toISOString();
 

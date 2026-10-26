@@ -22,8 +22,8 @@ export const SERVER_NAME = "grimoire";
 export const CLIENTS = ["claude-code", "claude-desktop", "cursor"] as const;
 export type ClientName = (typeof CLIENTS)[number];
 
-/** 설정에 함께 옮겨 적는 환경 변수 — CLI와 MCP가 같은 DB·같은 "나"·같은 업데이트 설정을 보게 한다. */
-const FORWARDED_ENV = ["GRIMOIRE_HOME", "GRIMOIRE_ME", "GRIMOIRE_AUTO_ADD", "GRIMOIRE_UPDATE_CHECK"] as const;
+/** 설정에 함께 옮겨 적는 환경 변수 — CLI와 MCP가 같은 DB·같은 "나"·같은 자동 등록·기동 동기화·업데이트 설정을 보게 한다. */
+const FORWARDED_ENV = ["GRIMOIRE_HOME", "GRIMOIRE_ME", "GRIMOIRE_AUTO_ADD", "GRIMOIRE_SYNC_ON_START", "GRIMOIRE_UPDATE_CHECK"] as const;
 
 export interface ServerSpec {
   command: string;

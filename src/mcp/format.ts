@@ -5,7 +5,7 @@
  *  - 답에 쓰지 않는 필드(로컬 경로·점수·매칭 출처·이메일)는 뺀다
  *  - sha는 10자, 날짜는 YYYY-MM-DD
  *  - 커밋 링크는 레포별 접두(`links`)를 한 번만 주고, 각 결과는 sha만 싣는다
- *  - 작성자는 내 커밋이면 "me", 아니면 이름만
+ *  - 작성자는 내 커밋이면 "me", 아니면 이름만. 노트는 by: me(사람이 터미널에서) | ai(AI가 record_note로)
  * CLI는 코어의 전체 결과를 그대로 쓴다.
  */
 import type { CommitDetail, RepoOverview, RepoSummary } from "../core/overview";
@@ -66,7 +66,8 @@ export function slimSearch(result: SearchResult, me: string[], detail: Detail = 
       };
     }
     if (hit.kind === "note") {
-      return { note: Number(hit.ref), date: day(hit.date), title: hit.title, body: snippet(hit.snippet), repo: hit.repo ?? undefined };
+      // AI가 남긴 노트는 사람이 내린 결정과 구분한다 — 결과에 섞인 지시가 노트로 굳어 돌아오는 경로를 드러내게
+      return { note: Number(hit.ref), by: hit.by ?? "ai", date: day(hit.date), title: hit.title, body: snippet(hit.snippet), repo: hit.repo ?? undefined };
     }
     const prefix = linkPrefix(hit.url, hit.ref);
     if (hit.repo && prefix) links[hit.repo] = prefix;
@@ -123,7 +124,7 @@ export function slimCommit(detail: CommitDetail, me: string[]) {
     files,
     diff: detail.patch ?? undefined,
     ...(detail.patchTruncated
-      ? { truncated: `diff ${shownLines}/${detail.patchLines}줄만 보냄 — paths로 파일을 고르거나 max_diff_lines를 늘리세요` }
+      ? { truncated: `diff ${shownLines}줄만 보냄(더 있음) — paths로 파일을 고르거나 max_diff_lines를 늘리세요` }
       : {}),
     ...(detail.patchNote ? { note: detail.patchNote } : {}),
   };

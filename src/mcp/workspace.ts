@@ -40,9 +40,13 @@ export interface Workspace {
 /** 작업 레포 재동기화 간격 — 검색마다 git을 부르지 않게 */
 export const REFRESH_INTERVAL_MS = 15_000;
 
+/**
+ * native는 Windows의 8.3 짧은 이름(C:\Users\RUNNER~1\…)까지 긴 이름으로 푼다 — git이 돌려주는 최상위 경로와 같은 꼴이 된다.
+ * JS판 realpathSync는 심볼릭 링크만 풀고 짧은 이름은 그대로 둔다.
+ */
 function realpathOrSelf(dir: string): string {
   try {
-    return fs.realpathSync(dir);
+    return fs.realpathSync.native(dir);
   } catch {
     return path.resolve(dir);
   }

@@ -265,7 +265,7 @@ export async function callTool(context: ToolContext, name: string, args: Args = 
     case "add_repo": {
       const target = str(args.path);
       if (!target) throw new ToolError("path가 필요합니다");
-      const dir = path.resolve(context.cwd, target.replace(/^~(?=$|\/)/, process.env.HOME ?? "~"));
+      const dir = path.resolve(context.cwd, target.replace(/^~(?=$|[\\/])/, os.homedir()));
       if (!fs.existsSync(dir)) throw new ToolError(`경로가 없습니다: ${dir}`);
       // 루트·홈 전체 스캔은 너무 넓다 — 결과 속 주입된 지시를 따른 AI가 모든 레포를 긁어 가는 길을 막는다
       if (args.scan === true && isTooBroad(dir)) {

@@ -19,8 +19,15 @@ export interface AgentRun {
   /** 도구 호출 인자 (진단용 — 무엇을 검색했나) */
   calls: { name: string; input: unknown }[];
   turns: number | null;
+  /** 청구 비용 추정(total_cost_usd) — 서브에이전트 포함 */
   costUsd: number | null;
+  /** 결과의 usage (서브에이전트 제외) */
   usage: Usage | null;
+  /** modelUsage 합계 (서브에이전트 포함) — 벤치는 이쪽을 쓴다 (docs/enhancement-plan.md §3-4) */
+  modelUsage: Usage | null;
+  /** success | error_max_turns | error_max_budget_usd | error_during_execution … */
+  subtype: string | null;
+  apiMs: number | null;
   ms: number;
   error?: string;
 }
@@ -30,9 +37,10 @@ export interface ClaudeOptions {
   cwd: string;
   /** --mcp-config 파일 (없으면 빈 설정으로 MCP를 모두 끈다) */
   mcpConfig: string;
-  /** --tools 값 ("" = 내장 도구 전부 끔) */
-  tools: string;
+  /** --tools 값 ("" = 내장 도구 전부 끔). undefined면 플래그를 넘기지 않는다(내장 도구 기본값) */
+  tools?: string;
   allowedTools: string[];
+  maxTurns?: number;
   model?: string;
   budgetUsd?: string;
   timeoutMs?: number;
@@ -53,10 +61,10 @@ export function runClaude(options: ClaudeOptions): Promise<AgentRun> {
     "--mcp-config",
     options.mcpConfig,
     "--strict-mcp-config",
-    "--tools",
-    options.tools,
+    ...(options.tools !== undefined ? ["--tools", options.tools] : []),
     "--allowedTools",
     ...options.allowedTools,
+    ...(options.maxTurns ? ["--max-turns", String(options.maxTurns)] : []),
     "--output-format",
     "stream-json",
     "--verbose",
@@ -76,13 +84,14 @@ export function runClaude(options: ClaudeOptions): Promise<AgentRun> {
     child.stdout.on("data", (chunk) => (stdout += String(chunk)));
     child.stderr.on("data", (chunk) => (stderr += String(chunk)));
     const timer = setTimeout(() => child.kill("SIGTERM"), options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    const empty = (): AgentRun => ({ answer: "", tools: [], calls: [], turns: null, costUsd: null, usage: null, modelUsage: null, subtype: null, apiMs: null, ms: Date.now() - started });
     child.on("error", (error) => {
       clearTimeout(timer);
-      resolve({ answer: "", tools: [], calls: [], turns: null, costUsd: null, usage: null, ms: Date.now() - started, error: error.message });
+      resolve({ ...empty(), error: error.message });
     });
     child.on("close", (code) => {
       clearTimeout(timer);
-      const run: AgentRun = { answer: "", tools: [], calls: [], turns: null, costUsd: null, usage: null, ms: Date.now() - started };
+      const run: AgentRun = empty();
       for (const line of stdout.split("\n")) {
         if (!line.trim()) continue;
         let event: any;
@@ -102,6 +111,8 @@ export function runClaude(options: ClaudeOptions): Promise<AgentRun> {
           run.answer = typeof event.result === "string" ? event.result : "";
           run.turns = event.num_turns ?? null;
           run.costUsd = event.total_cost_usd ?? null;
+          run.subtype = event.subtype ?? null;
+          run.apiMs = event.duration_api_ms ?? null;
           const u = event.usage ?? {};
           run.usage = {
             input: u.input_tokens ?? 0,
@@ -109,6 +120,19 @@ export function runClaude(options: ClaudeOptions): Promise<AgentRun> {
             cacheRead: u.cache_read_input_tokens ?? 0,
             output: u.output_tokens ?? 0,
           };
+          // modelUsage는 서브에이전트까지 합친 값 — 캐시 생성·읽기가 청구액의 대부분이라 이쪽으로 센다
+          const models = Object.values(event.modelUsage ?? {}) as { inputTokens?: number; outputTokens?: number; cacheReadInputTokens?: number; cacheCreationInputTokens?: number }[];
+          if (models.length > 0) {
+            run.modelUsage = models.reduce(
+              (sum, m) => ({
+                input: sum.input + (m.inputTokens ?? 0),
+                cacheWrite: sum.cacheWrite + (m.cacheCreationInputTokens ?? 0),
+                cacheRead: sum.cacheRead + (m.cacheReadInputTokens ?? 0),
+                output: sum.output + (m.outputTokens ?? 0),
+              }),
+              { input: 0, cacheWrite: 0, cacheRead: 0, output: 0 },
+            );
+          }
           if (event.is_error) {
             const reason = run.answer.trim() || event.subtype || "unknown";
             run.error = /not logged in|\/login/i.test(reason)

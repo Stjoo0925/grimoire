@@ -1,0 +1,430 @@
+/**
+ * 작업 완수 벤치 — "실제 수정 작업을 Grimoire가 있을 때 더 싸게, 회귀 없이 끝내나" (docs/enhancement-plan.md §3-4).
+ *
+ * 1) 채굴: 자기 레포의 과거 fix 커밋 중, 부모에서(테스트 패치만 적용하면) 실패하고 그 커밋에서 통과하는 것을 고른다.
+ *    npm run taskbench -- --mine --repo ~/work/foo --test "npm test" [--limit 40] [--out bench/tasks.local.json]
+ *    사람이 tasks.local.json의 `prompt`를 증상 서술로 다듬는다 (기본값은 커밋 제목 — 수정 힌트가 들어 있을 수 있다).
+ *
+ * 2) 실행: 사례마다 부모 커밋의 임시 worktree에서 claude -p를 두 모드로 돌린다.
+ *    npm run taskbench -- --run --tasks bench/tasks.local.json [--seeds 3] [--modes bare,grimoire] [--model sonnet] [--no-bare]
+ *      bare      내장 도구만
+ *      grimoire  내장 도구 + Grimoire MCP + 편집 직전 훅 — 임시 DB는 부모 커밋까지만 색인(시간 마스킹)
+ *    채점: pass(F2P), p2p_broken, cost_billed·modelUsage, turns, stray/missed, reverted_edits, churn_ratio, subtype.
+ *    결과: bench/results/taskbench-<시각>.json + 짝지은 요약(_ok 변형, cost_per_solved).
+ *
+ * 비용이 든다(사례·모드·시드당 $0.5~1.5). 먼저 10사례 × 1시드 파일럿으로 분산을 보고 N을 정한다.
+ * 채택 기준은 결과를 보기 전에 §3-4에 고정돼 있다.
+ */
+import { execFileSync, spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { parseArgs } from "node:util";
+
+import { tempDir } from "../tests/helpers";
+import { runClaude, type AgentRun } from "./claude";
+
+type Mode = "bare" | "grimoire";
+const MODES: Mode[] = ["bare", "grimoire"];
+
+interface Task {
+  id: string;
+  repo: string;
+  /** 실제 fix 커밋 */
+  sha: string;
+  parent: string;
+  subject: string;
+  /** 사람이 다듬는 증상 서술. 비면 subject */
+  prompt: string;
+  /** 테스트 명령 (셸) */
+  test: string;
+  /** 실제 fix가 건드린 비테스트 파일 */
+  files: string[];
+  testFiles: string[];
+  /** 채굴 때 부모+테스트패치에서 실패한 테스트 이름(알 수 있을 때만) */
+  failing?: string[];
+}
+
+interface TaskFile {
+  tasks: Task[];
+}
+
+interface RunRow {
+  task: string;
+  mode: Mode;
+  seed: number;
+  pass: boolean;
+  p2pBroken: boolean;
+  costUsd: number | null;
+  turns: number | null;
+  toolCalls: number;
+  stray: number;
+  missed: number;
+  revertedEdits: number;
+  churnRatio: number | null;
+  subtype: string | null;
+  seconds: number;
+  usage: AgentRun["modelUsage"];
+  error?: string;
+}
+
+const TEST_PATH = /(?:^|\/)(?:test(?:ing|s)?|e2e|__tests__|spec)\/|\.(?:test|spec)\.[^/]+$|(?:^|\/)test_[^/]+$|_test\.[^/]+$/i;
+const DEPENDENCY_FILE = /(^|\/)(package\.json|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|requirements[^/]*\.txt|pyproject\.toml|poetry\.lock|go\.mod|go\.sum|Cargo\.(toml|lock)|Gemfile(\.lock)?)$/;
+const FIX_SUBJECT = /\b(fix(es|ed)?|bug|regress|hotfix)\b|^(fix|hotfix)(\([^)]*\))?!?\s*:|수정|버그|Why:|Constraint:/i;
+const TEST_TIMEOUT_MS = 120_000;
+const MAX_FILES = 15;
+const MAX_NON_TEST_LINES = 100;
+/** 각 상태를 몇 번 돌려 뒤집히는 테스트를 거르나 */
+const FLAKY_RUNS = 3;
+
+const expandHome = (value: string) => value.replace(/^~(?=$|[\\/])/, os.homedir());
+
+function git(cwd: string, args: string[]): string {
+  return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 * 1024 * 1024 });
+}
+
+function runShell(command: string, cwd: string): { ok: boolean; output: string } {
+  const result = spawnSync(command, { cwd, shell: true, encoding: "utf8", timeout: TEST_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] });
+  return { ok: result.status === 0 && !result.error, output: `${result.stdout ?? ""}\n${result.stderr ?? ""}` };
+}
+
+/** 실패한 테스트 이름을 흔한 출력 꼴에서 뽑는다 (node:test·jest·vitest·pytest·go test). 정보용 */
+function failingNames(output: string): string[] {
+  const names = new Set<string>();
+  for (const raw of output.split("\n")) {
+    const line = raw.trimEnd();
+    const m = /^not ok \d+ - (.+)$/.exec(line) ?? /^\s*[✕✗×] (.+)$/.exec(line) ?? /^FAILED (\S+)/.exec(line) ?? /^--- FAIL: (\S+)/.exec(line);
+    if (m) names.add(m[1].trim());
+  }
+  return [...names];
+}
+
+/** 부모 커밋의 worktree를 임시로 만든다 (끝나면 지운다) */
+function worktree(repo: string, sha: string): { dir: string; remove: () => void } {
+  const dir = path.join(tempDir("grimoire-taskbench-wt-"), "repo");
+  git(repo, ["worktree", "add", "--detach", "-q", dir, sha]);
+  return {
+    dir,
+    remove: () => {
+      try {
+        git(repo, ["worktree", "remove", "--force", dir]);
+      } catch {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  };
+}
+
+/* ── 채굴 ───────────────────────────────────────────────── */
+
+function mine(repo: string, test: string, limit: number, existing: Task[]): Task[] {
+  const known = new Set(existing.map((task) => task.sha));
+  const log = git(repo, ["log", "--no-merges", "--format=%H%x1f%P%x1f%s", "-n", "2000"]).trim().split("\n");
+  const tasks: Task[] = [...existing];
+  let scanned = 0;
+  for (const line of log) {
+    if (tasks.length - existing.length >= limit) break;
+    const [sha, parents, subject] = line.split("\x1f");
+    if (!sha || known.has(sha) || !parents || parents.includes(" ")) continue;
+    const body = git(repo, ["log", "-1", "--format=%b", sha]);
+    if (!FIX_SUBJECT.test(subject) && !FIX_SUBJECT.test(body)) continue;
+    if (/^revert\b/i.test(subject)) continue;
+    const changed = git(repo, ["show", "--format=", "--name-only", sha]).trim().split("\n").filter(Boolean);
+    if (changed.length === 0 || changed.length > MAX_FILES) continue;
+    if (changed.some((file) => DEPENDENCY_FILE.test(file))) continue; // 환경 드리프트
+    const testFiles = changed.filter((file) => TEST_PATH.test(file));
+    const files = changed.filter((file) => !TEST_PATH.test(file));
+    if (testFiles.length === 0 || files.length === 0) continue;
+    const numstat = git(repo, ["show", "--format=", "--numstat", sha, "--", ...files]);
+    const nonTestLines = numstat
+      .trim()
+      .split("\n")
+      .reduce((sum, row) => sum + (Number(row.split("\t")[0]) || 0) + (Number(row.split("\t")[1]) || 0), 0);
+    if (nonTestLines > MAX_NON_TEST_LINES) continue;
+    scanned++;
+    process.stderr.write(`… ${sha.slice(0, 10)} ${subject.slice(0, 60)}\n`);
+
+    // 부모 + 테스트 패치만 → 실패해야 함(3회 모두). 커밋 → 통과해야 함(3회 모두)
+    const wt = worktree(repo, parents);
+    let failing: string[] = [];
+    try {
+      const patch = git(repo, ["show", "--format=", sha, "--", ...testFiles]);
+      const apply = spawnSync("git", ["apply", "--3way", "-"], { cwd: wt.dir, input: patch, encoding: "utf8" });
+      if (apply.status !== 0) continue;
+      let consistentFail = true;
+      for (let i = 0; i < FLAKY_RUNS && consistentFail; i++) {
+        const result = runShell(test, wt.dir);
+        if (result.ok) consistentFail = false;
+        else if (i === 0) failing = failingNames(result.output);
+      }
+      if (!consistentFail) continue;
+      git(wt.dir, ["checkout", "-q", "--detach", sha]);
+      let consistentPass = true;
+      for (let i = 0; i < FLAKY_RUNS && consistentPass; i++) if (!runShell(test, wt.dir).ok) consistentPass = false;
+      if (!consistentPass) continue;
+    } finally {
+      wt.remove();
+    }
+    tasks.push({ id: `${path.basename(repo)}-${sha.slice(0, 8)}`, repo, sha, parent: parents, subject, prompt: "", test, files, testFiles, ...(failing.length > 0 ? { failing } : {}) });
+    process.stderr.write(`  ✓ 사례 ${tasks.length - existing.length}: ${sha.slice(0, 10)}\n`);
+  }
+  process.stderr.write(`후보 ${scanned}개를 돌려 사례 ${tasks.length - existing.length}개\n`);
+  return tasks;
+}
+
+/* ── 실행 ───────────────────────────────────────────────── */
+
+function editedFiles(run: AgentRun, root: string): string[] {
+  const out = new Set<string>();
+  for (const call of run.calls) {
+    if (!/^(Edit|Write|MultiEdit|NotebookEdit)$/.test(call.name)) continue;
+    const file = (call.input as { file_path?: string; notebook_path?: string }).file_path ?? (call.input as { notebook_path?: string }).notebook_path;
+    if (typeof file === "string") out.add(path.relative(root, file).split(path.sep).join("/"));
+  }
+  return [...out];
+}
+
+function editChurn(run: AgentRun): number {
+  let lines = 0;
+  for (const call of run.calls) {
+    const input = call.input as { old_string?: string; new_string?: string; content?: string; edits?: { old_string?: string; new_string?: string }[] };
+    if (call.name === "Edit") lines += (input.old_string ?? "").split("\n").length + (input.new_string ?? "").split("\n").length;
+    else if (call.name === "Write") lines += (input.content ?? "").split("\n").length;
+    else if (call.name === "MultiEdit") for (const edit of input.edits ?? []) lines += (edit.old_string ?? "").split("\n").length + (edit.new_string ?? "").split("\n").length;
+  }
+  return lines;
+}
+
+async function runTask(task: Task, mode: Mode, seed: number, options: { cli: string; model?: string; bare: boolean; budget: string; maxTurns: number }): Promise<RunRow> {
+  const wt = worktree(task.repo, task.parent);
+  const data = tempDir("grimoire-taskbench-data-");
+  const started = Date.now();
+  try {
+    const env = { GRIMOIRE_HOME: data, GRIMOIRE_SYNC_ON_START: "0", GRIMOIRE_UPDATE_CHECK: "0", GRIMOIRE_AUTO_ADD: "0" };
+    const mcpConfig = path.join(data, "mcp.json");
+    let settings: string | undefined;
+    if (mode === "grimoire") {
+      // 시간 마스킹: 부모 커밋까지만 보이는 공유 clone을 색인한다 (실제 fix는 보이지 않는다)
+      const pinned = path.join(data, "pinned");
+      execFileSync("git", ["clone", "-q", "--shared", "--no-checkout", task.repo, pinned], { stdio: "ignore" });
+      for (const ref of git(pinned, ["for-each-ref", "--format=%(refname)"]).split("\n").filter(Boolean)) git(pinned, ["update-ref", "-d", ref]);
+      git(pinned, ["update-ref", "refs/heads/pinned", task.parent]);
+      git(pinned, ["symbolic-ref", "HEAD", "refs/heads/pinned"]);
+      git(pinned, ["checkout", "-q", "pinned"]);
+      execFileSync(process.execPath, [options.cli, "add", pinned], { env: { ...process.env, ...env }, stdio: "ignore" });
+      // 훅은 worktree 경로로 들어오므로 worktree도 같은 레포로 등록한다(같은 커밋들, 이미 색인된 sha는 건너뜀)
+      execFileSync(process.execPath, [options.cli, "add", wt.dir], { env: { ...process.env, ...env }, stdio: "ignore" });
+      fs.writeFileSync(mcpConfig, JSON.stringify({ mcpServers: { grimoire: { command: process.execPath, args: [options.cli, "mcp"], env } } }));
+      const hook = path.join(path.dirname(options.cli), "hook.js");
+      const slash = (value: string) => value.split(path.sep).join("/");
+      const command = `"${slash(process.execPath)}" "${slash(hook)}" --env "GRIMOIRE_HOME=${slash(data)}" --env "GRIMOIRE_CAPTURE=0"`;
+      settings = path.join(data, "settings.json");
+      fs.writeFileSync(settings, JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Edit|Write|MultiEdit", hooks: [{ type: "command", command, timeout: 5 }] }] } }));
+    } else {
+      fs.writeFileSync(mcpConfig, JSON.stringify({ mcpServers: {} }));
+    }
+    const prompt = `${task.prompt || task.subject}\n\n고친 뒤에는 \`${task.test}\`로 확인해 줘. 작업 폴더 밖은 건드리지 마.`;
+    const run = await runClaude({
+      prompt,
+      cwd: wt.dir,
+      mcpConfig,
+      allowedTools: ["Bash", "Read", "Edit", "Write", "MultiEdit", "Grep", "Glob", ...(mode === "grimoire" ? ["mcp__grimoire"] : [])],
+      model: options.model,
+      budgetUsd: options.budget,
+      maxTurns: options.maxTurns,
+      settings,
+      bare: options.bare,
+      permissionMode: "bypassPermissions",
+      timeoutMs: 20 * 60_000,
+    });
+    // 채점: 실제 fix의 테스트 패치를 얹고 돌린다 (에이전트가 테스트를 고쳐 통과시킨 경우를 막는다)
+    for (const file of task.testFiles) git(wt.dir, ["checkout", "-q", task.sha, "--", file]);
+    const pass = runShell(task.test, wt.dir).ok;
+    // 회귀: 부모에서 통과하던 것이 깨졌나 — 실제 fix 커밋 전체 테스트가 아니라 "부모 상태 테스트"를 에이전트 결과에 얹어 돌린다
+    for (const file of task.testFiles) git(wt.dir, ["checkout", "-q", task.parent, "--", file]);
+    const p2pBroken = !runShell(task.test, wt.dir).ok;
+    const edited = editedFiles(run, wt.dir).filter((file) => !task.testFiles.includes(file));
+    const finalDiff = git(wt.dir, ["diff", "--numstat", task.parent, "--"]).trim().split("\n").filter(Boolean);
+    const finalLines = finalDiff.reduce((sum, row) => sum + (Number(row.split("\t")[0]) || 0) + (Number(row.split("\t")[1]) || 0), 0);
+    const changedAtEnd = new Set(finalDiff.map((row) => row.split("\t")[2]));
+    const reverted = edited.filter((file) => !changedAtEnd.has(file)).length;
+    const churn = editChurn(run);
+    return {
+      task: task.id,
+      mode,
+      seed,
+      pass,
+      p2pBroken,
+      costUsd: run.costUsd,
+      turns: run.turns,
+      toolCalls: run.calls.length,
+      stray: edited.filter((file) => !task.files.includes(file)).length,
+      missed: task.files.filter((file) => !edited.includes(file)).length,
+      revertedEdits: reverted,
+      churnRatio: pass && finalLines > 0 ? +(churn / finalLines).toFixed(2) : null,
+      subtype: run.subtype,
+      seconds: +((Date.now() - started) / 1000).toFixed(1),
+      usage: run.modelUsage,
+      ...(run.error ? { error: run.error } : {}),
+    };
+  } finally {
+    wt.remove();
+    fs.rmSync(data, { recursive: true, force: true });
+  }
+}
+
+/* ── 요약 ───────────────────────────────────────────────── */
+
+function summarize(rows: RunRow[]) {
+  const by = (mode: Mode) => rows.filter((row) => row.mode === mode && !row.error);
+  const mean = (values: number[]) => (values.length ? +(values.reduce((a, b) => a + b, 0) / values.length).toFixed(3) : null);
+  const modes = Object.fromEntries(
+    MODES.map((mode) => {
+      const list = by(mode);
+      const solved = list.filter((row) => row.pass).length;
+      const cost = list.reduce((sum, row) => sum + (row.costUsd ?? 0), 0);
+      return [
+        mode,
+        {
+          runs: list.length,
+          pass: list.length ? +(solved / list.length).toFixed(3) : null,
+          p2pBroken: list.length ? +(list.filter((row) => row.p2pBroken).length / list.length).toFixed(3) : null,
+          cost: +cost.toFixed(3),
+          costPerSolved: solved ? +(cost / solved).toFixed(3) : null,
+          turns: mean(list.map((row) => row.turns ?? 0)),
+          missed: mean(list.map((row) => row.missed)),
+          stray: mean(list.map((row) => row.stray)),
+          reverted: mean(list.map((row) => row.revertedEdits)),
+          churn: mean(list.map((row) => row.churnRatio).filter((value): value is number => value !== null)),
+        },
+      ];
+    }),
+  );
+  // 짝 비교: 같은 사례·시드에서 둘 다 푼 것만(_ok)의 log 비용·턴 차이, 그리고 missed·p2p 차이
+  const key = (row: RunRow) => `${row.task}#${row.seed}`;
+  const bare = new Map(by("bare").map((row) => [key(row), row]));
+  const pairs = by("grimoire").map((row) => [bare.get(key(row)), row] as const).filter((pair): pair is readonly [RunRow, RunRow] => Boolean(pair[0]));
+  const ok = pairs.filter(([a, b]) => a.pass && b.pass && a.costUsd && b.costUsd);
+  const logDiff = ok.map(([a, b]) => Math.log(b.costUsd! / a.costUsd!));
+  const turnDiff = ok.map(([a, b]) => (b.turns ?? 0) - (a.turns ?? 0));
+  return {
+    modes,
+    paired: {
+      n: pairs.length,
+      okPairs: ok.length,
+      costRatioOk: logDiff.length ? +Math.exp(logDiff.reduce((a, b) => a + b, 0) / logDiff.length).toFixed(3) : null,
+      turnsDeltaOk: mean(turnDiff),
+      missedDelta: mean(pairs.map(([a, b]) => b.missed - a.missed)),
+      p2pDelta: mean(pairs.map(([a, b]) => Number(b.p2pBroken) - Number(a.p2pBroken))),
+      wilcoxonCostP: ok.length >= 5 ? wilcoxon(logDiff) : null,
+    },
+  };
+}
+
+/** 윌콕슨 부호 순위 검정의 정규 근사 p값 (양측) */
+export function wilcoxon(diffs: number[]): number {
+  const nonzero = diffs.filter((value) => value !== 0);
+  const n = nonzero.length;
+  if (n === 0) return 1;
+  const ranked = nonzero.map((value) => ({ value, abs: Math.abs(value) })).sort((a, b) => a.abs - b.abs).map((item, index) => ({ ...item, rank: index + 1 }));
+  const wPlus = ranked.filter((item) => item.value > 0).reduce((sum, item) => sum + item.rank, 0);
+  const meanW = (n * (n + 1)) / 4;
+  const sdW = Math.sqrt((n * (n + 1) * (2 * n + 1)) / 24);
+  const z = (wPlus - meanW) / sdW;
+  const phi = (x: number) => 0.5 * (1 + erf(x / Math.SQRT2));
+  return +(2 * (1 - phi(Math.abs(z)))).toFixed(4);
+}
+
+function erf(x: number): number {
+  const t = 1 / (1 + 0.3275911 * Math.abs(x));
+  const y = 1 - ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x);
+  return x >= 0 ? y : -y;
+}
+
+/* ── 진입점 ─────────────────────────────────────────────── */
+
+async function main(): Promise<number> {
+  const { values } = parseArgs({
+    options: {
+      mine: { type: "boolean" },
+      run: { type: "boolean" },
+      repo: { type: "string" },
+      test: { type: "string" },
+      limit: { type: "string" },
+      out: { type: "string" },
+      tasks: { type: "string" },
+      seeds: { type: "string" },
+      modes: { type: "string" },
+      only: { type: "string" },
+      model: { type: "string" },
+      budget: { type: "string" },
+      "max-turns": { type: "string" },
+      "no-bare": { type: "boolean" },
+      label: { type: "string" },
+    },
+  });
+  if (values.mine) {
+    if (!values.repo || !values.test) throw new Error("--mine에는 --repo <경로>와 --test \"<테스트 명령>\"이 필요합니다");
+    const repo = path.resolve(expandHome(values.repo));
+    const out = path.resolve(values.out ?? "bench/tasks.local.json");
+    const existing: TaskFile = fs.existsSync(out) ? (JSON.parse(fs.readFileSync(out, "utf8")) as TaskFile) : { tasks: [] };
+    const tasks = mine(repo, values.test, Number.parseInt(values.limit ?? "40", 10) || 40, existing.tasks);
+    fs.mkdirSync(path.dirname(out), { recursive: true });
+    fs.writeFileSync(out, JSON.stringify({ tasks }, null, 2) + "\n");
+    process.stdout.write(`${out}: 사례 ${tasks.length}개. 각 사례의 "prompt"를 증상 서술로 다듬으세요(비면 커밋 제목을 씁니다 — 수정 힌트가 샐 수 있습니다).\n`);
+    return 0;
+  }
+  if (!values.run) throw new Error("--mine 또는 --run");
+  const file = path.resolve(values.tasks ?? "bench/tasks.local.json");
+  const spec = JSON.parse(fs.readFileSync(file, "utf8")) as TaskFile;
+  const only = values.only?.split(",").map((item) => item.trim());
+  const tasks = spec.tasks.filter((task) => !only || only.includes(task.id));
+  const seeds = Math.max(1, Number.parseInt(values.seeds ?? "1", 10) || 1);
+  const modes = (values.modes?.split(",") as Mode[] | undefined) ?? MODES;
+  const cli = process.env.BENCH_CLI ? path.resolve(process.env.BENCH_CLI) : path.resolve(__dirname, "..", "..", "dist", "cli.js");
+  if (!fs.existsSync(cli)) throw new Error(`${cli}가 없습니다 — npm run build를 먼저 하세요`);
+  const options = { cli, model: values.model, bare: !values["no-bare"], budget: values.budget ?? "2.00", maxTurns: Number.parseInt(values["max-turns"] ?? "60", 10) || 60 };
+  // 캐시 TTL을 두 모드에 같게 — 쓰기 단가가 다르면 비용 비교가 흔들린다
+  process.env.CLAUDE_CODE_PROMPT_CACHE_TTL ??= "5m";
+
+  const rows: RunRow[] = [];
+  for (const task of tasks) {
+    for (let seed = 1; seed <= seeds; seed++) {
+      // 블록(사례·시드)마다 모드 순서를 섞는다
+      const order = [...modes].sort(() => Math.random() - 0.5);
+      for (const mode of order) {
+        process.stdout.write(`… ${task.id} #${seed} ${mode}\n`);
+        const row = await runTask(task, mode, seed, options);
+        rows.push(row);
+        process.stdout.write(
+          `   ${row.pass ? "✓" : "✗"}${row.p2pBroken ? " 회귀" : ""}  $${(row.costUsd ?? 0).toFixed(3)}  ${row.turns ?? "-"}턴  missed ${row.missed}  stray ${row.stray}  ${row.subtype ?? ""}${row.error ? `  ${row.error.slice(0, 80)}` : ""}\n`,
+        );
+      }
+    }
+  }
+  const summary = summarize(rows);
+  const resultsDir = path.resolve("bench", "results");
+  fs.mkdirSync(resultsDir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const outFile = path.join(resultsDir, `taskbench-${stamp}${values.label ? `-${values.label}` : ""}.json`);
+  fs.writeFileSync(outFile, JSON.stringify({ label: values.label, model: values.model, bare: options.bare, tasks: tasks.map((task) => task.id), seeds, summary, rows }, null, 2));
+  process.stdout.write("\n" + JSON.stringify(summary, null, 2) + "\n");
+  const paired = summary.paired;
+  if (paired.okPairs > 0) {
+    process.stdout.write(
+      `\n판정(§3-4): 둘 다 푼 짝 ${paired.okPairs}개에서 grimoire/bare 비용비 ${paired.costRatioOk} (목표 ≤ 0.85), 턴 차이 ${paired.turnsDeltaOk}, missed 차이 ${paired.missedDelta}, p2p 차이 ${paired.p2pDelta}, 비용 윌콕슨 p=${paired.wilcoxonCostP ?? "-"}\n`,
+    );
+  }
+  process.stdout.write(`결과: ${outFile}\n`);
+  return 0;
+}
+
+if (require.main === module) {
+  main().then(
+    (code) => (process.exitCode = code),
+    (error) => {
+      console.error(error instanceof Error ? error.message : error);
+      process.exitCode = 2;
+    },
+  );
+}

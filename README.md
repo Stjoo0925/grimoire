@@ -186,6 +186,7 @@ npm test            # indexing, search and MCP tools against temp git repos (no 
 npm run e2e         # end-to-end MCP harness (below)
 npm run e2e:agent   # agent harness (below, calls real Claude)
 npm run bench       # pinpoint benchmark (below, calls real Claude)
+npm run perf        # speed A/B of two builds on your indexed repos (docs/perf-loop.md, no model calls)
 ```
 
 ### End-to-end MCP harness (`e2e/harness.ts`)

@@ -76,7 +76,7 @@ function git(cwd: string, args: string[]): string {
 }
 
 /** 원본 레포의 sha 하나만 가리키는 임시 clone — 원본 객체를 빌려 써서 빠르고, 원본은 건드리지 않는다 */
-function pin(source: string, sha: string, root: string, tips: string[] = []): string {
+export function pin(source: string, sha: string, root: string, tips: string[] = []): string {
   const dir = path.join(root, path.basename(source));
   execFileSync("git", ["clone", "-q", "--shared", "--no-checkout", source, dir], { stdio: "ignore" });
   for (const ref of git(dir, ["for-each-ref", "--format=%(refname)"]).split("\n").filter(Boolean)) git(dir, ["update-ref", "-d", ref]);

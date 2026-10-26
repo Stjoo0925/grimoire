@@ -162,19 +162,25 @@ async function syncRepoNow(db: DB, repo: RepoRow): Promise<SyncResult> {
   const saved = db.prepare("SELECT tips, head_tree FROM repos WHERE id = ?").get(repo.id) as
     | { tips: string | null; head_tree: string | null }
     | undefined;
-  const tips = await refTips(repo.path);
+  // 서로 기다릴 필요 없는 git 호출은 함께 띄운다 — 프로세스 띄우기가 호출마다 20ms 안팎이라(Windows),
+  // 바뀐 것 없는 재동기화는 거의 이 셋이 전부다 (npm run perf: 재동기화 시간)
+  const [tips, tree, remote] = await Promise.all([refTips(repo.path), headTree(repo.path), remoteUrl(repo.path)]);
   const fresh = await newShas(db, repo, saved?.tips ?? null, tips);
 
-  const commits: GitCommit[] = [];
-  for (let start = 0; start < fresh.length; start += READ_BATCH) {
-    commits.push(...(await readCommits(repo.path, fresh.slice(start, start + READ_BATCH))));
-  }
-  // HEAD 트리가 그대로면 현재 코드·기술 스택도 그대로다
-  const tree = await headTree(repo.path);
+  const readFresh = async () => {
+    const out: GitCommit[] = [];
+    for (let start = 0; start < fresh.length; start += READ_BATCH) {
+      out.push(...(await readCommits(repo.path, fresh.slice(start, start + READ_BATCH))));
+    }
+    return out;
+  };
+  // HEAD 트리가 그대로면 현재 코드·기술 스택도 그대로다. 커밋·기술 스택·코드 읽기는 서로 독립이라 함께 돌린다
   const treeChanged = tree === null || tree !== saved?.head_tree;
-  const tech = treeChanged ? await readTechStack(repo.path) : null;
-  const remote = await remoteUrl(repo.path);
-  const code = treeChanged ? await readChangedCode(db, repo) : { changed: [], removed: [] };
+  const [commits, tech, code] = await Promise.all([
+    readFresh(),
+    treeChanged ? readTechStack(repo.path) : null,
+    treeChanged ? readChangedCode(db, repo) : { changed: [], removed: [] },
+  ]);
 
   db.transaction(() => {
     for (const commit of commits) insertCommit(db, repo, commit);

@@ -11,3 +11,4 @@ npm-debug.log*
 # 벤치 질문(내 레포 기준)·결과는 로컬 전용
 /bench/*.local.json
 /bench/results/
+/bench/builds/

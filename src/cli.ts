@@ -91,7 +91,7 @@ async function main(argv: string[]): Promise<number> {
     },
   });
 
-  // DB를 열기 전에 처리한다 — SQLite 모듈이 안 맞아도 doctor·install은 돌아야 한다.
+  // DB를 열기 전에 처리한다 — SQLite를 못 열어도(오래된 Node) doctor·install은 돌아야 한다.
   if (command === "doctor") {
     const checks = await doctor({ cliPath: __filename });
     print(formatChecks(checks));

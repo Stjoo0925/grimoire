@@ -22,8 +22,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # engines는 node >= 20 — 지원 범위 양끝과 그 사이, 그리고 macOS(사용자 대부분)
-          - { os: ubuntu-latest, node: 20 }
+          # engines는 node >= 22.13 (node:sqlite) — 지원 범위 양끝, 그리고 macOS(사용자 대부분)
           - { os: ubuntu-latest, node: 22 }
           - { os: ubuntu-latest, node: 24 }
           - { os: macos-latest, node: 22 }

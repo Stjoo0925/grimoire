@@ -21,7 +21,7 @@ See [docs/PLANNING.md](./docs/PLANNING.md) (Korean) for the design and what chan
 
 ## Quick start
 
-Requires Node.js 20+ and git.
+Requires Node.js 22.13+ and git. SQLite is Node's built-in `node:sqlite`, so there is no native module to build.
 
 ```bash
 npm install -g @stjoo0925/grimoire
@@ -44,8 +44,8 @@ To run from source, clone it and run `npm install && npm run build && npm link`.
 | Cursor | `grimoire install cursor` (`--project .` for this repo only) | `~/.cursor/mcp.json` |
 
 - The config contains the **absolute path of the node currently running**. GUI apps like Claude Desktop and Cursor
-  don't see your shell's PATH, so `"command": "node"` fails with `spawn node ENOENT`. The SQLite module also only
-  loads under the node it was built with. If you switch node versions, run `install` again.
+  don't see your shell's PATH, so `"command": "node"` fails with `spawn node ENOENT`. If you switch
+  node versions, run `install` again so the config points at the node you use now.
 - If `GRIMOIRE_HOME`, `GRIMOIRE_ME`, `GRIMOIRE_AUTO_ADD` or `GRIMOIRE_UPDATE_CHECK` are set, they are written too,
   so the CLI and MCP server see the same DB.
 - Other server entries are left alone; only the `grimoire` entry is added. The existing file is backed up as `.bak`,
@@ -54,7 +54,7 @@ To run from source, clone it and run `npm install && npm run build && npm link`.
 
 ### When it won't connect — `grimoire doctor`
 
-Checks the Grimoire version (whether a new release is out), the node version and SQLite module, git, the DB and registered repos, your email, and the config
+Checks the Grimoire version (whether a new release is out), the node version and built-in SQLite (FTS5), git, the DB and registered repos, your email, and the config
 each client has (whether the node path exists, matches the current node, and points at the same DB), and tells you the command to fix it.
 
 ### The project you're working in is registered automatically
@@ -270,7 +270,7 @@ If something fails midway, re-run it from Actions. The tag, the npm version and 
 - Only squash merges are allowed. **The squash commit title is the PR title**, and it becomes a CHANGELOG line, so write PR titles as Conventional Commits like `feat: …` or `fix(search): …` (the [PR title check](.github/workflows/pr-title.yml) enforces this).
 - Merged branches are deleted automatically.
 
-The [CI workflow](.github/workflows/ci.yml) runs typecheck, tests, the end-to-end MCP harness and a package-contents check on Ubuntu (node 20, 22, 24) and macOS (node 22) for every push to main and every PR.
+The [CI workflow](.github/workflows/ci.yml) runs typecheck, tests, the end-to-end MCP harness and a package-contents check on Ubuntu (node 22, 24) and macOS (node 22) for every push to main and every PR.
 
 - The update check calls the GitHub API without auth, so **the repo must be public** for other users to see new versions.
 - If you change the DB schema, only append a step to `MIGRATIONS` in `src/core/db.ts`. Editing an existing step breaks existing users' DBs.

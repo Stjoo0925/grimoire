@@ -21,7 +21,7 @@ AI가 프로젝트를 일일이 열어 보거나 git log를 뒤지지 않고, �
 
 ## 빠른 시작
 
-Node.js 20 이상과 git이 필요합니다.
+Node.js 22.13 이상과 git이 필요합니다. SQLite는 Node 내장 `node:sqlite`를 써서 따로 빌드할 네이티브 모듈이 없습니다.
 
 ```bash
 npm install -g @stjoo0925/grimoire
@@ -44,8 +44,8 @@ grimoire doctor                       # 연결 상태 점검
 | Cursor | `grimoire install cursor` (`--project .`이면 이 레포만) | `~/.cursor/mcp.json` |
 
 - 설정에는 **지금 실행 중인 node의 절대경로**가 들어갑니다. Claude Desktop·Cursor 같은 GUI 앱은 셸의 PATH를
-  모르기 때문에 `"command": "node"`로 적으면 `spawn node ENOENT`로 연결이 안 됩니다. 또 SQLite 모듈은
-  빌드할 때 쓴 node로만 열립니다. 그래서 node 버전을 바꿨다면 `install`을 다시 하세요.
+  모르기 때문에 `"command": "node"`로 적으면 `spawn node ENOENT`로 연결이 안 됩니다. node 버전을
+  바꿨다면 설정이 지금 쓰는 node를 가리키도록 `install`을 다시 하세요.
 - `GRIMOIRE_HOME`·`GRIMOIRE_ME`·`GRIMOIRE_AUTO_ADD`·`GRIMOIRE_UPDATE_CHECK`를 설정해 둔 상태라면 그 값도 같이 적혀,
   CLI와 MCP가 같은 DB를 보게 됩니다.
 - 다른 서버 항목은 그대로 두고 `grimoire` 항목만 넣습니다. 기존 파일은 `.bak`으로 백업하고, JSON이 깨져 있으면
@@ -54,7 +54,7 @@ grimoire doctor                       # 연결 상태 점검
 
 ### 연결이 안 될 때 — `grimoire doctor`
 
-Grimoire 버전(새 릴리스가 있는지), node 버전과 SQLite 모듈, git, DB와 등록된 레포, 내 이메일, 각 클라이언트에 적힌 설정(node 경로가
+Grimoire 버전(새 릴리스가 있는지), node 버전과 내장 SQLite(FTS5), git, DB와 등록된 레포, 내 이메일, 각 클라이언트에 적힌 설정(node 경로가
 실제로 있는지, 지금 node와 같은지, 같은 DB를 보는지)을 점검하고 고치는 명령을 알려 줍니다.
 
 ### 작업 중인 프로젝트는 자동 등록
@@ -269,7 +269,7 @@ npm run bench -- --questions bench/questions.local.json --modes grimoire --only 
 - 머지는 squash만 됩니다. **squash 커밋 제목 = PR 제목**이고 그것이 CHANGELOG 한 줄이 되므로, PR 제목을 `feat: …`·`fix(search): …`처럼 Conventional Commits로 씁니다([PR 제목 검사](.github/workflows/pr-title.yml)가 확인합니다).
 - 머지된 브랜치는 자동으로 지워집니다.
 
-[CI 워크플로](.github/workflows/ci.yml)는 main push와 PR마다 Ubuntu(node 20·22·24)와 macOS(node 22)에서 타입 검사·테스트·MCP 종단 하네스·패키지 내용을 확인합니다.
+[CI 워크플로](.github/workflows/ci.yml)는 main push와 PR마다 Ubuntu(node 22·24)와 macOS(node 22)에서 타입 검사·테스트·MCP 종단 하네스·패키지 내용을 확인합니다.
 
 - 업데이트 확인은 로그인 없이 GitHub API를 부르므로, **레포가 public이어야** 다른 사용자에게 새 버전이 보입니다.
 - DB 스키마를 바꿨다면 `src/core/db.ts`의 `MIGRATIONS`에 단계를 덧붙이기만 하세요. 이미 있는 단계를 고치면 기존 사용자 DB와 어긋납니다.

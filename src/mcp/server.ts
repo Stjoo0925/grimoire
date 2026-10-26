@@ -9,9 +9,8 @@
  * 프라이버시: 외부 요청은 하루 한 번의 업데이트 확인(GitHub 릴리스 버전 조회)뿐이고
  * `GRIMOIRE_UPDATE_CHECK=0`이면 끈다. 연결한 AI 클라이언트에는 질의 결과(커밋 메시지·파일 경로·diff)가 전달된다.
  */
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { Server, type Tool } from "@modelcontextprotocol/server";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 
 import { dbPath } from "../core/config";
 import { openDb } from "../core/db";
@@ -56,7 +55,8 @@ export async function runMcpServer(env = process.env): Promise<void> {
     },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [...TOOLS] }));
+  // TOOLS는 as const(readonly)라 SDK의 변경 가능한 Tool[] 타입으로 맞춘다 — 내용은 그대로
+  server.setRequestHandler("tools/list", async () => ({ tools: [...TOOLS] as Tool[] }));
   let startup: Promise<void> | null = null;
   const kickoff = () => {
     startup ??= (async () => {
@@ -65,7 +65,7 @@ export async function runMcpServer(env = process.env): Promise<void> {
     })();
   };
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler("tools/call", async (request) => {
     kickoff();
     try {
       const result = await callTool(context, request.params.name, request.params.arguments ?? {});

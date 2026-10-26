@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.2](https://github.com/Stjoo0925/grimoire/compare/v0.6.1...v0.6.2) (2026-10-26)
+
+
+### 성능
+
+* 색인된 레포로 도는 성능 루프를 더하고 검색·동기화를 빠르게 한다 ([#15](https://github.com/Stjoo0925/grimoire/issues/15)) ([6c70719](https://github.com/Stjoo0925/grimoire/commit/6c7071935f8eefa1461069fde9155941aa5d7b96))
+
 ## [0.6.1](https://github.com/Stjoo0925/grimoire/compare/v0.6.0...v0.6.1) (2026-10-26)
 
 

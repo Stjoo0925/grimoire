@@ -220,6 +220,61 @@ const MIGRATIONS: string[] = [
   ALTER TABLE commits ADD COLUMN code_state INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE commits ADD COLUMN symbols TEXT;
   `,
+  // 6: 파일 맥락(context.ts)·세션 캡처(capture.ts) — docs/enhancement-plan.md §4
+  //    cochange: 같이 바뀐 파일 쌍(방향 있음), file_touches: 그 집계에 들어간 커밋 수, file_imports: 레포 안 import 그래프,
+  //    session_events: 훅이 모은 임시 기록(커밋에 묶이면 commit_context로), commit_context: 커밋에 묶인 왜·검증·버린 편집·트레일러.
+  //    commit_files에 경로 색인을 더해 "이 파일을 건드린 커밋" 역조회가 전체 스캔이 아니게 한다.
+  `
+  CREATE INDEX commit_files_path ON commit_files(repo_id, path);
+
+  CREATE TABLE cochange (
+    repo_id     INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    path        TEXT NOT NULL,
+    other       TEXT NOT NULL,
+    support     INTEGER NOT NULL,
+    last_at     TEXT NOT NULL,
+    PRIMARY KEY (repo_id, path, other)
+  );
+
+  CREATE TABLE file_touches (
+    repo_id  INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    path     TEXT NOT NULL,
+    commits  INTEGER NOT NULL,
+    PRIMARY KEY (repo_id, path)
+  );
+
+  CREATE TABLE file_imports (
+    repo_id  INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    path     TEXT NOT NULL,
+    target   TEXT NOT NULL,
+    PRIMARY KEY (repo_id, path, target)
+  );
+  CREATE INDEX file_imports_target ON file_imports(repo_id, target);
+
+  CREATE TABLE session_events (
+    id          INTEGER PRIMARY KEY,
+    session_id  TEXT NOT NULL,
+    repo_id     INTEGER REFERENCES repos(id) ON DELETE CASCADE,
+    at          TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    text        TEXT NOT NULL,
+    path        TEXT,
+    line_hashes TEXT
+  );
+  CREATE INDEX session_events_session ON session_events(session_id, at);
+
+  CREATE TABLE commit_context (
+    repo_id  INTEGER NOT NULL,
+    sha      TEXT NOT NULL,
+    kind     TEXT NOT NULL,
+    text     TEXT NOT NULL,
+    ord      INTEGER NOT NULL,
+    PRIMARY KEY (repo_id, sha, kind, ord),
+    FOREIGN KEY (repo_id, sha) REFERENCES commits(repo_id, sha) ON DELETE CASCADE
+  );
+
+  ALTER TABLE commits ADD COLUMN agent_signal TEXT;
+  `,
 ];
 
 export function openDb(file: string): DB {

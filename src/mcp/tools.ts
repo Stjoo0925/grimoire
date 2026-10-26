@@ -16,6 +16,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { isIndexable } from "../core/code";
+import { fileContext } from "../core/context";
 import type { DB } from "../core/db";
 import { resolveAuthors } from "../core/identity";
 import { indexCommitCode } from "../core/diffs";
@@ -23,7 +24,7 @@ import { addRepo, discoverRepos, findRepo, listRepos, syncRepo } from "../core/i
 import { addNote } from "../core/notes";
 import { commitDetail, repoOverview, repoSummaries } from "../core/overview";
 import { search, type SearchHit } from "../core/search";
-import { slimCommit, slimOverview, slimRepos, slimSearch, type Detail } from "./format";
+import { slimCommit, slimFileContext, slimOverview, slimRepos, slimSearch, type Detail } from "./format";
 import { waitForWorkspace, type Workspace } from "./workspace";
 
 export interface ToolContext {
@@ -107,6 +108,16 @@ export const TOOLS = [
     annotations: { readOnlyHint: true },
   },
   {
+    name: "file_context",
+    description: "Before editing a file: recent commits, why, co-changed files/tests, importers.",
+    inputSchema: {
+      type: "object",
+      properties: { path: { type: "string" }, repo: { type: "string" }, verbose: { type: "boolean" } },
+      required: ["path"],
+    },
+    annotations: { readOnlyHint: true },
+  },
+  {
     name: "get_repo_overview",
     description: "Repo stack, activity, hotspots, key commits.",
     inputSchema: { type: "object", properties: { repo: { type: "string" } }, required: ["repo"] },
@@ -157,6 +168,21 @@ async function topDiff(db: DB, hit: SearchHit) {
     patch: detail.patch,
     ...(detail.patchTruncated ? { truncated: `${FULL_DIFF_LINES}/${detail.patchLines}줄 — 나머지는 show_commit` } : {}),
   };
+}
+
+/** 절대경로가 속한 등록 레포 (가장 긴 경로가 이기게) */
+export function repoOfPath(db: DB, target: string) {
+  if (!path.isAbsolute(target)) return undefined;
+  const resolved = path.resolve(target);
+  return listRepos(db)
+    .filter((repo) => resolved === repo.path || resolved.startsWith(repo.path + path.sep))
+    .sort((a, b) => b.path.length - a.path.length)[0];
+}
+
+/** 레포 안 경로를 색인과 같은 꼴(레포 기준, POSIX 구분자)로 */
+export function relativeToRepo(repoPath: string, target: string): string {
+  const relative = path.isAbsolute(target) ? path.relative(repoPath, path.resolve(target)) : target;
+  return relative.split(path.sep).join("/").replace(/^\.\//, "");
 }
 
 /** MCP로 scan하기엔 너무 넓은 곳: 파일 시스템 루트와 홈 디렉터리 자체 */
@@ -254,6 +280,16 @@ export async function callTool(context: ToolContext, name: string, args: Args = 
         }),
       );
       return { commits };
+    }
+    case "file_context": {
+      const target = str(args.path);
+      if (!target) throw new ToolError("path가 필요합니다");
+      // 레포를 안 주면 작업 레포, 그것도 없으면 경로가 속한 등록 레포(절대경로일 때)
+      const repo = repoFilter(args.repo) ?? current ?? repoOfPath(db, target);
+      if (!repo) throw new ToolError("repo가 필요합니다 (어느 레포의 파일인지 알 수 없습니다)");
+      const relative = relativeToRepo(repo.path, target);
+      if (current) await context.workspace?.refresh?.(current, REFRESH_WAIT_MS);
+      return slimFileContext(fileContext(db, repo.id, relative), me, args.verbose === true);
     }
     case "get_repo_overview": {
       const repo = repoFilter(args.repo);

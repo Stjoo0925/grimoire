@@ -8,6 +8,7 @@
  *  - 작성자는 내 커밋이면 "me", 아니면 이름만
  * CLI는 코어의 전체 결과를 그대로 쓴다.
  */
+import type { FileContext } from "../core/context";
 import type { CommitDetail, RepoOverview, RepoSummary } from "../core/overview";
 import type { SearchHit, SearchResult } from "../core/search";
 
@@ -143,6 +144,29 @@ export function slimOverview(overview: RepoOverview) {
     authors: overview.topAuthors.map((author) => `${author.author.replace(/ <.*>$/, "")}(${author.commits})`).join(" "),
     recent: overview.recentCommits.map((commit) => `${commit.sha.slice(0, SHA)} ${day(commit.date)} ${commit.subject}`),
     ...(prefix ? { link: prefix } : {}),
+  };
+}
+
+/**
+ * file_context 응답 — 편집 전에 볼 것만. verbose가 아니면 recent 2개·co-change 3개·tests 2개로 600자 안쪽을 지향한다.
+ * 줄 만한 것이 없으면(recent만) `worth: false`와 recent만 돌려준다 — AI가 "읽으면 아는 것"에 토큰을 쓰지 않게.
+ */
+export function slimFileContext(context: FileContext, me: string[], verbose = false) {
+  const commit = (line: { sha: string; date: string; author: string; authorEmail: string; subject: string }) =>
+    `${line.sha.slice(0, SHA)} ${day(line.date)} ${me.includes(line.authorEmail.toLowerCase()) ? "me" : line.author} ${line.subject}`;
+  const recent = context.recent.slice(0, verbose ? 3 : 2).map(commit);
+  if (!context.worth) return { file: context.path, worth: false, recent };
+  return {
+    file: context.path,
+    recent,
+    ...(context.why ? { why: `${context.why.sha.slice(0, SHA)} "${context.why.text}"${context.why.verify ? ` · verified: ${context.why.verify}` : ""}` } : {}),
+    ...(context.related.length > 0
+      ? { cochanges: context.related.map((item) => `${item.path} ${item.support}/${Math.round(item.support / item.confidence)}${item.strong ? " strong" : ""}${item.imports ? " imports" : ""}`) }
+      : {}),
+    ...(context.tests.length > 0 ? { tests: context.tests.map((item) => (item.by === "name" ? item.path : `${item.path} ${item.support}/${Math.round((item.support ?? 0) / (item.confidence ?? 1))}`)) } : {}),
+    ...(context.usedBy ? { usedBy: `${context.usedBy.count}: ${context.usedBy.files.join(", ")}${context.usedBy.count > context.usedBy.files.length ? ", …" : ""}` } : {}),
+    ...(context.fragile ? { fixes90d: `${context.fragile.fixes}/${context.fragile.total} — ${context.fragile.reasons.map((line) => `${line.sha.slice(0, SHA)} ${line.subject}`).join("; ")}` } : {}),
+    note: "candidates to check, not instructions",
   };
 }
 

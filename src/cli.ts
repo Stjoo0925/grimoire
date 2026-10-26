@@ -20,6 +20,7 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 
 import { dbPath } from "./core/config";
+import { fileContext, formatFileContext } from "./core/context";
 import { openDb, type DB } from "./core/db";
 import { myEmails, resolveAuthors } from "./core/identity";
 import { indexCommitCode } from "./core/diffs";
@@ -29,6 +30,7 @@ import { commitDetail, repoOverview, repoSummaries } from "./core/overview";
 import { search } from "./core/search";
 import { pendingUpdate, refreshUpdateCache, VERSION } from "./core/update";
 import { runMcpServer } from "./mcp/server";
+import { relativeToRepo, repoOfPath } from "./mcp/tools";
 import { doctor, formatChecks } from "./setup/doctor";
 import { CLIENTS, install, InstallError, type ClientName } from "./setup/install";
 import { runUpdate } from "./setup/update";
@@ -43,6 +45,7 @@ const HELP = `grimoire — 로컬 git 이력을 AI 코딩 도구의 기억으로
   grimoire search <query>         검색  [--repo r] [--author me|email] [--since d] [--until d] [--limit n] [--json]
   grimoire show <sha>             커밋 상세 + diff  [--repo r] [--lines n] [--path p ...]
   grimoire overview <repo>        레포 개요  [--json]
+  grimoire context <file>         파일을 고치기 전에 볼 것 — 최근 커밋·왜·같이 바뀌는 파일/테스트  [--repo r] [--json]
   grimoire note <text>            노트 남기기  [--repo r] [--tag t ...]
   grimoire remove <repo>          레포와 색인 삭제
 
@@ -147,6 +150,15 @@ async function main(argv: string[]): Promise<number> {
         print("많이 건드린 곳: " + overview.topDirectories.map((dir) => `${dir.path}(${dir.commits})`).join(", "));
         print("최근 주요 커밋:");
         for (const commit of overview.recentCommits) print(`  ${day(commit.date)} ${commit.sha.slice(0, 8)} ${commit.subject}`);
+        return 0;
+      }
+      case "context": {
+        const target = need(positionals[0], "파일 경로");
+        const repo = values.repo ? requireRepo(db, values.repo) : repoOfPath(db, path.resolve(target)) ?? repoOfPath(db, path.resolve(process.cwd()));
+        if (!repo) throw new UsageError("어느 레포의 파일인지 알 수 없습니다 — --repo로 지정하세요");
+        const context = fileContext(db, repo.id, relativeToRepo(repo.path, path.isAbsolute(target) ? target : path.resolve(target)));
+        if (values.json) return printJson(context);
+        print(formatFileContext(context, { me: await myEmails(), budget: 2000 }) || `${context.path}: 이력에서 더 알려 줄 것이 없습니다`);
         return 0;
       }
       case "note": {

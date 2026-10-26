@@ -10,6 +10,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { extractSymbols, headerComment, listHeadFiles, readBlobs, splitIdentifier } from "./code";
+import { addCochange, cochangeInput, extractImports, needsCochangeBackfill, rebuildCochange } from "./context";
 import { deleteDoc, upsertDoc, pruneOrphanFts, type DB } from "./db";
 import {
   headTree,
@@ -174,10 +175,15 @@ async function syncRepoNow(db: DB, repo: RepoRow): Promise<SyncResult> {
   const treeChanged = tree === null || tree !== saved?.head_tree;
   const tech = treeChanged ? await readTechStack(repo.path) : null;
   const remote = await remoteUrl(repo.path);
-  const code = treeChanged ? await readChangedCode(db, repo) : { changed: [], removed: [] };
+  const code: CodeChanges = treeChanged ? await readChangedCode(db, repo) : { changed: [], removed: [], present: new Set() };
 
   db.transaction(() => {
-    for (const commit of commits) insertCommit(db, repo, commit);
+    // 옛 DB(마이그레이션 직후)면 있는 커밋으로 공변경 표를 먼저 만들고, 새 커밋은 하나씩 더한다 (context.ts)
+    const backfill = needsCochangeBackfill(db, repo.id);
+    for (const commit of commits) {
+      if (insertCommit(db, repo, commit) && !backfill) addCochange(db, repo.id, cochangeInput(commit, isMeaningfulSubject(commit.subject)));
+    }
+    if (backfill) rebuildCochange(db, repo.id);
 
     if (tech) {
       db.prepare("DELETE FROM repo_tech WHERE repo_id = ?").run(repo.id);
@@ -249,6 +255,8 @@ function parseTips(value: string | null): string[] | null {
 interface CodeChanges {
   changed: { path: string; blob: string; content: string }[];
   removed: string[];
+  /** HEAD의 색인 대상 경로 전부 — import 대상을 푸는 데 쓴다 */
+  present: Set<string>;
 }
 
 /** HEAD의 파일 중 blob이 바뀐 것만 읽는다 (트랜잭션 밖 — git 호출이 느릴 수 있어서) */
@@ -265,6 +273,7 @@ async function readChangedCode(db: DB, repo: RepoRow): Promise<CodeChanges> {
   return {
     changed: stale.map((file) => ({ path: file.path, blob: file.blob, content: contents.get(file.blob) ?? "" })),
     removed: [...known.keys()].filter((file) => !present.has(file)),
+    present,
   };
 }
 
@@ -274,11 +283,16 @@ function applyCode(db: DB, repo: RepoRow, code: CodeChanges): void {
      ON CONFLICT (repo_id, path) DO UPDATE SET blob = excluded.blob, lines = excluded.lines,
        symbols = excluded.symbols, header = excluded.header`,
   );
+  const clearImports = db.prepare("DELETE FROM file_imports WHERE repo_id = ? AND path = ?");
+  const insertImport = db.prepare("INSERT OR IGNORE INTO file_imports (repo_id, path, target) VALUES (?, ?, ?)");
   const now = new Date().toISOString();
   for (const file of code.changed) {
     const symbols = extractSymbols(file.content);
     const header = headerComment(file.content);
     upsert.run(repo.id, file.path, file.blob, file.content.split("\n").length, JSON.stringify(symbols), header);
+    // 레포 안 import만 — "누가 나를 쓰나"(usedBy)와 공변경의 import 이웃 신호 (context.ts)
+    clearImports.run(repo.id, file.path);
+    for (const target of extractImports(file.path, file.content, code.present)) insertImport.run(repo.id, file.path, target);
     upsertDoc(db, {
       kind: "file",
       ref: file.path,
@@ -295,14 +309,16 @@ function applyCode(db: DB, repo: RepoRow, code: CodeChanges): void {
   const remove = db.prepare("DELETE FROM code_files WHERE repo_id = ? AND path = ?");
   for (const file of code.removed) {
     remove.run(repo.id, file);
+    clearImports.run(repo.id, file);
     deleteDoc(db, "file", file, repo.id);
   }
 }
 
-function insertCommit(db: DB, repo: RepoRow, commit: GitCommit): void {
+/** 커밋을 넣는다. 이미 있던 커밋이면 false (공변경을 두 번 세지 않게). */
+function insertCommit(db: DB, repo: RepoRow, commit: GitCommit): boolean {
   const insertions = commit.files.reduce((sum, file) => sum + (file.insertions ?? 0), 0);
   const deletions = commit.files.reduce((sum, file) => sum + (file.deletions ?? 0), 0);
-  db.prepare(
+  const inserted = db.prepare(
     `INSERT OR IGNORE INTO commits
        (sha, repo_id, author_name, author_email, authored_at, subject, body,
         files_changed, insertions, deletions, meaningful)
@@ -319,7 +335,8 @@ function insertCommit(db: DB, repo: RepoRow, commit: GitCommit): void {
     insertions,
     deletions,
     isMeaningfulSubject(commit.subject) ? 1 : 0,
-  );
+  ).changes;
+  if (inserted === 0) return false;
 
   const insertFile = db.prepare(
     "INSERT INTO commit_files (repo_id, sha, path, insertions, deletions) VALUES (?, ?, ?, ?, ?)",
@@ -340,6 +357,7 @@ function insertCommit(db: DB, repo: RepoRow, commit: GitCommit): void {
       .map((file) => file.path)
       .join(" "),
   });
+  return true;
 }
 
 interface TechItem {

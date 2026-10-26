@@ -26,13 +26,13 @@ import { makeFixture, ME } from "./fixture";
 const GUI_PATH = process.platform === "win32" ? (process.env.PATH ?? "") : "/usr/bin:/bin:/usr/sbin:/sbin";
 const CONNECT_BUDGET_MS = 5_000;
 const SYNC_WAIT_MS = 10_000;
-const EXPECTED_TOOLS = ["search_memory", "show_commit", "get_repo_overview", "list_repos", "add_repo", "record_note"];
-const READ_TOOLS = ["search_memory", "show_commit", "get_repo_overview", "list_repos"];
+const EXPECTED_TOOLS = ["search_memory", "show_commit", "file_context", "get_repo_overview", "list_repos", "add_repo", "record_note"];
+const READ_TOOLS = ["search_memory", "show_commit", "file_context", "get_repo_overview", "list_repos"];
 /**
  * 도구 설명 글(도구·인자 description) 예산 — 설명이 다시 길어지는 것을 막는 용도다.
  * 영어로 옮기기 전 한국어 설명이 392자(도구 288 + 인자 104)였고, 영어판은 뜻이 잡히게 쓰고 약간의 여유를 둔다.
  */
-const TOOL_TEXT_BUDGET = 420;
+const TOOL_TEXT_BUDGET = 500; // 420(도구 6개) + file_context 한 문장
 
 interface ServerSpec {
   command: string;

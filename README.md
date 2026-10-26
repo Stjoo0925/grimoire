@@ -17,7 +17,7 @@ The goal is to let the AI point at the right file and commit with a single searc
 - Responses are kept minimal, because whatever lands in the conversation context is what you pay for
 - No LLM, no embedding model, no GPU: search is keyword-based (SQLite FTS5) and the AI you already use does the reading
 
-See [docs/PLANNING.md](./docs/PLANNING.md) (Korean) for the design and what changed from earlier versions, and [docs/improvement-plan.md](./docs/improvement-plan.md) (Korean) for the research-based roadmap.
+See [docs/PLANNING.md](./docs/PLANNING.md) (Korean) for the design and what changed from earlier versions, [docs/improvement-plan.md](./docs/improvement-plan.md) (Korean) for the research-based roadmap, and [docs/enhancement-plan.md](./docs/enhancement-plan.md) (Korean) for the core value and the plan to make it useful during agent coding (commit-bound "why", edit-time hooks, co-change, task benchmark).
 
 ## Quick start
 

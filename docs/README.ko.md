@@ -17,7 +17,7 @@ AI가 프로젝트를 일일이 열어 보거나 git log를 뒤지지 않고, �
 - 응답은 토큰을 아끼는 최소 형태. 대화 컨텍스트에 쌓이는 양이 곧 비용이라서
 - LLM·임베딩 모델·GPU 필요 없음: 검색은 키워드(SQLite FTS5)로 하고, 찾은 근거를 읽는 건 이미 쓰는 AI가 합니다
 
-설계와 이전 버전에서 바뀐 점은 [PLANNING.md](./PLANNING.md)를, 연구에 기반한 개선 로드맵은 [improvement-plan.md](./improvement-plan.md)를 보세요.
+설계와 이전 버전에서 바뀐 점은 [PLANNING.md](./PLANNING.md)를, 연구에 기반한 개선 로드맵은 [improvement-plan.md](./improvement-plan.md)를, 에이전트 코딩에 실질적으로 도움이 되게 하는 핵심가치와 강화 계획(커밋에 묶인 "왜"·편집 직전 훅·공변경·작업 완수 벤치)은 [enhancement-plan.md](./enhancement-plan.md)를 보세요.
 
 ## 빠른 시작
 

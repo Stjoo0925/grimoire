@@ -8,6 +8,7 @@
  *  - 작성자는 내 커밋이면 "me", 아니면 이름만
  * CLI는 코어의 전체 결과를 그대로 쓴다.
  */
+import type { CommitContextView } from "../core/capture";
 import type { FileContext } from "../core/context";
 import type { CommitDetail, RepoOverview, RepoSummary } from "../core/overview";
 import type { SearchHit, SearchResult } from "../core/search";
@@ -87,6 +88,7 @@ export function slimSearch(result: SearchResult, me: string[], detail: Detail = 
         files: [...hit.files.slice(0, shown), ...(more > 0 ? [`+${more}`] : [])],
         ...(hit.also?.length ? { also: hit.also.map((sha) => sha.slice(0, ALSO_SHA)) } : {}),
         ...(changed.length > 0 ? { changed } : {}),
+        ...(hit.why ? { why: hit.why } : {}),
         body: snippet(hit.body || hit.snippet, SUMMARY_BODY_CHARS),
       };
     }
@@ -98,6 +100,8 @@ export function slimSearch(result: SearchResult, me: string[], detail: Detail = 
       title: hit.title,
       files: [...hit.files.slice(0, FILES_PER_HIT), ...(more > 0 ? [`+${more}`] : [])],
       ...(hit.also?.length ? { also: hit.also.map((sha) => sha.slice(0, ALSO_SHA)) } : {}),
+      // 커밋에 묶인 의도 한 줄 — 있을 때만 (capture.ts). "왜 그렇게 했지"에 show_commit 없이 답하게
+      ...(hit.why ? { why: hit.why } : {}),
       body: snippet(hit.snippet),
     };
   });
@@ -107,12 +111,24 @@ export function slimSearch(result: SearchResult, me: string[], detail: Detail = 
   };
 }
 
-export function slimCommit(detail: CommitDetail, me: string[]) {
+/** show_commit에 붙이는 커밋 맥락 — 프롬프트·검증·버린 편집·트레일러 (capture.ts). 커밋당 5줄 안쪽 */
+const CONTEXT_PROMPTS = 3;
+const CONTEXT_PROMPT_CHARS = 200;
+
+export function slimCommit(detail: CommitDetail, me: string[], context?: CommitContextView | null) {
   const files = detail.files.slice(0, FILES_PER_COMMIT).map((file) =>
     file.binary ? `${file.path} (binary)` : file.insertions === null ? file.path : `${file.path} +${file.insertions} -${file.deletions}`,
   );
   if (detail.files.length > FILES_PER_COMMIT) files.push(`… ${detail.files.length - FILES_PER_COMMIT}개 더`);
   const shownLines = detail.patch ? detail.patch.split("\n").length : 0;
+  const why = context
+    ? {
+        ...(context.prompts.length > 0 ? { prompts: context.prompts.slice(0, CONTEXT_PROMPTS).map((text) => snippet(text, CONTEXT_PROMPT_CHARS)) } : {}),
+        ...(context.verify.length > 0 ? { verified: context.verify.slice(-3) } : {}),
+        ...(context.dropped.length > 0 ? { dropped: context.dropped } : {}),
+        ...(context.trailers.length > 0 ? { trailers: Object.fromEntries(context.trailers.map((trailer) => [trailer.key, trailer.value])) } : {}),
+      }
+    : undefined;
   return {
     repo: detail.repo,
     sha: detail.sha.slice(0, SHA),
@@ -121,6 +137,7 @@ export function slimCommit(detail: CommitDetail, me: string[]) {
     by: who(detail.author, me),
     subject: detail.subject,
     body: detail.body || undefined,
+    ...(why && Object.keys(why).length > 0 ? { why } : {}),
     files,
     diff: detail.patch ?? undefined,
     ...(detail.patchTruncated

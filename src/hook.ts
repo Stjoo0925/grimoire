@@ -79,7 +79,7 @@ async function main(): Promise<void> {
     return;
   }
   try {
-    const output = handleHook({ db, env, me }, input);
+    const output = await handleHook({ db, env, me }, input);
     if (output?.json) process.stdout.write(JSON.stringify(output.json) + "\n");
     else if (output?.stdout) process.stdout.write(output.stdout + "\n");
   } catch (error) {

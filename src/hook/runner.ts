@@ -13,11 +13,23 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import {
+  bindToCommit,
+  commitSucceeded,
+  isGitCommit,
+  isVerifyCommand,
+  lineHashes,
+  pruneEvents,
+  recordEvent,
+  recordPrompt,
+  verifyOutcome,
+} from "../core/capture";
 import { isIndexable } from "../core/code";
 import { grimoireHome, type Env } from "../core/config";
 import { fileContext, formatFileContext, TEST_PATH, HOOK_BUDGET } from "../core/context";
 import type { DB } from "../core/db";
-import { relativeToRepo, repoOfPath, type RepoRow } from "../core/indexer";
+import { addedLines, headSha } from "../core/git";
+import { indexCommitSha, relativeToRepo, repoOfPath, type RepoRow } from "../core/indexer";
 
 /** 훅이 돌려주는 것 — Claude Code 규약(JSON은 hookSpecificOutput, 일부 이벤트는 plain stdout) */
 export interface HookOutput {
@@ -126,16 +138,93 @@ export interface HookContext {
 }
 
 /**
- * 훅 입력 하나를 처리한다. 돌려줄 것이 없으면 null. 던지지 않는다 — 실패는 호출부가 로그로 남기고 exit 0.
+ * 훅 입력 하나를 처리한다. 돌려줄 것이 없으면 null. 던질 수 있다 — 호출부(hook.ts)가 로그로 남기고 exit 0.
  */
-export function handleHook(context: HookContext, input: HookInput): HookOutput | null {
+export async function handleHook(context: HookContext, input: HookInput): Promise<HookOutput | null> {
   if (context.env.GRIMOIRE_HOOKS === "0") return null;
   switch (input.hook_event_name) {
     case "PreToolUse":
       return preToolUse(context, input);
+    case "UserPromptSubmit":
+      return userPromptSubmit(context, input);
+    case "PostToolUse":
+      return postToolUse(context, input);
+    case "SessionStart":
+      return sessionStart(context, input);
     default:
       return null;
   }
+}
+
+/** 캡처가 켜져 있나 — 기본 켜짐(훅을 설치한 것이 opt-in), GRIMOIRE_CAPTURE=0이면 끔. 서브에이전트의 말은 사용자의 말이 아니다 */
+function captureOn(context: HookContext, input: HookInput): boolean {
+  return context.env.GRIMOIRE_CAPTURE !== "0" && !input.agent_id;
+}
+
+function sessionRepo(context: HookContext, input: HookInput): RepoRow | undefined {
+  return input.cwd ? repoOfPath(context.db, input.cwd) : undefined;
+}
+
+function userPromptSubmit(context: HookContext, input: HookInput): HookOutput | null {
+  if (!captureOn(context, input) || typeof input.prompt !== "string" || !input.session_id) return null;
+  recordPrompt(context.db, input.session_id, sessionRepo(context, input)?.id ?? null, input.prompt);
+  return null;
+}
+
+async function postToolUse(context: HookContext, input: HookInput): Promise<HookOutput | null> {
+  if (!captureOn(context, input) || !input.session_id) return null;
+  const repo = sessionRepo(context, input);
+  if (!repo) return null;
+  if (EDIT_TOOLS.has(input.tool_name ?? "")) {
+    const file = editedPath(input);
+    if (!file) return null;
+    const relative = relativeToRepo(repo.path, file);
+    const added = newText(input.tool_input ?? {});
+    recordEvent(context.db, { sessionId: input.session_id, repoId: repo.id, kind: "edit", text: relative, path: relative, lineHashes: lineHashes(added) });
+    return null;
+  }
+  if (input.tool_name !== "Bash") return null;
+  const command = typeof input.tool_input?.command === "string" ? input.tool_input.command : "";
+  if (!command) return null;
+  if (isVerifyCommand(command)) {
+    const outcome = verifyOutcome(input.tool_response);
+    const text = `${command.trim().slice(0, 200)} → ${outcome.ok ? "pass" : "fail"}${outcome.tail ? ` :: ${outcome.tail}` : ""}`;
+    recordEvent(context.db, { sessionId: input.session_id, repoId: repo.id, kind: "verify", text });
+    if (!outcome.ok) {
+      const state = loadSession(context.env, input.session_id);
+      if (!state.struggled) {
+        state.struggled = true;
+        saveSession(context.env, input.session_id, state);
+      }
+    }
+  }
+  if (isGitCommit(command) && commitSucceeded(input.tool_response)) {
+    const sha = await headSha(repo.path);
+    if (!sha) return null;
+    // 커밋을 바로 색인해 두면(다음 동기화를 기다리지 않고) 묶을 수 있고 검색에도 바로 걸린다
+    const files = (await indexCommitSha(context.db, repo, sha)) ?? [];
+    const addedHashes = new Set(lineHashes((await addedLines(repo.path, sha)).join("\n")));
+    bindToCommit(context.db, { sessionId: input.session_id, repoId: repo.id, sha, files, addedHashes });
+  }
+  return null;
+}
+
+/** 편집 도구가 새로 넣는 텍스트 (Edit의 new_string, Write의 content, MultiEdit의 edits[].new_string) */
+function newText(toolInput: Record<string, unknown>): string {
+  if (typeof toolInput.new_string === "string") return toolInput.new_string;
+  if (typeof toolInput.content === "string") return toolInput.content;
+  if (Array.isArray(toolInput.edits)) {
+    return toolInput.edits.map((edit) => (edit && typeof edit === "object" && typeof (edit as { new_string?: unknown }).new_string === "string" ? (edit as { new_string: string }).new_string : "")).join("\n");
+  }
+  if (typeof toolInput.new_source === "string") return toolInput.new_source;
+  return "";
+}
+
+function sessionStart(context: HookContext, input: HookInput): HookOutput | null {
+  pruneSessions(context.env);
+  pruneEvents(context.db);
+  if (input.source === "resume") return null;
+  return null;
 }
 
 function preToolUse(context: HookContext, input: HookInput): HookOutput | null {

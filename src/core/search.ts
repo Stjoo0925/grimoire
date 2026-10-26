@@ -6,6 +6,7 @@
  */
 import path from "node:path";
 
+import { whyLine } from "./capture";
 import { isIndexable, splitIdentifier } from "./code";
 import type { DB } from "./db";
 import { commitWebUrl } from "./git";
@@ -209,6 +210,8 @@ export interface SearchHit {
   also?: string[];
   /** kind='commit'일 때: diff에서 바뀐 선언 — 파일별 이름 (diffs.ts가 뒤에서 채운다, 아직이면 빈 배열) */
   touched?: { file: string; names: string[] }[];
+  /** kind='commit'일 때: 커밋에 묶인 의도 한 줄 (세션 프롬프트·Why 트레일러, capture.ts) */
+  why?: string;
 }
 
 export interface SearchResult {
@@ -490,6 +493,7 @@ function toHit(
     terms,
   ).slice(0, FILES_PER_HIT);
 
+  const why = doc.repo_id === null ? undefined : whyLine(db, doc.repo_id, doc.ref);
   return {
     ...base,
     author: commit ? `${commit.author_name} <${commit.author_email}>` : null,
@@ -500,6 +504,7 @@ function toHit(
     url: commitWebUrl(doc.remote, doc.ref),
     body: commit?.body ?? "",
     touched: touchedSymbols(commit?.symbols ?? null, terms),
+    ...(why ? { why } : {}),
   };
 }
 

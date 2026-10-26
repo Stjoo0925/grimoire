@@ -137,6 +137,7 @@ export function repoOverview(db: DB, repo: RepoRow, me: string[]): RepoOverview 
 
 export interface CommitDetail {
   repo: string;
+  repoId: number;
   sha: string;
   url: string | null;
   author: string;
@@ -227,6 +228,7 @@ export async function commitDetail(
     if (selectedFiles.length === 0) {
       return {
         repo: row.repo,
+        repoId: row.repo_id,
         sha: row.sha,
         url: commitWebUrl(row.remote_url, row.sha),
         author: `${row.author_name} <${row.author_email}>`,
@@ -258,6 +260,7 @@ export async function commitDetail(
 
   return {
     repo: row.repo,
+    repoId: row.repo_id,
     sha: row.sha,
     url: commitWebUrl(row.remote_url, row.sha),
     author: `${row.author_name} <${row.author_email}>`,

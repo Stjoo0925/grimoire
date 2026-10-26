@@ -23,13 +23,14 @@ function preToolUse(repoPath: string, file: string, session = "s1"): HookInput {
 }
 
 test("PreToolUse: 등록 레포의 소스 파일에만, 세션당 한 번만, 줄 것이 없으면 아무것도", async () => {
+  const hook = (ctx: Parameters<typeof handleHook>[0], input: HookInput) => handleHook(ctx, input);
   const db = memoryDb();
   const repo = await addRepo(db, coupledRepo());
   await syncRepo(db, repo);
   const env = { GRIMOIRE_HOME: tempDir("grimoire-hook-home-") };
   const context = { db, env, me: ["me@example.com"] };
 
-  const first = handleHook(context, preToolUse(repo.path, "src/a.ts"));
+  const first = await hook(context, preToolUse(repo.path, "src/a.ts"));
   assert.ok(first?.json, "첫 편집에 맥락이 없습니다");
   const text = first!.json!.hookSpecificOutput.additionalContext;
   assert.equal(first!.json!.hookSpecificOutput.hookEventName, "PreToolUse");
@@ -40,8 +41,8 @@ test("PreToolUse: 등록 레포의 소스 파일에만, 세션당 한 번만, �
   assert.ok(text.length <= 400, `${text.length}자`);
 
   // 같은 세션·같은 파일 → 없음. 다른 세션 → 다시 (이번엔 안내 문장 없이)
-  assert.equal(handleHook(context, preToolUse(repo.path, "src/a.ts")), null);
-  const other = handleHook(context, preToolUse(repo.path, "src/a.ts", "s2"));
+  assert.equal(await hook(context, preToolUse(repo.path, "src/a.ts")), null);
+  const other = await hook(context, preToolUse(repo.path, "src/a.ts", "s2"));
   assert.ok(other?.json);
   // 세션 파일에 기록됐다
   const state = loadSession(env, "s1");
@@ -49,13 +50,13 @@ test("PreToolUse: 등록 레포의 소스 파일에만, 세션당 한 번만, �
   assert.equal(state.noted, true);
 
   // 테스트 파일·레포 밖·줄 것 없는 파일(c.ts는 첫 커밋에만)·편집이 아닌 도구 → 없음
-  assert.equal(handleHook(context, preToolUse(repo.path, "src/a.test.ts")), null);
-  assert.equal(handleHook(context, preToolUse(tempDir(), "src/a.ts")), null);
-  assert.equal(handleHook(context, preToolUse(repo.path, "src/c.ts")), null);
-  assert.equal(handleHook(context, { ...preToolUse(repo.path, "src/b.ts"), tool_name: "Read" }), null);
+  assert.equal(await hook(context, preToolUse(repo.path, "src/a.test.ts")), null);
+  assert.equal(await hook(context, preToolUse(tempDir(), "src/a.ts")), null);
+  assert.equal(await hook(context, preToolUse(repo.path, "src/c.ts")), null);
+  assert.equal(await hook(context, { ...preToolUse(repo.path, "src/b.ts"), tool_name: "Read" }), null);
   // 깨진 입력·끈 상태
-  assert.equal(handleHook(context, {}), null);
-  assert.equal(handleHook({ ...context, env: { ...env, GRIMOIRE_HOOKS: "0" } }, preToolUse(repo.path, "src/b.ts", "s3")), null);
+  assert.equal(await hook(context, {}), null);
+  assert.equal(await hook({ ...context, env: { ...env, GRIMOIRE_HOOKS: "0" } }, preToolUse(repo.path, "src/b.ts", "s3")), null);
 
   // 오래된 세션 파일 정리
   const old = path.join(sessionsDir(env), "old.json");

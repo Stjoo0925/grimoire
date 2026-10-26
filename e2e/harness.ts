@@ -432,6 +432,35 @@ async function runScenario(spec: ServerSpec): Promise<StepResult[]> {
     return `${text.length}자 · ${second.ms}ms (목표 150ms)`;
   });
 
+  await step("훅(캡처): 프롬프트·검증·편집을 모았다가 git commit에 묶고, 그 말로 검색된다", async () => {
+    const hook = path.join(path.dirname(spec.args[0]), "hook.js");
+    const env = { ...process.env, GRIMOIRE_HOME: sandbox.data, GRIMOIRE_ME: ME, GRIMOIRE_UPDATE_CHECK: "0" };
+    const send = (input: unknown) => {
+      const result = spawnSync(spec.command, [hook], { input: JSON.stringify(input), env, encoding: "utf8", timeout: 10_000 });
+      expect(result.status === 0, `exit ${result.status}: ${result.stderr}`);
+      return result.stdout.trim();
+    };
+    const base = { session_id: "e2e-cap", cwd: fixture.api };
+    send({ ...base, hook_event_name: "UserPromptSubmit", prompt: "웹훅 서명 검증이 타임스탬프를 안 봐서 재전송 공격이 되니 5분 창을 두자 token=abc12345" });
+    send({ ...base, hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: path.join(fixture.api, "src/pay/webhook.ts"), old_string: "x", new_string: "export const window = 300;" } });
+    send({ ...base, hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: "npm test" }, tool_response: { stdout: "ok\n", stderr: "" } });
+    addCommit(fixture.api, {
+      message: "fix(pay): 웹훅 재전송 공격 방지 — 5분 창",
+      files: { "src/pay/webhook.ts": "export const verify = true;\nexport const window = 300;\n" },
+      email: ME,
+      date: "2024-09-01T10:00:00+09:00",
+    });
+    send({ ...base, hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: 'git commit -am "fix(pay): 웹훅 재전송 공격 방지"' }, tool_response: { stdout: "[main 1234567] fix(pay)", stderr: "" } });
+    // 훅이 커밋을 바로 색인해 묶었으므로 MCP 세션은 동기화 없이도 찾는다 (제목에 없는 말 "타임스탬프"로)
+    const found = await call(live(), "search_memory", { query: "타임스탬프 재전송" });
+    const top = found.json?.hits?.[0];
+    expect(top?.title === "fix(pay): 웹훅 재전송 공격 방지 — 5분 창", `1위: ${JSON.stringify(top)}`);
+    expect(typeof top.why === "string" && top.why.includes("5분 창") && top.why.includes("[redacted]"), `why: ${top?.why}`);
+    const shown = await call(live(), "show_commit", { sha: top.sha });
+    expect(shown.json?.why?.verified?.[0] === "npm test → pass", `verified: ${JSON.stringify(shown.json?.why)}`);
+    return `why="${top.why}"`;
+  });
+
   await step("stdout 오염 없음 (로그는 stderr로만)", async () => {
     // stdout에 로그가 섞이면 위 단계들의 JSON-RPC가 이미 깨졌을 것이다. 여기서는 stderr 로그가 실제로 나왔는지만 본다.
     expect(live().stderr().includes("[grimoire] MCP 서버 시작"), "서버 시작 로그가 stderr에 없습니다");

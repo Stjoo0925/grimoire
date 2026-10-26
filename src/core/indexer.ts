@@ -9,6 +9,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { refreshWhy, storeTrailers } from "./capture";
 import { extractSymbols, headerComment, listHeadFiles, readBlobs, splitIdentifier } from "./code";
 import { addCochange, cochangeInput, extractImports, needsCochangeBackfill, rebuildCochange } from "./context";
 import { deleteDoc, upsertDoc, pruneOrphanFts, type DB } from "./db";
@@ -27,6 +28,7 @@ import {
 import { isMeaningfulSubject } from "./meaningful";
 import { canonicalTech, techCategory } from "./tech/canonical";
 import { parseManifest } from "./tech/manifests";
+import { agentSignal } from "./trailers";
 
 /** 한 번에 git에서 읽어 올 커밋 수 */
 const READ_BATCH = 500;
@@ -199,6 +201,7 @@ async function syncRepoNow(db: DB, repo: RepoRow): Promise<SyncResult> {
       if (insertCommit(db, repo, commit) && !backfill) addCochange(db, repo.id, cochangeInput(commit, isMeaningfulSubject(commit.subject)));
     }
     if (backfill) rebuildCochange(db, repo.id);
+    backfillTrailers(db, repo);
 
     if (tech) {
       db.prepare("DELETE FROM repo_tech WHERE repo_id = ?").run(repo.id);
@@ -329,6 +332,42 @@ function applyCode(db: DB, repo: RepoRow, code: CodeChanges): void {
   }
 }
 
+/**
+ * 옛 DB(마이그레이션 직후)의 커밋 본문에서 트레일러를 한 번 읽어 둔다 — 훅 없이도 "왜"가 생기는 재료 (capture.ts).
+ * 레포당 한 번(repos.trailers_done). 새 커밋은 insertCommit이 그때그때 읽는다.
+ */
+function backfillTrailers(db: DB, repo: RepoRow): void {
+  const done = (db.prepare("SELECT trailers_done FROM repos WHERE id = ?").get(repo.id) as { trailers_done: number } | undefined)?.trailers_done;
+  if (done) return;
+  const rows = db.prepare("SELECT sha, body FROM commits WHERE repo_id = ? AND body LIKE '%:%'").all(repo.id) as { sha: string; body: string }[];
+  const mark = db.prepare("UPDATE commits SET agent_signal = ? WHERE repo_id = ? AND sha = ?");
+  for (const row of rows) {
+    const trailers = storeTrailers(db, repo.id, row.sha, row.body);
+    if (trailers.length === 0) continue;
+    const signal = agentSignal(trailers);
+    if (signal) mark.run(signal, repo.id, row.sha);
+    refreshWhy(db, repo.id, row.sha);
+  }
+  db.prepare("UPDATE repos SET trailers_done = 1 WHERE id = ?").run(repo.id);
+}
+
+/**
+ * sha 하나를 git에서 읽어 넣는다 — 훅이 `git commit`을 감지했을 때, 다음 동기화를 기다리지 않고 바로 묶을 수 있게.
+ * 이미 있으면 그대로. 돌려주는 값은 커밋의 변경 파일 경로.
+ */
+export async function indexCommitSha(db: DB, repo: RepoRow, sha: string): Promise<string[] | null> {
+  const known = db.prepare("SELECT 1 FROM commits WHERE repo_id = ? AND sha = ?").get(repo.id, sha);
+  if (known) {
+    return (db.prepare("SELECT path FROM commit_files WHERE repo_id = ? AND sha = ?").all(repo.id, sha) as { path: string }[]).map((row) => row.path);
+  }
+  const [commit] = await readCommits(repo.path, [sha]);
+  if (!commit) return null;
+  db.transaction(() => {
+    if (insertCommit(db, repo, commit)) addCochange(db, repo.id, cochangeInput(commit, isMeaningfulSubject(commit.subject)));
+  })();
+  return commit.files.map((file) => file.path);
+}
+
 /** 커밋을 넣는다. 이미 있던 커밋이면 false (공변경을 두 번 세지 않게). */
 function insertCommit(db: DB, repo: RepoRow, commit: GitCommit): boolean {
   const insertions = commit.files.reduce((sum, file) => sum + (file.insertions ?? 0), 0);
@@ -372,6 +411,13 @@ function insertCommit(db: DB, repo: RepoRow, commit: GitCommit): boolean {
       .map((file) => file.path)
       .join(" "),
   });
+  // 트레일러(Lore·QAC·플랫폼 꼬리표) → 커밋에 묶인 "왜"와 에이전트 커밋 판정 (capture.ts)
+  const trailers = storeTrailers(db, repo.id, commit.sha, commit.body);
+  if (trailers.length > 0) {
+    const signal = agentSignal(trailers);
+    if (signal) db.prepare("UPDATE commits SET agent_signal = ? WHERE repo_id = ? AND sha = ?").run(signal, repo.id, commit.sha);
+    refreshWhy(db, repo.id, commit.sha);
+  }
   return true;
 }
 

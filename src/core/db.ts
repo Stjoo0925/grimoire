@@ -274,6 +274,7 @@ const MIGRATIONS: string[] = [
   );
 
   ALTER TABLE commits ADD COLUMN agent_signal TEXT;
+  ALTER TABLE repos ADD COLUMN trailers_done INTEGER NOT NULL DEFAULT 0;
   `,
 ];
 

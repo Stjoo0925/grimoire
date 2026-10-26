@@ -15,6 +15,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { commitContextOf } from "../core/capture";
 import { isIndexable } from "../core/code";
 import { fileContext } from "../core/context";
 import type { DB } from "../core/db";
@@ -252,16 +253,17 @@ export async function callTool(context: ToolContext, name: string, args: Args = 
           ? [args.paths]
           : [];
       const repoId = repoFilter(args.repo)?.id;
+      const contextOf = (detail: { repoId: number; sha: string }) => commitContextOf(db, detail.repoId, detail.sha);
       if (shas.length === 0) {
         const detail = await commitDetail(db, sha!, { repoId, maxDiffLines: num(args.max_diff_lines), paths });
         if ("error" in detail) throw new ToolError([detail.error, ...(detail.candidates ?? [])].join("\n"));
-        return slimCommit(detail, me);
+        return slimCommit(detail, me, contextOf(detail));
       }
       // 여러 커밋 한 번에 — 검색 결과 상위 몇 개를 왕복 없이 비교할 때. 응답이 커지지 않게 커밋당 diff를 줄인다
       const commits = await Promise.all(
         shas.map(async (item) => {
           const detail = await commitDetail(db, item, { repoId, maxDiffLines: num(args.max_diff_lines) ?? MULTI_DIFF_LINES, paths });
-          return "error" in detail ? { sha: item, error: [detail.error, ...(detail.candidates ?? [])].join("\n") } : slimCommit(detail, me);
+          return "error" in detail ? { sha: item, error: [detail.error, ...(detail.candidates ?? [])].join("\n") } : slimCommit(detail, me, contextOf(detail));
         }),
       );
       return { commits };

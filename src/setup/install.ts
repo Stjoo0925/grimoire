@@ -47,7 +47,7 @@ export function serverSpec(cliPath: string, env: Env = process.env, nodePath = p
 /** 클라이언트별 JSON 설정 파일 경로. claude-code는 프로젝트 범위(.mcp.json)일 때만 파일을 쓴다. */
 export function configPath(
   client: ClientName,
-  options: { project?: string; platform?: NodeJS.Platform; home?: string; appData?: string } = {},
+  options: { project?: string; platform?: NodeJS.Platform; home?: string; appData?: string; localAppData?: string } = {},
 ): string | null {
   const platform = options.platform ?? process.platform;
   const home = options.home ?? os.homedir();
@@ -55,7 +55,10 @@ export function configPath(
     case "claude-desktop":
       if (platform === "darwin") return path.join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json");
       if (platform === "win32") {
-        // home을 따로 넘겼으면(테스트 등) 실제 %APPDATA%를 보지 않고 그 home 아래에서 찾는다.
+        // home을 따로 넘겼으면(테스트 등) 실제 %APPDATA%·%LOCALAPPDATA%를 보지 않고 그 home 아래에서 찾는다.
+        const localAppData = options.localAppData ?? (options.home === undefined ? process.env.LOCALAPPDATA : undefined);
+        const current = claudeDataConfig(localAppData ?? path.join(home, "AppData", "Local"));
+        if (current) return current;
         const appData = options.appData ?? (options.home === undefined ? process.env.APPDATA : undefined);
         return path.join(appData ?? path.join(home, "AppData", "Roaming"), "Claude", "claude_desktop_config.json");
       }
@@ -65,6 +68,30 @@ export function configPath(
     case "claude-code":
       return options.project ? path.join(options.project, ".mcp.json") : null;
   }
+}
+
+/**
+ * 요즘 Windows 앱은 설정을 `%LOCALAPPDATA%\Claude-Data\claude_<패키지 id>\`에 둔다 (스토어·설치판 모두).
+ * 이 폴더가 있으면 앱은 %APPDATA%\Claude를 읽지 않는다. 여럿이면 설정 파일이 있는 쪽, 그중 최근에 바뀐 쪽.
+ */
+function claudeDataConfig(localAppData: string): string | null {
+  const root = path.join(localAppData, "Claude-Data");
+  let names: string[];
+  try {
+    names = fs
+      .readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && entry.name.toLowerCase().startsWith("claude_"))
+      .map((entry) => entry.name);
+  } catch {
+    return null;
+  }
+  const candidates = names.map((name) => {
+    const file = path.join(root, name, "claude_desktop_config.json");
+    const stat = fs.statSync(file, { throwIfNoEntry: false });
+    return { file, mtime: stat?.mtimeMs ?? -1 };
+  });
+  candidates.sort((a, b) => b.mtime - a.mtime);
+  return candidates[0]?.file ?? null;
 }
 
 /** 기존 설정 JSON에 grimoire 항목만 넣는다. 다른 키·다른 서버는 건드리지 않는다. */

@@ -59,6 +59,38 @@ test("configPath: 플랫폼별 위치", () => {
   assert.equal(configPath("claude-code", { home: "/h", project: "/p" }), path.join("/p", ".mcp.json"));
 });
 
+test("configPath(win32): Claude-Data\\claude_* 폴더가 있으면 그쪽, 여럿이면 설정이 있고 최근인 쪽", () => {
+  const home = tempDir();
+  const local = path.join(home, "AppData", "Local", "Claude-Data");
+  const legacy = path.join(home, "AppData", "Roaming", "Claude", "claude_desktop_config.json");
+  assert.equal(configPath("claude-desktop", { platform: "win32", home }), legacy);
+
+  // 설정 파일이 아직 없어도 폴더만 있으면 그 안에 만든다 — 앱은 이 폴더가 있으면 %APPDATA%를 읽지 않는다
+  fs.mkdirSync(path.join(local, "claude_old"), { recursive: true });
+  fs.mkdirSync(path.join(local, "README.txt.d"), { recursive: true }); // claude_로 시작하지 않는 건 무시
+  assert.equal(configPath("claude-desktop", { platform: "win32", home }), path.join(local, "claude_old", "claude_desktop_config.json"));
+
+  fs.mkdirSync(path.join(local, "claude_new"));
+  const newer = path.join(local, "claude_new", "claude_desktop_config.json");
+  fs.writeFileSync(newer, JSON.stringify({ preferences: { x: 1 } }));
+  assert.equal(configPath("claude-desktop", { platform: "win32", home }), newer);
+  assert.equal(configPath("claude-desktop", { platform: "win32", home, localAppData: path.join(home, "nope") }), legacy);
+});
+
+test("install claude-desktop: Claude-Data 설정의 다른 키(preferences 등)를 보존한다", async () => {
+  if (process.platform !== "win32") return; // configPath가 플랫폼을 따로 받지 않는 경로
+  const home = tempDir();
+  const file = path.join(home, "AppData", "Local", "Claude-Data", "claude_pkg", "claude_desktop_config.json");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ coworkUserFilesPath: "C:\\x", preferences: { theme: "dark" } }));
+  const result = await install("claude-desktop", { cliPath: fakeCli(), env: {}, home });
+  assert.equal(result.file, file);
+  const written = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.deepEqual(Object.keys(written).sort(), ["coworkUserFilesPath", "mcpServers", "preferences"]);
+  assert.deepEqual(written.preferences, { theme: "dark" });
+  assert.equal(written.mcpServers.grimoire.command, process.execPath);
+});
+
 test("mergeServer: 다른 서버와 다른 키는 그대로 둔다", () => {
   const merged = mergeServer(
     { theme: "dark", mcpServers: { other: { command: "x" }, grimoire: { command: "old" } } },

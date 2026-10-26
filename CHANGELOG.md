@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.0](https://github.com/Stjoo0925/grimoire/compare/v0.5.0...v0.6.0) (2026-10-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* 내장 node:sqlite와 MCP SDK v2로 의존성을 3개로 줄인다 ([#12](https://github.com/Stjoo0925/grimoire/issues/12))
+
+### 기능
+
+* 내장 node:sqlite와 MCP SDK v2로 의존성을 3개로 줄인다 ([#12](https://github.com/Stjoo0925/grimoire/issues/12)) ([c521339](https://github.com/Stjoo0925/grimoire/commit/c5213392d0d99a058ec486d6cc6d19ebd286985a))
+
 ## [0.5.0](https://github.com/Stjoo0925/grimoire/compare/v0.4.0...v0.5.0) (2026-10-25)
 
 

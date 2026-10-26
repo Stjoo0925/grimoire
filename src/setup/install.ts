@@ -3,7 +3,7 @@
  *
  * 명령은 **지금 이 CLI를 돌리는 node의 절대경로**(`process.execPath`)로 적는다.
  *  - GUI 앱(Claude Desktop·Cursor)은 셸 PATH를 물려받지 않아 `node`만 적으면 못 찾는다.
- *  - better-sqlite3는 네이티브 모듈이라 빌드한 node와 같은 node로 돌려야 한다.
+ *  - SQLite는 node 내장(node:sqlite)이라, 등록한 node가 지원 버전 이상이기만 하면 된다.
  * 기존 설정 파일은 다른 서버 항목을 그대로 두고 grimoire 항목만 넣거나 바꾼다.
  * 덮어쓰기 전에 `.bak`을 남기고, 임시 파일 + rename으로 쓴다.
  */
@@ -51,7 +51,9 @@ export function configPath(
     case "claude-desktop":
       if (platform === "darwin") return path.join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json");
       if (platform === "win32") {
-        return path.join(options.appData ?? process.env.APPDATA ?? path.join(home, "AppData", "Roaming"), "Claude", "claude_desktop_config.json");
+        // home을 따로 넘겼으면(테스트 등) 실제 %APPDATA%를 보지 않고 그 home 아래에서 찾는다.
+        const appData = options.appData ?? (options.home === undefined ? process.env.APPDATA : undefined);
+        return path.join(appData ?? path.join(home, "AppData", "Roaming"), "Claude", "claude_desktop_config.json");
       }
       return path.join(home, ".config", "Claude", "claude_desktop_config.json");
     case "cursor":

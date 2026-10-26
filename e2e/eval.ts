@@ -280,7 +280,7 @@ async function main(): Promise<number> {
   if (core.diffs && !values["no-code"]) for (const repo of repos) await core.diffs.indexCommitCode(db, repo);
   const codeMs = Date.now() - codeStart;
   const files = (db.prepare("SELECT COUNT(*) AS n FROM code_files").get() as { n: number }).n;
-  const dbBytes = (db.pragma("page_count", { simple: true }) as number) * (db.pragma("page_size", { simple: true }) as number);
+  const dbBytes = (db.pragma("page_count") as number) * (db.pragma("page_size") as number);
 
   const rows = await runQuestions(core, db, questions, values.detail ?? "");
   const types = [...new Set(rows.map((row) => row.type))];

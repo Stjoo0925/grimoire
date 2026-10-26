@@ -1,6 +1,6 @@
 {
   "name": "@stjoo0925/grimoire",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "로컬 git 이력을 인덱싱해 AI 코딩 도구가 MCP로 내 과거 작업을 근거와 함께 찾게 해 주는 개발 메모리",
   "keywords": [
     "mcp",
@@ -27,7 +27,7 @@
     "dist"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22.13"
   },
   "publishConfig": {
     "access": "public"
@@ -45,12 +45,11 @@
     "prepack": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && npm run build && npm test"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "better-sqlite3": "^12.4.1"
+    "@modelcontextprotocol/server": "^2.4.0"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
-    "@types/node": "^20",
+    "@modelcontextprotocol/client": "^2.4.0",
+    "@types/node": "^22",
     "typescript": "^5"
   }
 }

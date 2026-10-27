@@ -66,10 +66,18 @@ export const KNOWN_KEYS = new Set([
   "reviewed-by",
 ]);
 
+/**
+ * 공동 작성자가 코딩 에이전트인가 — 표준이 없어 도구마다 다르다: 이름(Claude·Codex·Copilot·Cursor·Aider·Gemini·Devin 등)이나
+ * 에이전트 업체·도구의 noreply 주소(`noreply@anthropic.com`·`…@openai.com`·`…@cursor.com`·`noreply@aider.chat` 등).
+ * 사람 이름에 흔한 낱말은 넣지 않는다. dependabot·renovate 같은 일반 자동화 봇은 AI 에이전트가 아니다(`[bot]` 전체를 잡지 않는다).
+ */
+const AGENT_CO_AUTHOR =
+  /\b(claude|codex|chatgpt|copilot|cursor ?agent|cursoragent|aider|gemini|devin|jules|windsurf|cline|roo ?code|kiro|amp ?code|opencode|qwen ?code)\b|@(anthropic\.com|openai\.com|cursor\.com|aider\.chat|devin\.ai|cognition\.ai)\b/i;
+
 /** 에이전트가 만든 커밋인가 — 어떤 신호였는지 돌려준다 (없으면 null = 사람) */
 export function agentSignal(trailers: Trailer[]): string | null {
   for (const trailer of trailers) {
-    if (trailer.key === "co-authored-by" && /\bclaude\b/i.test(trailer.value)) return "co-authored-by";
+    if (trailer.key === "co-authored-by" && AGENT_CO_AUTHOR.test(trailer.value)) return "co-authored-by";
     if (trailer.key === "claude-session") return "claude-session";
     if (trailer.key === "agent-logs-url") return "agent-logs-url";
     if (trailer.key === "agent" && trailer.value) return "agent";

@@ -237,6 +237,13 @@ const SYSTEM_BLOCK_TAGS = [
   "local-command-caveat",
   "local-command-stdout",
   "local-command-stderr",
+  // `!` 셸 실행, `#` 메모리 입력, IDE 연동이 붙이는 열린 파일·선택 영역 — 사용자의 말이 아니라 맥락이다
+  "bash-input",
+  "bash-stdout",
+  "bash-stderr",
+  "user-memory-input",
+  "ide_opened_file",
+  "ide_selection",
 ];
 const SYSTEM_BLOCK_OPEN = new RegExp(`<(${SYSTEM_BLOCK_TAGS.join("|")})\\b[^>]*>`, "g");
 
@@ -324,6 +331,21 @@ export function cleanStoredPrompts(db: DB): number {
     touched.set(`${row.repo_id}\0${row.sha}`, { repoId: row.repo_id, sha: row.sha });
   }
   for (const { repoId, sha } of touched.values()) refreshWhy(db, repoId, sha);
+
+  // 노트 — 에이전트가 맥락을 붙여 넣어 섞인 자동 블록을 뗀다. 블록뿐인 노트는 지우지 않고 둔다(사용자가 남긴 기록이다)
+  const notes = db.prepare("SELECT id, text, tags FROM notes").all() as { id: number; text: string; tags: string }[];
+  const noteDoc = db.prepare("SELECT d.id, f.paths, f.code FROM docs d JOIN docs_fts f ON f.rowid = d.id WHERE d.kind = 'note' AND d.ref = ?");
+  for (const note of notes) {
+    const clean = stripSystemBlocks(note.text);
+    if (!clean || clean === note.text) continue;
+    db.prepare("UPDATE notes SET text = ? WHERE id = ?").run(clean, note.id);
+    changed++;
+    const doc = noteDoc.get(String(note.id)) as { id: number; paths: string; code: string | null } | undefined;
+    if (!doc) continue;
+    const { title, body } = noteDocFields(clean, note.tags);
+    db.prepare("DELETE FROM docs_fts WHERE rowid = ?").run(doc.id);
+    db.prepare("INSERT INTO docs_fts (rowid, title, body, paths, code) VALUES (?, ?, ?, ?, ?)").run(doc.id, title, body, doc.paths, doc.code ?? "");
+  }
   return changed;
 }
 

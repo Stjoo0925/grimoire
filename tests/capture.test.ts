@@ -39,6 +39,14 @@ test("parseTrailers: 마지막 문단의 Key: value만, 대소문자 무시, 반
   assert.equal(agentSignal(qac), "agent");
   assert.deepEqual(whyLines(qac), ["what: add POST /auth/refresh", "why: sessions expired silently"]);
   assert.equal(agentSignal(parseTrailers("Signed-off-by: Someone <a@b.c>")), null);
+  // Claude 말고 다른 코딩 에이전트의 공동 작성자도 에이전트 커밋이다 — 이름이나 업체·도구의 noreply 주소로
+  for (const coAuthor of ["Codex <noreply@openai.com>", "Cursor Agent <cursoragent@cursor.com>", "copilot-swe-agent[bot] <198982749+Copilot@users.noreply.github.com>", "aider (gpt-4o) <noreply@aider.chat>", "Gemini CLI <gemini@example.com>", "Devin AI <158243242+devin-ai-integration[bot]@users.noreply.github.com>", "Claude Opus 5.5 <noreply@anthropic.com>"]) {
+    assert.equal(agentSignal(parseTrailers(`Co-authored-by: ${coAuthor}`)), "co-authored-by", coAuthor);
+  }
+  // 사람·일반 자동화 봇은 아니다
+  for (const coAuthor of ["Kim Minsu <minsu@example.com>", "dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>", "renovate[bot] <29139614+renovate[bot]@users.noreply.github.com>"]) {
+    assert.equal(agentSignal(parseTrailers(`Co-authored-by: ${coAuthor}`)), null, coAuthor);
+  }
 });
 
 test("redact: private 블록·붙여 넣기·토큰·password= 값을 지운다", () => {
@@ -591,4 +599,17 @@ test("cleanStoredPrompts(마이그레이션 9): 저장된 자동 블록 프롬�
   assert.equal((db.prepare("SELECT COUNT(*) AS n FROM session_events WHERE kind = 'prompt'").get() as { n: number }).n, 0);
   assert.equal(search(db, "task-notification").hits.length, 0, "검색 문서에서도 사라져야 합니다");
   assert.equal(cleanStoredPrompts(db), 0, "두 번째는 바꿀 것이 없다");
+});
+
+test("promptText·addNote: Claude Code의 다른 자동 블록(셸 실행·메모리 입력·IDE 맥락)도 거르고, 노트에 붙은 블록도 뗀다", async () => {
+  const { promptText } = await import("../src/core/capture.js");
+  const { addNote } = await import("../src/core/notes.js");
+  assert.equal(promptText("<bash-input>npm test</bash-input><bash-stdout>ok</bash-stdout><bash-stderr></bash-stderr>"), null);
+  assert.equal(promptText("<user-memory-input>항상 한글로</user-memory-input>"), null);
+  assert.equal(promptText('<ide_opened_file>The user opened src/a.ts</ide_opened_file>\n<ide_selection>const a = 1</ide_selection>\n이 경계값 왜 이래?'), "이 경계값 왜 이래?");
+
+  const db = memoryDb();
+  const note = addNote(db, { text: "<system-reminder>안내</system-reminder>\n원인: 풀 고갈 — 커넥션을 반환하지 않았다", source: "mcp" });
+  assert.equal(note.text, "원인: 풀 고갈 — 커넥션을 반환하지 않았다");
+  assert.throws(() => addNote(db, { text: "<task-notification><status>completed</status></task-notification>", source: "mcp" }), /노트로 남길 내용이 없습니다/);
 });

@@ -389,7 +389,9 @@ async function runScenario(spec: ServerSpec): Promise<StepResult[]> {
     // 훅은 MCP 세션이 아니라 Claude Code가 띄우는 별도 프로세스(dist/hook.js)다. 같은 샌드박스 DB를 본다.
     const hook = path.join(path.dirname(spec.args[0]), "hook.js");
     expect(fs.existsSync(hook), `${hook}가 없습니다`);
-    const env = { ...process.env, GRIMOIRE_HOME: sandbox.data, GRIMOIRE_ME: ME, GRIMOIRE_UPDATE_CHECK: "0" };
+    // GRIMOIRE_HOOK_TRACE: 벤치가 "훅이 실제로 무엇을 넣었나"를 세는 기록 — 여기서도 켜서 줄이 맞게 남는지 본다
+    const traceFile = path.join(sandbox.data, "hook-trace.jsonl");
+    const env = { ...process.env, GRIMOIRE_HOME: sandbox.data, GRIMOIRE_ME: ME, GRIMOIRE_UPDATE_CHECK: "0", GRIMOIRE_HOOK_TRACE: traceFile };
     const run = (input: unknown) => {
       const started = Date.now();
       const result = spawnSync(spec.command, [hook], { input: typeof input === "string" ? input : JSON.stringify(input), env, encoding: "utf8", timeout: 10_000 });
@@ -432,7 +434,12 @@ async function runScenario(spec: ServerSpec): Promise<StepResult[]> {
     expect(outside.stdout === "", "레포 밖 파일에 출력");
     // 지연: 계획의 예산은 150ms(node 기동 포함). CI 러너는 느릴 수 있어 상한은 넉넉히 두고 실측을 적는다
     expect(second.ms < 1500, `훅 ${second.ms}ms — 상한 1500ms`);
-    return `${text.length}자 · ${second.ms}ms (목표 150ms)`;
+    // trace: 깨진 stdin은 줄을 남기지 않고(입력을 못 읽음), 나머지 호출은 한 줄씩. 주입한 것은 첫 번째(공변경 뒤)뿐
+    const traced = fs.readFileSync(traceFile, "utf8").trim().split("\n").map((row) => JSON.parse(row) as { event: string; injected: boolean; chars: number; enabled: boolean });
+    expect(traced.length === 4, `trace ${traced.length}줄 — 4줄이어야 합니다 (조용·주입·두 번째·레포 밖)`);
+    expect(traced.filter((row) => row.injected).length === 1 && traced.find((row) => row.injected)?.chars === text.length, `trace 주입: ${JSON.stringify(traced)}`);
+    expect(traced.every((row) => row.event === "PreToolUse" && row.enabled), "trace 이벤트·enabled");
+    return `${text.length}자 · ${second.ms}ms (목표 150ms) · trace ${traced.length}줄`;
   });
 
   await step("훅(캡처): 프롬프트·검증·편집을 모았다가 git commit에 묶고, 그 말로 검색된다", async () => {

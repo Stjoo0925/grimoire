@@ -26,6 +26,7 @@ import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
 
+import { HOOK_EVENTS } from "../src/setup/hooks";
 import { tempDir } from "../tests/helpers";
 import { runClaude, type AgentRun } from "./claude";
 
@@ -70,7 +71,88 @@ interface RunRow {
   subtype: string | null;
   seconds: number;
   usage: AgentRun["modelUsage"];
+  /** grimoire MCP 도구 호출 — 합계와 도구별 */
+  grimoireToolCalls: number;
+  grimoireTools: Record<string, number>;
+  /** 이 실행의 훅이 한 일 (hook.js의 GRIMOIRE_HOOK_TRACE) */
+  hook: HookStats;
   error?: string;
+}
+
+/** 훅 trace(hook.js가 GRIMOIRE_HOOK_TRACE에 덧붙인 JSON 줄) 한 줄 */
+export interface TraceLine {
+  event: string | null;
+  tool: string | null;
+  file: string | null;
+  enabled: boolean;
+  injected: boolean;
+  chars: number;
+  error?: string;
+}
+
+export interface HookStats {
+  /** 켜진 훅이 불린 횟수 (GRIMOIRE_HOOKS=0으로 꺼진 사용자 전역 훅 호출은 뺀다) */
+  calls: number;
+  /** 실제로 무언가를 넣은 횟수 */
+  injections: number;
+  /** 넣은 글자 수 합 */
+  chars: number;
+  /** 이벤트별 주입 횟수 (PreToolUse=편집 직전, PostToolUse=막혔을 때 2단계, SessionStart=시작 요약) */
+  byEvent: Record<string, number>;
+  /** 편집 직전 맥락을 받은 파일 (작업 폴더 기준 경로) */
+  files: string[];
+  /** 꺼져 있어야 할 훅이 무언가를 넣은 횟수 — 0이 아니면 대조군이 오염된 것 */
+  leaked: number;
+  errors: number;
+}
+
+/** trace 파일 → 훅 통계. 파일이 없거나 깨진 줄은 건너뛴다 */
+export function hookStats(text: string, root?: string): HookStats {
+  const stats: HookStats = { calls: 0, injections: 0, chars: 0, byEvent: {}, files: [], leaked: 0, errors: 0 };
+  const files = new Set<string>();
+  for (const raw of text.split("\n")) {
+    if (!raw.trim()) continue;
+    let line: TraceLine;
+    try {
+      line = JSON.parse(raw) as TraceLine;
+    } catch {
+      continue;
+    }
+    if (!line.enabled) {
+      if (line.injected) stats.leaked++;
+      continue;
+    }
+    stats.calls++;
+    if (line.error) stats.errors++;
+    if (!line.injected) continue;
+    stats.injections++;
+    stats.chars += line.chars;
+    const event = line.event ?? "?";
+    stats.byEvent[event] = (stats.byEvent[event] ?? 0) + 1;
+    if (event === "PreToolUse" && line.file) {
+      const relative = root && path.isAbsolute(line.file) ? path.relative(root, line.file) : line.file;
+      files.add(relative.split(path.sep).join("/"));
+    }
+  }
+  stats.files = [...files];
+  return stats;
+}
+
+const GRIMOIRE_TOOL = /^mcp__grimoire__(.+)$/;
+
+/** 에이전트가 부른 grimoire MCP 도구 — 도구별 횟수 */
+export function grimoireToolStats(calls: { name: string }[]): { total: number; byTool: Record<string, number> } {
+  const byTool: Record<string, number> = {};
+  for (const call of calls) {
+    const match = GRIMOIRE_TOOL.exec(call.name);
+    if (match) byTool[match[1]] = (byTool[match[1]] ?? 0) + 1;
+  }
+  return { total: Object.values(byTool).reduce((sum, n) => sum + n, 0), byTool };
+}
+
+/** 이 실행에 grimoire가 실제로 닿았나 — 훅이 무언가를 넣었거나 grimoire 도구를 불렀다 */
+export function influenced(row: Pick<RunRow, "hook" | "grimoireToolCalls">): boolean {
+  return row.hook.injections > 0 || row.grimoireToolCalls > 0;
 }
 
 const TEST_PATH = /(?:^|\/)(?:test(?:ing|s)?|e2e|__tests__|spec)\/|\.(?:test|spec)\.[^/]+$|(?:^|\/)test_[^/]+$|_test\.[^/]+$/i;
@@ -233,13 +315,21 @@ async function runTask(task: Task, mode: Mode, seed: number, options: { cli: str
       fs.writeFileSync(mcpConfig, JSON.stringify({ mcpServers: { grimoire: { command: process.execPath, args: [options.cli, "mcp"], env } } }));
       const hook = path.join(path.dirname(options.cli), "hook.js");
       const slash = (value: string) => value.split(path.sep).join("/");
-      // GRIMOIRE_HOOKS=1: claude 프로세스에는 0을 줘 사용자 전역 grimoire 훅을 끄므로, 이 실행의 훅만 다시 켠다
-      const command = `"${slash(process.execPath)}" "${slash(hook)}" --env "GRIMOIRE_HOME=${slash(data)}" --env "GRIMOIRE_CAPTURE=0" --env "GRIMOIRE_HOOKS=1"`;
+      // GRIMOIRE_HOOKS=1: claude 프로세스에는 0을 줘 사용자 전역 grimoire 훅을 끄므로, 이 실행의 훅만 다시 켠다.
+      // 캡처는 이 임시 DB에만 켠다 — "막혔을 때 2단계"는 캡처한 검증 실패로 발화하므로, 끄면 실제 사용자가 받는 것과 달라진다
+      const command = `"${slash(process.execPath)}" "${slash(hook)}" --env "GRIMOIRE_HOME=${slash(data)}" --env "GRIMOIRE_HOOKS=1"`;
       settings = path.join(data, "settings.json");
-      fs.writeFileSync(settings, JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Edit|Write|MultiEdit", hooks: [{ type: "command", command, timeout: 5 }] }] } }));
+      // `grimoire install claude-code --hooks`와 같은 이벤트 목록 — 실제 설치본이 받는 것을 잰다
+      const hooks = Object.fromEntries(
+        HOOK_EVENTS.map((item) => [item.event, [{ ...(item.matcher ? { matcher: item.matcher } : {}), hooks: [{ type: "command", command, timeout: item.timeout }] }]]),
+      );
+      fs.writeFileSync(settings, JSON.stringify({ hooks }));
     } else {
       fs.writeFileSync(mcpConfig, JSON.stringify({ mcpServers: {} }));
     }
+    // 훅이 무엇을 넣었는지 — 두 모드 모두 기록한다. bare에서는 사용자 전역 훅이 꺼진 채(enabled: false) 불리는지,
+    // 그래도 무언가 넣었는지(leaked)를 본다
+    const traceFile = path.join(data, "hook-trace.jsonl");
     const prompt = `${task.prompt || task.subject}\n\n고친 뒤에는 \`${task.test}\`로 확인해 줘. 작업 폴더 밖은 건드리지 마.`;
     const run = await runClaude({
       prompt,
@@ -253,10 +343,12 @@ async function runTask(task: Task, mode: Mode, seed: number, options: { cli: str
       bare: options.bare,
       // 사용자가 전역에 설치한 grimoire 훅은 끈다 — 대조군(bare 모드)에 맥락이 새거나(실제 DB는 미래 커밋까지 안다),
       // 실험 프롬프트가 실제 DB에 캡처되지 않게. 이 실행의 훅은 명령에 GRIMOIRE_HOOKS=1을 따로 준다
-      env: { GRIMOIRE_HOOKS: "0" },
+      env: { GRIMOIRE_HOOKS: "0", GRIMOIRE_HOOK_TRACE: traceFile },
       permissionMode: "bypassPermissions",
       timeoutMs: 20 * 60_000,
     });
+    const hook = hookStats(fs.existsSync(traceFile) ? fs.readFileSync(traceFile, "utf8") : "", wt.dir);
+    const tools = grimoireToolStats(run.calls);
     // 채점: 실제 fix의 테스트 패치를 얹고 돌린다 (에이전트가 테스트를 고쳐 통과시킨 경우를 막는다)
     for (const file of task.testFiles) git(wt.dir, ["checkout", "-q", task.sha, "--", file]);
     const pass = runShell(task.test, wt.dir).ok;
@@ -285,6 +377,9 @@ async function runTask(task: Task, mode: Mode, seed: number, options: { cli: str
       subtype: run.subtype,
       seconds: +((Date.now() - started) / 1000).toFixed(1),
       usage: run.modelUsage,
+      grimoireToolCalls: tools.total,
+      grimoireTools: tools.byTool,
+      hook,
       ...(run.error ? { error: run.error } : {}),
     };
   } finally {
@@ -316,6 +411,12 @@ function summarize(rows: RunRow[]) {
           stray: mean(list.map((row) => row.stray)),
           reverted: mean(list.map((row) => row.revertedEdits)),
           churn: mean(list.map((row) => row.churnRatio).filter((value): value is number => value !== null)),
+          // grimoire가 실제로 닿은 정도 — bare는 0이어야 한다
+          hookInjections: mean(list.map((row) => row.hook.injections)),
+          hookChars: mean(list.map((row) => row.hook.chars)),
+          grimoireToolCalls: mean(list.map((row) => row.grimoireToolCalls)),
+          influencedRuns: list.filter(influenced).length,
+          leaked: list.reduce((sum, row) => sum + row.hook.leaked, 0),
         },
       ];
     }),
@@ -325,18 +426,29 @@ function summarize(rows: RunRow[]) {
   const bare = new Map(by("bare").map((row) => [key(row), row]));
   const pairs = by("grimoire").map((row) => [bare.get(key(row)), row] as const).filter((pair): pair is readonly [RunRow, RunRow] => Boolean(pair[0]));
   const ok = pairs.filter(([a, b]) => a.pass && b.pass && a.costUsd && b.costUsd);
+  const ratio = (list: (readonly [RunRow, RunRow])[]) => {
+    const diffs = list.map(([a, b]) => Math.log(b.costUsd! / a.costUsd!));
+    return diffs.length ? +Math.exp(diffs.reduce((x, y) => x + y, 0) / diffs.length).toFixed(3) : null;
+  };
   const logDiff = ok.map(([a, b]) => Math.log(b.costUsd! / a.costUsd!));
   const turnDiff = ok.map(([a, b]) => (b.turns ?? 0) - (a.turns ?? 0));
+  // grimoire가 실제로 닿은 짝(훅이 무언가 넣었거나 grimoire 도구를 부름)과 아닌 짝을 나눠 본다 —
+  // 닿지 않은 짝의 차이는 그리모어 덕이 아니라 실행 간 흔들림이다
+  const touched = ok.filter(([, b]) => influenced(b));
+  const untouched = ok.filter(([, b]) => !influenced(b));
   return {
     modes,
     paired: {
       n: pairs.length,
       okPairs: ok.length,
-      costRatioOk: logDiff.length ? +Math.exp(logDiff.reduce((a, b) => a + b, 0) / logDiff.length).toFixed(3) : null,
+      costRatioOk: ratio(ok),
       turnsDeltaOk: mean(turnDiff),
       missedDelta: mean(pairs.map(([a, b]) => b.missed - a.missed)),
       p2pDelta: mean(pairs.map(([a, b]) => Number(b.p2pBroken) - Number(a.p2pBroken))),
       wilcoxonCostP: ok.length >= 5 ? wilcoxon(logDiff) : null,
+      influencedOkPairs: touched.length,
+      costRatioInfluenced: ratio(touched),
+      costRatioUninfluenced: ratio(untouched),
     },
   };
 }
@@ -423,7 +535,7 @@ async function main(): Promise<number> {
         const row = await runTask(task, mode, seed, options);
         rows.push(row);
         process.stdout.write(
-          `   ${row.pass ? "✓" : "✗"}${row.p2pBroken ? " 회귀" : ""}  $${(row.costUsd ?? 0).toFixed(3)}  ${row.turns ?? "-"}턴  missed ${row.missed}  stray ${row.stray}  ${row.subtype ?? ""}${row.error ? `  ${row.error.slice(0, 80)}` : ""}\n`,
+          `   ${row.pass ? "✓" : "✗"}${row.p2pBroken ? " 회귀" : ""}  $${(row.costUsd ?? 0).toFixed(3)}  ${row.turns ?? "-"}턴  missed ${row.missed}  stray ${row.stray}  훅 ${row.hook.injections}/${row.hook.calls}  도구 ${row.grimoireToolCalls}${row.hook.leaked ? `  누수 ${row.hook.leaked}` : ""}  ${row.subtype ?? ""}${row.error ? `  ${row.error.slice(0, 80)}` : ""}\n`,
         );
       }
     }
@@ -440,7 +552,12 @@ async function main(): Promise<number> {
     process.stdout.write(
       `\n판정(§3-4): 둘 다 푼 짝 ${paired.okPairs}개에서 grimoire/bare 비용비 ${paired.costRatioOk} (목표 ≤ 0.85), 턴 차이 ${paired.turnsDeltaOk}, missed 차이 ${paired.missedDelta}, p2p 차이 ${paired.p2pDelta}, 비용 윌콕슨 p=${paired.wilcoxonCostP ?? "-"}\n`,
     );
+    process.stdout.write(
+      `그리모어가 실제로 닿은 짝 ${paired.influencedOkPairs}/${paired.okPairs}개 — 닿은 짝 비용비 ${paired.costRatioInfluenced ?? "-"}, 안 닿은 짝 비용비 ${paired.costRatioUninfluenced ?? "-"} (안 닿은 짝의 차이는 실행 간 흔들림)\n`,
+    );
   }
+  const leaked = summary.modes.bare?.leaked ?? 0;
+  if (leaked > 0) process.stdout.write(`⚠ 대조군(bare)에 훅 주입이 ${leaked}번 새었습니다 — 이 결과의 비교는 믿을 수 없습니다\n`);
   process.stdout.write(`결과: ${outFile}\n`);
   return 0;
 }

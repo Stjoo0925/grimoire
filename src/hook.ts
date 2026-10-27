@@ -41,6 +41,38 @@ function log(env: Env, message: string): void {
   }
 }
 
+/** trace 한 줄에 남기는 주입 본문 글자 수 상한 */
+const TRACE_TEXT_MAX = 2_000;
+
+/**
+ * `GRIMOIRE_HOOK_TRACE=<파일>`이면 훅이 불릴 때마다 JSON 한 줄을 덧붙인다 — 벤치(e2e/taskbench.ts)가 "이 실행에서 훅이 실제로
+ * 무엇을 넣었나"를 세려고 쓴다. 꺼져 있으면(기본) 아무것도 하지 않는다. 기록 실패는 무시한다(훅은 작업을 막지 않는다).
+ * enabled: GRIMOIRE_HOOKS=0으로 꺼진 훅이었나(벤치의 대조군에서 사용자 전역 훅이 새지 않았는지 확인용)
+ */
+function trace(env: Env, input: HookInput, text: string, error?: string): void {
+  const file = env.GRIMOIRE_HOOK_TRACE?.trim();
+  if (!file) return;
+  const target = input.tool_input?.file_path ?? input.tool_input?.notebook_path;
+  const line = {
+    at: new Date().toISOString(),
+    event: input.hook_event_name ?? null,
+    session: input.session_id ?? null,
+    tool: input.tool_name ?? null,
+    file: typeof target === "string" ? target : null,
+    enabled: env.GRIMOIRE_HOOKS !== "0",
+    injected: text.length > 0,
+    chars: text.length,
+    text: text.slice(0, TRACE_TEXT_MAX),
+    ...(error ? { error } : {}),
+  };
+  try {
+    fs.mkdirSync(path.dirname(path.resolve(file)), { recursive: true });
+    fs.appendFileSync(file, JSON.stringify(line) + "\n");
+  } catch {
+    // 기록 못 해도 훅은 계속
+  }
+}
+
 function readStdin(): Promise<string> {
   return new Promise((resolve) => {
     let data = "";
@@ -81,8 +113,10 @@ async function main(): Promise<void> {
     const output = await handleHook({ db, env, me }, input);
     if (output?.json) process.stdout.write(JSON.stringify(output.json) + "\n");
     else if (output?.stdout) process.stdout.write(output.stdout + "\n");
+    trace(env, input, output?.json?.hookSpecificOutput.additionalContext ?? output?.stdout ?? "");
   } catch (error) {
     log(env, `${input.hook_event_name ?? "?"}: ${error instanceof Error ? (error.stack ?? error.message) : error}`);
+    trace(env, input, "", error instanceof Error ? error.message : String(error));
   } finally {
     db.close();
   }

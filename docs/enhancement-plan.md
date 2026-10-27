@@ -597,3 +597,30 @@ Claude Code 문서로 확인된 것(2026-10-26): 훅 이벤트 목록과 공통 
 - 세션→커밋: Lore https://arxiv.org/html/2603.15566v1 https://github.com/Ian-stetsenko/lore-protocol · QAC https://github.com/hubtheocoelho/qac-spec · git-ai https://github.com/acunniffe/git-ai · Semantica https://pkg.go.dev/github.com/semanticash/cli · Agent Blame https://mesa.dev/blog/agentblame-deep-dive · Copilot Agent-Logs-Url https://github.blog/changelog/2026-03-20-trace-any-copilot-coding-agent-commit-to-its-session-logs · DevGPT https://github.com/NAIST-SE/DevGPT · AIDev https://huggingface.co/datasets/hao-li/AIDev
 - 벤치: SWE-smith https://arxiv.org/html/2504.21798v2 · SWE-rebench https://arxiv.org/html/2505.20411v2 · SWE-rebench V2 https://arxiv.org/html/2602.23866v1 · R2E-Gym https://arxiv.org/html/2504.07164 · Token Reduction https://arxiv.org/html/2607.12161 · agent-efficiency-benchmark https://github.com/Emmimal/agent-efficiency-benchmark · Claude Code headless https://code.claude.com/docs/en/headless.md
 - 지형·요구: memory MCP 비교 https://mnemoverse.com/docs/library/memory-mcp-servers-compared https://getunblocked.com/blog/memory-mcp-servers-compared/ · SO 2026 https://stackoverflow.blog/2026/10/06/the-results-of-the-2026-developer-survey-are-here/ · SO 2026 agents https://stackoverflow.blog/2026/05/27/agents-on-a-leash-agentic-ai-remains-mostly-monitored-at-work · Qodo 2025 https://www.qodo.ai/reports/state-of-ai-Code-quality/ · JetBrains 2025 https://blog.jetbrains.com/research/2025/10/state-of-developer-ecosystem-2025/ · DORA 2025 https://cloud.google.com/blog/products/ai-machine-learning/announcing-the-2025-dora-report · Augment Context Lineage https://augmentcode.com/blog/announcing-context-lineage · Cursor Memories https://forum.cursor.com/t/are-my-memories-gone/144057 · 망분리 https://www.ddaily.co.kr/page/view/2026071517443276094 · 국방망 AI 코딩 https://www.venturesquare.net/1112999/
+
+## 11. 0.7.1 이후 보강 기록 (2026-10-27, 브랜치 `bench/next-version-hardening`)
+
+도그푸딩과 실제 DB 사본 점검에서 나온 것들. 다음 릴리스는 테스트를 더 한 뒤에 낸다.
+
+### 11-1. 훅
+- 검증 실패 판정은 테스트 러너의 실패 요약 줄만 본다 — stderr나 "error" 단어로는 실패로 치지 않는다.
+- "막혔을 때 2단계" 맥락에서 내용 없는 커밋 항목을 뺀다.
+- `git -C <경로> commit`을 따라가고, 긴 제목을 `(#N)` 중간에서 자르지 않는다.
+- 검증 명령·실패 출력도 저장 전에 비밀을 지운다.
+- hook.log는 512KB 상한(넘으면 뒤쪽 절반만), `grimoire doctor`가 최근 7일 훅 오류 수와 마지막 줄을 알린다.
+- 세션 시작 때 마지막 동기화가 10분을 넘었거나 공변경 이력이 비었으면 `grimoire sync`를 떼어 낸 프로세스로 띄운다 — MCP 없이 훅만 써도 터미널 커밋·pull·업그레이드 뒤 재계산이 채워진다. 실측: 훅 132ms, 그 뒤 백그라운드로 cochange 0 → 1008행.
+
+### 11-2. 색인
+- git worktree(Claude Code의 `.claude/worktrees/<세션>`)는 본 레포로 묶는다. 예전 중복 등록은 doctor가 알린다.
+- squash 머지로 두 번 남은 같은 변경(제목에서 `(#N)`을 뗀 것 + 파일 집합)은 한 번만 센다 (마이그레이션 7: 공변경 표를 비우고 다음 sync에서 다시 계산).
+- 업그레이드 직후 sync 전까지 공변경 이력이 비어 있으면 doctor가 알린다.
+- 같은 레포 sync가 동시에 돌아도 안전함을 실측했다(빈 DB에 add 3개·비운 공변경에 sync 3개 동시 → 커밋 중복 0, 공변경 집계가 단일 실행과 동일). "새 커밋" 수는 실제로 넣은 수로 센다.
+
+### 11-3. 실측 (실제 DB 사본)
+- 훅 지연: 이벤트당 약 80ms(node 기동 33ms 포함) — 예산 안.
+- 공변경 추천 정확도(시간 분할 80/20): TerraLink-vite-V2 precision@3 0.84, strong 0.91 / TerraSurveyWeb 0.51, strong 0.64. 허브 파일에 추천이 안 뜨는 건 신뢰도 기준(0.5) 때문이며 의도된 것 — 그대로 추천하면 대부분 틀린다. 테스트 추천 정확도(0.29, 질의 7)는 낮아 개선 후보.
+
+### 11-4. taskbench
+- 실행마다 훅 주입 여부·글자 수·grimoire 도구 호출 수를 기록하고, 닿은/안 닿은 실행으로 나눠 비용을 비교한다. 대조군에 사용자 전역 훅이 새면 경고.
+- `--all`(브랜치 커밋까지), `--link`(원본 레포의 의존성 폴더 연결, Windows 정션을 Node로 먼저 끊어 원본 보호), `--under`(하위 폴더 사례만, `{tests}` 경로도 그 폴더 기준), `{tests}`(그 사례의 테스트만).
+- 버린 후보마다 이유와 출력 꼬리를 찍는다. TerraLink-vite-V2 백엔드에서 5개 사례를 채굴했다(증상 서술 프롬프트 작성, 아직 실행 안 함).

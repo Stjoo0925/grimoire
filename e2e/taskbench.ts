@@ -4,6 +4,9 @@
  * 1) 채굴: 자기 레포의 과거 fix 커밋 중, 부모에서(테스트 패치만 적용하면) 실패하고 그 커밋에서 통과하는 것을 고른다.
  *    npm run taskbench -- --mine --repo ~/work/foo --test "npm test" [--limit 40] [--all] [--out bench/tasks.local.json]
  *    --all: 브랜치 커밋까지 본다 (squash 머지 레포용, 같은 변경의 중복은 한 번만)
+ *    --link backend/node_modules[,node_modules]: 작업 폴더마다 원본 레포의 그 폴더를 연결(Windows는 정션) — 의존성을 새로 깔지 않게.
+ *      사례에 저장돼 실행 때도 같이 쓴다. 지울 때는 연결을 Node로 먼저 끊는다(git worktree remove는 정션 너머를 지운다)
+ *    --test의 {tests}: 그 사례의 테스트 파일들(레포 기준 경로)로 바뀐다 — 예: "cd backend && npx vitest run {tests}"
  *    사람이 tasks.local.json의 `prompt`를 증상 서술로 다듬는다 (기본값은 커밋 제목 — 수정 힌트가 들어 있을 수 있다).
  *
  * 2) 실행: 사례마다 부모 커밋의 임시 worktree에서 claude -p를 두 모드로 돌린다.
@@ -49,6 +52,8 @@ interface Task {
   testFiles: string[];
   /** 채굴 때 부모+테스트패치에서 실패한 테스트 이름(알 수 있을 때만) */
   failing?: string[];
+  /** 작업 폴더마다 원본 레포에서 연결해 올 폴더 (--link, 예: backend/node_modules) */
+  links?: string[];
 }
 
 interface TaskFile {
@@ -186,13 +191,42 @@ function failingNames(output: string): string[] {
   return [...names];
 }
 
-/** 부모 커밋의 worktree를 임시로 만든다 (끝나면 지운다) */
-function worktree(repo: string, sha: string): { dir: string; remove: () => void } {
+/**
+ * 부모 커밋의 worktree를 임시로 만든다 (끝나면 지운다).
+ * links: 원본 레포에서 연결해 올 폴더(레포 기준 경로, 예: backend/node_modules) — 의존성이 무거운 레포에서 작업 폴더마다
+ * 새로 깔지 않으려고. Windows는 정션, 그 밖은 심볼릭 링크.
+ *
+ * 지우기 순서가 중요하다: Windows에서 정션이 든 워크트리를 `git worktree remove --force`로 지우면 정션이 가리키는
+ * 원본 폴더의 내용까지 지워진다(2026-10-27 실험). 그래서 연결은 Node로 먼저 끊고(unlink는 연결만 지운다),
+ * 하나라도 못 끊으면 워크트리를 지우지 않고 남겨 둔 채 알린다.
+ */
+export function worktree(repo: string, sha: string, links: string[] = []): { dir: string; remove: () => void } {
   const dir = path.join(tempDir("grimoire-taskbench-wt-"), "repo");
   git(repo, ["worktree", "add", "--detach", "-q", dir, sha]);
+  const made: string[] = [];
+  for (const rel of links) {
+    const target = path.join(repo, rel);
+    const link = path.join(dir, rel);
+    if (!fs.existsSync(target) || fs.existsSync(link)) continue;
+    fs.mkdirSync(path.dirname(link), { recursive: true });
+    fs.symlinkSync(target, link, process.platform === "win32" ? "junction" : "dir");
+    made.push(link);
+  }
   return {
     dir,
     remove: () => {
+      const stuck: string[] = [];
+      for (const link of made) {
+        try {
+          if (fs.lstatSync(link).isSymbolicLink()) fs.unlinkSync(link);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") stuck.push(link);
+        }
+      }
+      if (stuck.length > 0) {
+        process.stderr.write(`⚠ 연결을 끊지 못해 작업 폴더를 지우지 않았습니다(원본 보호): ${dir}\n  ${stuck.join("\n  ")}\n`);
+        return;
+      }
       try {
         git(repo, ["worktree", "remove", "--force", dir]);
       } catch {
@@ -202,6 +236,11 @@ function worktree(repo: string, sha: string): { dir: string; remove: () => void 
   };
 }
 
+/** 테스트 명령의 {tests} 자리에 그 사례의 테스트 파일(레포 기준 경로)을 넣는다 — 전체 스위트가 무거운 레포용 */
+export function testCommand(test: string, testFiles: string[]): string {
+  return test.replace(/\{tests\}/g, testFiles.map((file) => `"${file}"`).join(" "));
+}
+
 /* ── 채굴 ───────────────────────────────────────────────── */
 
 /** 같은 변경인가 — squash 머지 커밋과 브랜치의 원본 커밋은 제목(PR 번호 접미 제외)과 변경 파일 집합이 같다 */
@@ -209,7 +248,7 @@ function changeKey(subject: string, files: string[]): string {
   return `${subject.replace(/\s*\(#\d+\)\s*$/, "").trim()}\0${[...files].sort().join("\n")}`;
 }
 
-function mine(repo: string, test: string, limit: number, existing: Task[], all = false): Task[] {
+function mine(repo: string, test: string, limit: number, existing: Task[], all = false, links: string[] = []): Task[] {
   const known = new Set(existing.map((task) => task.sha));
   // --all: 브랜치·원격 브랜치의 커밋까지 — PR을 squash로 합치는 레포는 main만 보면 후보가 적다
   const log = git(repo, ["log", ...(all ? ["--all"] : []), "--no-merges", "--format=%H%x1f%P%x1f%s", "-n", "2000"]).trim().split("\n");
@@ -243,7 +282,8 @@ function mine(repo: string, test: string, limit: number, existing: Task[], all =
     process.stderr.write(`… ${sha.slice(0, 10)} ${subject.slice(0, 60)}\n`);
 
     // 부모 + 테스트 패치만 → 실패해야 함(3회 모두). 커밋 → 통과해야 함(3회 모두)
-    const wt = worktree(repo, parents);
+    const wt = worktree(repo, parents, links);
+    const command = testCommand(test, testFiles);
     let failing: string[] = [];
     try {
       const patch = git(repo, ["show", "--format=", sha, "--", ...testFiles]);
@@ -251,19 +291,19 @@ function mine(repo: string, test: string, limit: number, existing: Task[], all =
       if (apply.status !== 0) continue;
       let consistentFail = true;
       for (let i = 0; i < FLAKY_RUNS && consistentFail; i++) {
-        const result = runShell(test, wt.dir);
+        const result = runShell(command, wt.dir);
         if (result.ok) consistentFail = false;
         else if (i === 0) failing = failingNames(result.output);
       }
       if (!consistentFail) continue;
       git(wt.dir, ["checkout", "-q", "--detach", sha]);
       let consistentPass = true;
-      for (let i = 0; i < FLAKY_RUNS && consistentPass; i++) if (!runShell(test, wt.dir).ok) consistentPass = false;
+      for (let i = 0; i < FLAKY_RUNS && consistentPass; i++) if (!runShell(command, wt.dir).ok) consistentPass = false;
       if (!consistentPass) continue;
     } finally {
       wt.remove();
     }
-    tasks.push({ id: `${path.basename(repo)}-${sha.slice(0, 8)}`, repo, sha, parent: parents, subject, prompt: "", test, files, testFiles, ...(failing.length > 0 ? { failing } : {}) });
+    tasks.push({ id: `${path.basename(repo)}-${sha.slice(0, 8)}`, repo, sha, parent: parents, subject, prompt: "", test, files, testFiles, ...(failing.length > 0 ? { failing } : {}), ...(links.length > 0 ? { links } : {}) });
     process.stderr.write(`  ✓ 사례 ${tasks.length - existing.length}: ${sha.slice(0, 10)}\n`);
   }
   process.stderr.write(`후보 ${scanned}개를 돌려 사례 ${tasks.length - existing.length}개\n`);
@@ -294,7 +334,8 @@ function editChurn(run: AgentRun): number {
 }
 
 async function runTask(task: Task, mode: Mode, seed: number, options: { cli: string; model?: string; bare: boolean; budget: string; maxTurns: number }): Promise<RunRow> {
-  const wt = worktree(task.repo, task.parent);
+  const wt = worktree(task.repo, task.parent, task.links ?? []);
+  const test = testCommand(task.test, task.testFiles);
   const data = tempDir("grimoire-taskbench-data-");
   const started = Date.now();
   try {
@@ -330,7 +371,7 @@ async function runTask(task: Task, mode: Mode, seed: number, options: { cli: str
     // 훅이 무엇을 넣었는지 — 두 모드 모두 기록한다. bare에서는 사용자 전역 훅이 꺼진 채(enabled: false) 불리는지,
     // 그래도 무언가 넣었는지(leaked)를 본다
     const traceFile = path.join(data, "hook-trace.jsonl");
-    const prompt = `${task.prompt || task.subject}\n\n고친 뒤에는 \`${task.test}\`로 확인해 줘. 작업 폴더 밖은 건드리지 마.`;
+    const prompt = `${task.prompt || task.subject}\n\n고친 뒤에는 \`${test}\`로 확인해 줘. 작업 폴더 밖은 건드리지 마.`;
     const run = await runClaude({
       prompt,
       cwd: wt.dir,
@@ -351,10 +392,10 @@ async function runTask(task: Task, mode: Mode, seed: number, options: { cli: str
     const tools = grimoireToolStats(run.calls);
     // 채점: 실제 fix의 테스트 패치를 얹고 돌린다 (에이전트가 테스트를 고쳐 통과시킨 경우를 막는다)
     for (const file of task.testFiles) git(wt.dir, ["checkout", "-q", task.sha, "--", file]);
-    const pass = runShell(task.test, wt.dir).ok;
+    const pass = runShell(test, wt.dir).ok;
     // 회귀: 부모에서 통과하던 것이 깨졌나 — 실제 fix 커밋 전체 테스트가 아니라 "부모 상태 테스트"를 에이전트 결과에 얹어 돌린다
     for (const file of task.testFiles) git(wt.dir, ["checkout", "-q", task.parent, "--", file]);
-    const p2pBroken = !runShell(task.test, wt.dir).ok;
+    const p2pBroken = !runShell(test, wt.dir).ok;
     const edited = editedFiles(run, wt.dir).filter((file) => !task.testFiles.includes(file));
     const finalDiff = git(wt.dir, ["diff", "--numstat", task.parent, "--"]).trim().split("\n").filter(Boolean);
     const finalLines = finalDiff.reduce((sum, row) => sum + (Number(row.split("\t")[0]) || 0) + (Number(row.split("\t")[1]) || 0), 0);
@@ -484,6 +525,7 @@ async function main(): Promise<number> {
       test: { type: "string" },
       limit: { type: "string" },
       all: { type: "boolean" },
+      link: { type: "string" },
       out: { type: "string" },
       tasks: { type: "string" },
       seeds: { type: "string" },
@@ -501,7 +543,7 @@ async function main(): Promise<number> {
     const repo = path.resolve(expandHome(values.repo));
     const out = path.resolve(values.out ?? "bench/tasks.local.json");
     const existing: TaskFile = fs.existsSync(out) ? (JSON.parse(fs.readFileSync(out, "utf8")) as TaskFile) : { tasks: [] };
-    const tasks = mine(repo, values.test, Number.parseInt(values.limit ?? "40", 10) || 40, existing.tasks, values.all === true);
+    const tasks = mine(repo, values.test, Number.parseInt(values.limit ?? "40", 10) || 40, existing.tasks, values.all === true, (values.link ?? "").split(",").map((item) => item.trim()).filter(Boolean));
     fs.mkdirSync(path.dirname(out), { recursive: true });
     fs.writeFileSync(out, JSON.stringify({ tasks }, null, 2) + "\n");
     process.stdout.write(`${out}: 사례 ${tasks.length}개. 각 사례의 "prompt"를 증상 서술로 다듬으세요(비면 커밋 제목을 씁니다 — 수정 힌트가 샐 수 있습니다).\n`);

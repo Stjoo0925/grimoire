@@ -46,3 +46,30 @@ test("grimoireToolStats·influenced: grimoire MCP 도구만 세고, 훅 주입�
   assert.equal(influenced({ hook: none, grimoireToolCalls: 1 }), true);
   assert.equal(influenced({ hook: { ...none, injections: 1 }, grimoireToolCalls: 0 }), true);
 });
+
+test("worktree --link: 원본 레포의 의존성 폴더를 연결하고, 지울 때 원본은 그대로 둔다", async () => {
+  const { worktree } = await import("../e2e/taskbench.js");
+  const { makeRepo, git } = await import("./helpers.js");
+  const fs = await import("node:fs");
+  const repo = makeRepo([{ message: "feat: 시작", files: { "backend/src/a.ts": "export const a = 1;\n", ".gitignore": "node_modules/\n" } }], "linked");
+  // 원본 레포에만 있는(커밋 안 된) 무거운 의존성 폴더
+  const deps = path.join(repo, "backend", "node_modules", "pkg");
+  fs.mkdirSync(deps, { recursive: true });
+  fs.writeFileSync(path.join(deps, "index.js"), "module.exports = 1;\n");
+  const sha = git(repo, ["rev-parse", "HEAD"]).trim();
+
+  const wt = worktree(repo, sha, ["backend/node_modules", "not/there"]);
+  const linked = path.join(wt.dir, "backend", "node_modules", "pkg", "index.js");
+  assert.equal(fs.readFileSync(linked, "utf8"), "module.exports = 1;\n", "작업 폴더에서 원본 의존성이 보여야 합니다");
+  assert.equal(fs.existsSync(path.join(wt.dir, "not", "there")), false, "원본에 없는 경로는 연결하지 않는다");
+
+  wt.remove();
+  assert.equal(fs.existsSync(wt.dir), false, "작업 폴더는 지워져야 합니다");
+  assert.equal(fs.readFileSync(path.join(deps, "index.js"), "utf8"), "module.exports = 1;\n", "원본 의존성은 그대로여야 합니다");
+});
+
+test("testCommand: {tests}를 그 사례의 테스트 파일로 바꾼다", async () => {
+  const { testCommand } = await import("../e2e/taskbench.js");
+  assert.equal(testCommand("cd backend && npx vitest run {tests}", ["backend/src/a.spec.ts", "backend/src/b c.spec.ts"]), 'cd backend && npx vitest run "backend/src/a.spec.ts" "backend/src/b c.spec.ts"');
+  assert.equal(testCommand("npm test", ["x.test.ts"]), "npm test");
+});

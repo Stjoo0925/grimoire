@@ -12,6 +12,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 
 import type { DB } from "./db";
+import { noteDocFields } from "./note-doc";
 import { redact } from "./redact";
 import { parseTrailers, whyLines, type Trailer } from "./trailers";
 
@@ -317,19 +318,21 @@ export function reRedactStored(db: DB): number {
   }
   for (const { repoId, sha } of touched.values()) refreshWhy(db, repoId, sha);
 
-  // 노트 — 검색 문서(제목 = 첫 줄, 본문 = 나머지 + 태그)도 같은 규칙으로 고친다. 비밀은 한 줄 안에 있으므로 칸마다 지워도 같다
-  const notes = db.prepare("SELECT id, text FROM notes").all() as { id: number; text: string }[];
+  // 노트 — 검색 문서는 지운 본문과 원래 태그로 새 노트와 똑같이 다시 만든다(문서 본문 통째로 지우면 끝에 붙은
+  // 태그 "auth token"이 "auth [redacted]"로 망가진다)
+  const notes = db.prepare("SELECT id, text, tags FROM notes").all() as { id: number; text: string; tags: string }[];
   const setNote = db.prepare("UPDATE notes SET text = ? WHERE id = ?");
-  const noteDoc = db.prepare("SELECT d.id, f.title, f.body, f.paths, f.code FROM docs d JOIN docs_fts f ON f.rowid = d.id WHERE d.kind = 'note' AND d.ref = ?");
+  const noteDoc = db.prepare("SELECT d.id, f.paths, f.code FROM docs d JOIN docs_fts f ON f.rowid = d.id WHERE d.kind = 'note' AND d.ref = ?");
   for (const note of notes) {
     const clean = redact(note.text);
     if (clean === note.text) continue;
     setNote.run(clean, note.id);
     changed++;
-    const doc = noteDoc.get(String(note.id)) as { id: number; title: string; body: string; paths: string; code: string | null } | undefined;
+    const doc = noteDoc.get(String(note.id)) as { id: number; paths: string; code: string | null } | undefined;
     if (!doc) continue;
+    const { title, body } = noteDocFields(clean, note.tags);
     db.prepare("DELETE FROM docs_fts WHERE rowid = ?").run(doc.id);
-    db.prepare("INSERT INTO docs_fts (rowid, title, body, paths, code) VALUES (?, ?, ?, ?, ?)").run(doc.id, redact(doc.title), redact(doc.body), doc.paths, doc.code ?? "");
+    db.prepare("INSERT INTO docs_fts (rowid, title, body, paths, code) VALUES (?, ?, ?, ?, ?)").run(doc.id, title, body, doc.paths, doc.code ?? "");
   }
   return changed;
 }

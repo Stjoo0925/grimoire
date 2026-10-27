@@ -81,6 +81,14 @@ test("redact: 접두가 붙은 환경 변수 이름·연결 문자열·서비스
   assert.equal(redact("DATABASE_URL=postgres://app:s3cretpw@db:5432/x"), "DATABASE_URL=postgres://app:[redacted]@db:5432/x");
   assert.equal(redact("author: Kim, see https://example.com/a:b and user@example.com"), "author: Kim, see https://example.com/a:b and user@example.com");
   assert.equal(redact("MYTOKEN=abcd1234 GITHUB_TOKEN_FILE=/run/x"), "MYTOKEN=abcd1234 GITHUB_TOKEN_FILE=/run/x", "낱말 안의 키워드·다른 이름은 그대로");
+  // 공백으로 띄운 평범한 말은 그대로 — 프롬프트의 "왜"가 망가지지 않게 (실제 DB에서 "Token Reduction"이 지워졌다)
+  for (const prose of ["refresh token rotation을 고쳐", "fix the auth middleware", "Token Reduction≠Cost Reduction", "secret manager 연동"]) {
+    assert.equal(redact(prose), prose, prose);
+  }
+  // 공백 꼴이라도 비밀처럼 보이면 지운다
+  assert.equal(redact("--token abcd1234efgh"), "--token [redacted]");
+  assert.equal(redact("--password hunter22"), "--password [redacted]");
+  assert.equal(redact("--api-key ABCDEFGHIJKLMNOPQRSTUVWXYZ"), "--api-key [redacted]");
   // 긴 입력에서도 선형 — 훅 안에서 돈다
   const started = Date.now();
   redact(`${"ab-cd-".repeat(10_000)}token`);

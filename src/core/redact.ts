@@ -50,8 +50,18 @@ export function redact(text: string): string {
   for (const block of BLOCKS) out = out.replace(block, REDACTED);
   for (const token of TOKENS) out = out.replace(token, REDACTED);
   out = out.replace(URL_CREDENTIALS, (_, head: string) => `${head}:${REDACTED}@`);
-  out = out.replace(ASSIGNMENTS, (_, key: string, sep: string) => `${key}${sep.trim() ? sep : " "}${REDACTED}`);
+  out = out.replace(ASSIGNMENTS, (match: string, key: string, sep: string, quote: string, value: string) => {
+    // 공백으로만 띄운 꼴("token rotation", "auth middleware", "Token Reduction")은 평범한 말이기 쉽다 — 프롬프트의 "왜"가
+    // 망가지지 않게, 값이 비밀처럼 보일 때(따옴표로 감쌈, 글자·숫자 섞임, 아주 김)만 지운다. `=`·`:`로 붙인 값은 늘 지운다
+    if (!sep.trim() && !quote && !looksSecret(value)) return match;
+    return `${key}${sep.trim() ? sep : " "}${REDACTED}`;
+  });
   return out;
+}
+
+/** 공백 뒤의 낱말이 비밀값처럼 보이는가 — 글자와 숫자가 섞였거나(hunter22, abcd1234), 24자 이상 */
+function looksSecret(value: string): boolean {
+  return (/\d/.test(value) && /[A-Za-z]/.test(value)) || value.length >= 24;
 }
 
 /** 지운 자리가 있는가 (테스트·로그용) */

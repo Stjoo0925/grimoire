@@ -607,7 +607,8 @@ Claude Code 문서로 확인된 것(2026-10-26): 훅 이벤트 목록과 공통 
 - "막혔을 때 2단계" 맥락에서 내용 없는 커밋 항목을 뺀다.
 - `git -C <경로> commit`을 따라가고, 긴 제목을 `(#N)` 중간에서 자르지 않는다.
 - 검증 명령·실패 출력도 저장 전에 비밀을 지운다.
-- 비밀 지우기 보강: `OPENAI_API_KEY=…`·`DB_PASSWORD=…`처럼 접두 붙은 이름(전엔 `_` 뒤 경계가 없어 샜다), `scheme://user:비밀번호@host`, Stripe·GitLab·npm·Hugging Face 토큰, Slack 웹훅. 정규식은 선형 — 60KB 하이픈 문자열이 1.3초 → 3ms. 마이그레이션 8이 이미 저장된 프롬프트·검증에도 다시 적용한다(실제 DB 사본 147행 중 2행).
+- 비밀 지우기 보강: `OPENAI_API_KEY=…`·`DB_PASSWORD=…`처럼 접두 붙은 이름(전엔 `_` 뒤 경계가 없어 샜다), `scheme://user:비밀번호@host`, Stripe·GitLab·npm·Hugging Face 토큰, Slack 웹훅. 정규식은 선형 — 60KB 하이픈 문자열이 1.3초 → 3ms. 마이그레이션 8이 이미 저장된 프롬프트·검증·노트에도 다시 적용한다.
+- 오탐 줄이기: 공백으로만 띄운 꼴(`token rotation`, `auth middleware`)은 값이 비밀처럼 보일 때(따옴표, 글자·숫자 섞임, 24자 이상)만 지운다. 실제 DB에서 "Token Reduction≠Cost Reduction"이 지워지고 있었다 — 마이그레이션 8을 사본에 처음 돌렸을 때 "지워진 2행"은 둘 다 이 오탐이었고, 고친 뒤엔 0행.
 - doctor: 훅·claude-code MCP가 CLI와 다른 데이터 폴더를 보면 알리고, hook.log는 훅의 폴더에서 읽는다.
 - 훅은 DB 쓰기 잠금을 1.5초만 기다린다(전엔 5초 = 훅 timeout).
 - hook.log는 512KB 상한(넘으면 뒤쪽 절반만), `grimoire doctor`가 최근 7일 훅 오류 수와 마지막 줄을 알린다.

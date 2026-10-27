@@ -7,12 +7,13 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { dbPath, grimoireHome, type Env } from "../core/config";
+import { needsCochangeBackfill } from "../core/context";
 import { loadSqlite, MIN_NODE, openDb } from "../core/db";
 import { runGit } from "../core/git";
 import { myEmails } from "../core/identity";
-import { listRepos } from "../core/indexer";
+import { listRepos, worktreeRegistrations } from "../core/indexer";
 import { compareVersions, RELEASES_URL, refreshUpdateCache, updateCheckEnabled, VERSION } from "../core/update";
-import { parseHookCommand, readInstalledHooks, settingsPath } from "./hooks";
+import { hookCommandEnv, parseHookCommand, readInstalledHooks, settingsPath } from "./hooks";
 import { CLIENTS, configPath, hasCommand, readInstalled, run, SERVER_NAME, staleDesktopConfigs } from "./install";
 
 export type Level = "ok" | "warn" | "fail";
@@ -104,6 +105,28 @@ export async function doctor(options: DoctorOptions): Promise<Check[]> {
           if (neverSynced.length > 0) {
             checks.push({ level: "warn", title: `한 번도 동기화되지 않은 레포 ${neverSynced.length}개`, fix: "grimoire sync" });
           }
+          // 업그레이드(마이그레이션)가 공변경 표를 비운 뒤 아직 sync가 안 돈 레포 — 그동안 편집 직전 훅은 아무 맥락도 못 준다
+          const stale = repos.filter((repo) => repo.synced_at && needsCochangeBackfill(db, repo.id));
+          if (stale.length > 0) {
+            checks.push({
+              level: "warn",
+              title: `공변경 이력을 다시 계산해야 하는 레포 ${stale.length}개 — 그때까지 편집 직전 맥락이 비어 있습니다`,
+              detail: stale.map((repo) => repo.name).join(", "),
+              fix: "grimoire sync",
+            });
+          }
+          // 예전 버전은 git worktree(Claude Code의 .claude/worktrees/<세션>)를 따로 등록했다 — 같은 커밋이 겹쳐 색인된다
+          const worktrees = await worktreeRegistrations(db);
+          if (worktrees.length > 0) {
+            checks.push({
+              level: "warn",
+              title: `다른 레포의 git worktree가 따로 등록돼 있습니다 (${worktrees.length}개) — 같은 커밋이 검색에 겹쳐 나옵니다`,
+              detail: worktrees.map((item) => `${item.repo.name} → 본 레포 ${item.main}${item.mainRegistered ? "" : " (미등록)"}`).join("\n    "),
+              fix: worktrees
+                .map((item) => (item.mainRegistered ? `grimoire remove ${item.repo.name}` : `grimoire remove ${item.repo.name} && grimoire add "${item.main}"`))
+                .join("  /  "),
+            });
+          }
         }
       } finally {
         db.close();
@@ -177,10 +200,14 @@ async function clientChecks(options: DoctorOptions, env: Env): Promise<Check[]> 
       const listed = await run("claude", ["mcp", "get", SERVER_NAME]);
       anyInstalled = true;
       const wrongNode = !listed.includes(process.execPath);
+      // `claude mcp get`의 "Environment:" 아래 "GRIMOIRE_HOME=…" 줄 — 없으면 기본 폴더
+      const mcpHome = dataHome(/^\s*GRIMOIRE_HOME=(.+?)\s*$/m.exec(listed)?.[1]);
       checks.push(
         wrongNode
           ? { level: "warn", title: "claude-code: 다른 node로 등록돼 있습니다", detail: listed.trim(), fix: "grimoire install claude-code" }
-          : { level: "ok", title: "claude-code: 등록됨" },
+          : !samePath(mcpHome, grimoireHome(env))
+            ? { level: "warn", title: "claude-code: CLI와 다른 데이터 폴더를 봅니다", detail: `MCP: ${mcpHome} / CLI: ${grimoireHome(env)}`, fix: "grimoire install claude-code" }
+            : { level: "ok", title: "claude-code: 등록됨" },
       );
     } catch {
       // 등록 안 됨 — 아래 공통 안내로
@@ -191,7 +218,7 @@ async function clientChecks(options: DoctorOptions, env: Env): Promise<Check[]> 
     checks.push({
       level: "warn",
       title: "어떤 MCP 클라이언트에도 아직 등록하지 않았습니다",
-      fix: "grimoire install claude-code | claude-desktop | cursor",
+      fix: `grimoire install ${CLIENTS.join(" | ")}`,
     });
   }
 
@@ -208,8 +235,36 @@ async function clientChecks(options: DoctorOptions, env: Env): Promise<Check[]> 
       });
     } else if (path.resolve(parsed.node) !== path.resolve(process.execPath)) {
       checks.push({ level: "warn", title: "claude-code 훅: 지금과 다른 node로 등록돼 있습니다", detail: parsed.node, fix: "grimoire install claude-code --hooks" });
+    } else if (options.cliPath && !samePath(path.dirname(parsed.hook), path.dirname(options.cliPath))) {
+      // 다른 설치(예: 개발 중인 워크트리 빌드)의 hook.js — grimoire를 올려도 훅은 그 빌드로 계속 돈다
+      checks.push({
+        level: "warn",
+        title: "claude-code 훅: 지금 CLI와 다른 위치의 grimoire를 가리킵니다 — 업데이트가 훅에 닿지 않습니다",
+        detail: `훅: ${parsed.hook} / CLI: ${options.cliPath}`,
+        fix: "grimoire install claude-code --hooks",
+      });
     } else {
       checks.push({ level: "ok", title: `claude-code 훅: ${hooks.map((hook) => hook.event).join(", ")}`, detail: parsed.hook });
+      // 훅은 설치 때 적힌 GRIMOIRE_HOME(없으면 기본 폴더)을 본다 — CLI와 다르면 훅이 쌓은 기억을 CLI·MCP가 못 본다
+      const hookHome = dataHome(hookCommandEnv(hooks[0].command).GRIMOIRE_HOME);
+      if (!samePath(hookHome, grimoireHome(env))) {
+        checks.push({
+          level: "warn",
+          title: "claude-code 훅: CLI와 다른 데이터 폴더를 봅니다",
+          detail: `훅: ${hookHome} / CLI: ${grimoireHome(env)}`,
+          fix: "grimoire install claude-code --hooks",
+        });
+      }
+      // 훅은 작업을 막지 않으려고 오류를 hook.log에만 남긴다 — 여기서 보여 주지 않으면 아무도 모른다. 훅의 폴더에서 읽는다
+      const recent = recentHookErrors(hookHome);
+      if (recent.count > 0) {
+        checks.push({
+          level: "warn",
+          title: `claude-code 훅: 최근 ${HOOK_ERROR_DAYS}일 오류 ${recent.count}건 — 훅이 맥락을 못 건넸을 수 있습니다`,
+          detail: recent.last ?? undefined,
+          fix: `${path.join(hookHome, "hook.log")}를 확인하세요`,
+        });
+      }
     }
   } else {
     checks.push({
@@ -249,11 +304,12 @@ function specCheck(
       fix,
     };
   }
-  if ((spec.env?.GRIMOIRE_HOME ?? grimoireHome({})) !== grimoireHome(env)) {
+  const mcpHome = dataHome(spec.env?.GRIMOIRE_HOME);
+  if (!samePath(mcpHome, grimoireHome(env))) {
     return {
       level: "warn",
       title: `${client}: CLI와 다른 데이터 폴더를 봅니다`,
-      detail: `MCP: ${spec.env?.GRIMOIRE_HOME ?? grimoireHome({})} / CLI: ${grimoireHome(env)}`,
+      detail: `MCP: ${mcpHome} / CLI: ${grimoireHome(env)}`,
       fix,
     };
   }
@@ -261,6 +317,36 @@ function specCheck(
     return { level: "warn", title: `${client}: 다른 위치의 grimoire를 가리킵니다`, detail: script, fix };
   }
   return { level: "ok", title: `${client}: 등록됨`, detail: file };
+}
+
+/** 클라이언트 설정에 적힌 GRIMOIRE_HOME(없으면 기본 폴더)을 절대경로로 */
+function dataHome(configured: string | undefined): string {
+  return path.resolve(configured?.trim() ? configured.trim() : grimoireHome({}));
+}
+
+/** 같은 경로인가 — 설정에는 /로 적히고, Windows는 대소문자를 가리지 않는다 */
+function samePath(a: string, b: string): boolean {
+  const norm = (value: string) => (process.platform === "win32" ? path.resolve(value).toLowerCase() : path.resolve(value));
+  return norm(a) === norm(b);
+}
+
+export const HOOK_ERROR_DAYS = 7;
+
+/** hook.log에서 최근 며칠의 오류 줄 수와 마지막 줄 (줄 머리가 ISO 시각) */
+export function recentHookErrors(home: string, now = Date.now()): { count: number; last: string | null } {
+  let text: string;
+  try {
+    text = fs.readFileSync(path.join(home, "hook.log"), "utf8");
+  } catch {
+    return { count: 0, last: null };
+  }
+  const since = now - HOOK_ERROR_DAYS * 86_400_000;
+  const lines = text.split("\n").filter((line) => {
+    const at = Date.parse(line.slice(0, 24));
+    return Number.isFinite(at) && at >= since;
+  });
+  const last = lines.at(-1) ?? null;
+  return { count: lines.length, last: last && last.length > 200 ? `${last.slice(0, 199)}…` : last };
 }
 
 const ICON: Record<Level, string> = { ok: "✓", warn: "!", fail: "✗" };

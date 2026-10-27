@@ -129,3 +129,44 @@ test("installHooks: settings.json을 만들고 백업하고, 두 번째는 그�
 
   await assert.rejects(installHooks({ hookPath: path.join(home, "nope.js"), env: {}, home }), /npm run build/);
 });
+
+test("SessionStart: 오래됐거나 공변경 이력이 빈 레포는 백그라운드 동기화를 요청한다 (resume 포함, 끌 수 있음)", async () => {
+  const { needsBackgroundSync, SYNC_STALE_MS } = await import("../src/hook/runner.js");
+  const db = memoryDb();
+  const dir = coupledRepo();
+  const repo = await addRepo(db, dir);
+  await syncRepo(db, repo);
+  const fresh = db.prepare("SELECT * FROM repos WHERE id = ?").get(repo.id) as typeof repo;
+  const now = Date.parse(fresh.synced_at!);
+  const env = { GRIMOIRE_HOME: tempDir() };
+
+  assert.equal(needsBackgroundSync(db, env, fresh, now + 1_000), false, "방금 동기화");
+  assert.equal(needsBackgroundSync(db, env, fresh, now + SYNC_STALE_MS + 1), true, "오래됨");
+  assert.equal(needsBackgroundSync(db, { ...env, GRIMOIRE_SYNC_ON_START: "0" }, fresh, now + SYNC_STALE_MS + 1), false, "꺼짐");
+  assert.equal(needsBackgroundSync(db, env, { ...fresh, synced_at: null }, now), true, "한 번도 안 함");
+  db.exec("DELETE FROM cochange");
+  assert.equal(needsBackgroundSync(db, env, fresh, now + 1_000), true, "업그레이드로 비워진 공변경");
+
+  const context = { db, env, me: [] };
+  const start = await handleHook(context, { hook_event_name: "SessionStart", session_id: "bg-1", cwd: dir, source: "startup" });
+  assert.equal(start?.syncRepo, fresh.path);
+  assert.ok(start?.stdout, "요약은 그대로 낸다");
+  const resume = await handleHook(context, { hook_event_name: "SessionStart", session_id: "bg-1", cwd: dir, source: "resume" });
+  assert.deepEqual(resume, { syncRepo: fresh.path }, "resume은 요약 없이 동기화만");
+});
+
+test("PreToolUse: 세션 파일을 못 써도(병렬 편집 중 rename 실패 등) 맥락은 그대로 주입하고 임시 파일을 남기지 않는다", async () => {
+  const db = memoryDb();
+  const repo = await addRepo(db, coupledRepo());
+  await syncRepo(db, repo);
+  const env = { GRIMOIRE_HOME: tempDir("grimoire-hook-home-") };
+  // 세션 파일 자리에 폴더가 있으면 rename이 실패한다 — Windows에서 다른 훅이 파일을 읽는 중일 때와 같은 결과
+  fs.mkdirSync(path.join(sessionsDir(env), "locked.json"), { recursive: true });
+  const out = await handleHook({ db, env, me: [] }, preToolUse(repo.path, "src/a.ts", "locked"));
+  assert.ok(out?.json?.hookSpecificOutput.additionalContext.startsWith("Grimoire: src/a.ts"), "저장 실패가 주입을 막으면 안 됩니다");
+  assert.deepEqual(
+    fs.readdirSync(sessionsDir(env)).filter((name) => name.endsWith(".tmp")),
+    [],
+    "임시 파일이 남으면 안 됩니다",
+  );
+});

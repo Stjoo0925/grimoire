@@ -44,6 +44,7 @@ grimoire doctor                       # 연결 상태 점검
 | Claude Code (이 레포만) | `grimoire install claude-code --project .` | `./.mcp.json` |
 | Claude Desktop | `grimoire install claude-desktop` | `claude_desktop_config.json` |
 | Cursor | `grimoire install cursor` (`--project .`이면 이 레포만) | `~/.cursor/mcp.json` |
+| Codex | `grimoire install codex` | `~/.codex/config.toml` (`$CODEX_HOME`이 있으면 그 아래) |
 
 - 설정에는 **지금 실행 중인 node의 절대경로**가 들어갑니다. Claude Desktop·Cursor 같은 GUI 앱은 셸의 PATH를
   모르기 때문에 `"command": "node"`로 적으면 `spawn node ENOENT`로 연결이 안 됩니다. node 버전을
@@ -52,12 +53,17 @@ grimoire doctor                       # 연결 상태 점검
   CLI와 MCP가 같은 DB를 보게 됩니다.
 - 다른 서버 항목은 그대로 두고 `grimoire` 항목만 넣습니다. 기존 파일은 `.bak`으로 백업하고, JSON이 깨져 있으면
   건드리지 않고 멈춥니다. 무엇을 쓸지 먼저 보려면 `--dry-run`을 붙이세요.
+- Codex는 `config.toml`에서 `[mcp_servers.grimoire]` 표만 바꾸고, 나머지 줄·주석·줄바꿈은 그대로 둡니다.
+  읽기 도구는 `approval_mode = "approve"`로 승인을 묻지 않게 합니다. `codex` 명령이 있으면 바뀐 설정을 Codex가 다시 읽어 보게 하고,
+  Codex가 거부하면(키를 모르는 옛 버전 등) 원래 파일로 되돌립니다. Claude Code 훅은 Codex에는 해당하지 않습니다.
 - 설치한 뒤에는 클라이언트를 다시 시작하세요(Claude Desktop은 ⌘Q로 완전히 종료).
 
 ### 연결이 안 될 때 — `grimoire doctor`
 
 Grimoire 버전(새 릴리스가 있는지), node 버전과 내장 SQLite(FTS5), git, DB와 등록된 레포, 내 이메일, 각 클라이언트에 적힌 설정(node 경로가
 실제로 있는지, 지금 node와 같은지, 같은 DB를 보는지)을 점검하고 고치는 명령을 알려 줍니다.
+훅을 설치했다면 훅이 지금 설치를 가리키는지, 같은 데이터 폴더를 보는지, `hook.log`에 최근 7일 오류가 있는지도 보고,
+업그레이드 뒤 공변경 이력을 다시 계산해야 하는 레포(`grimoire sync`)나 예전 버전이 따로 등록한 워크트리도 알려 줍니다.
 
 ### 작업 중인 프로젝트는 자동 등록
 
@@ -68,12 +74,13 @@ Grimoire가 **서버를 띄울 때 바로 등록하고, 다른 레포보다 먼�
 - 현재 레포의 결과를 **앞으로 당깁니다**(다른 레포 결과도 같이 나옵니다). 응답에는 `current: "<레포>"`가 붙습니다.
 - 끄려면 `GRIMOIRE_AUTO_ADD=0`. 꺼 둔 상태에서 현재 레포가 등록돼 있지 않으면, 조용히 빠지지 않고 `hint`로 알립니다.
 - 레포 최상위가 홈 디렉터리나 `/`이면(닷파일 레포 등) 건너뜁니다.
-- Claude Desktop은 프로젝트 폴더가 없어서(서버를 `/`에서 띄움) 아래처럼 직접 등록합니다.
+- 서버가 레포 밖에서 뜨면(전역 설정으로 `/`나 홈 폴더에서 띄운 경우) 클라이언트에게 작업 폴더(MCP roots)를 묻고, 그중 처음 나오는 git 레포를 씁니다. Claude Desktop처럼 roots를 지원하지 않는 클라이언트는 아래처럼 직접 등록합니다.
 
 ### 레포 등록은 대화 중에도
 
 아직 레포가 없으면 검색 결과에 안내(`hint`)가 실려, AI가 등록부터 하자고 말합니다.
 `add_repo` 도구로 대화 중에 바로 등록할 수 있습니다("~/work-dir 아래 레포 전부 기억해 줘" → `scan: true`).
+폴더 전체를 인덱싱하면 시간이 걸리므로, 진행 상황을 요청한 클라이언트에는 레포마다 진행을 알립니다.
 
 ### 도구
 
@@ -116,7 +123,9 @@ Tests: tests/search.test.ts
 - `Co-changes`는 커밋을 거래로 본 연관 규칙입니다(머지·10파일 초과 커밋 제외, 신뢰도 ≥ 0.5는 필터, 정렬은 최근순, 동기화마다 증분). 커밋이 보통 10개 넘는 파일을 건드리는 레포라면 `GRIMOIRE_COCHANGE_MAX_FILES=20`을 두고 `grimoire sync`를 다시 하세요. `Tests`는 이름 규칙 짝(`foo.ts` ↔ `foo.test.ts`·`test_foo.py`·`foo_test.go`)이 먼저, 그다음 같이 바뀐 테스트. `Fixes(90d)`는 최근 90일 fix 커밋이 2개 이상이고 30% 이상일 때만 sha와 함께.
 - `SessionStart`(startup·clear·compact)에는 600자 요약: 이 레포의 내 최근 커밋 3개와 그 *왜*, 이전 세션에서 고쳤지만 커밋하지 않은 파일.
 - 세션에서 **처음 실패한 검증**(`npm test`·`pytest` 등)이 나오면 한 번 더: 고치고 있는 파일들의 과거 커밋이 남긴 왜·검증·고쳤다가 뺀 파일·`Rejected:`/`Constraint:` 트레일러. 세션당 한 번이고, 막히지 않은 세션은 비용이 없습니다.
-- 훅은 가벼운 별도 진입점(`dist/hook.js`)이라 MCP 모듈을 불러오지 않고, 항상 exit 0, 오류는 `~/.grimoire/hook.log`, 동기화는 하지 않습니다. `GRIMOIRE_HOOKS=0`이면 주입을 끄고, `grimoire doctor`가 훅 항목을 점검합니다.
+- 훅은 가벼운 별도 진입점(`dist/hook.js`)이라 MCP 모듈을 불러오지 않고, 항상 exit 0, 오류는 `~/.grimoire/hook.log`(512KB 상한)에 남깁니다. 동기화를 직접 하지는 않고, 세션 시작 때 필요하면 백그라운드 `grimoire sync`를 띄우기만 합니다(아래). DB 쓰기 잠금은 최대 1.5초만 기다려 Claude Code의 훅 timeout에 걸리지 않습니다. `GRIMOIRE_HOOKS=0`이면 주입을 끄고, `grimoire doctor`가 훅 항목을 점검합니다.
+- **git worktree**(Claude Code는 세션마다 `.claude/worktrees/<세션>`을 엽니다)는 본 레포의 기억을 같이 씁니다. 워크트리는 따로 등록되지 않고 본 레포로 등록되며, 레포 폴더 밖에 만든 워크트리의 파일도 같은 경로로 풉니다(그 `.git` 파일을 읽어서 — 편집마다 git을 띄우지 않습니다). 심볼릭 링크·정션(예: `~/code` → 다른 디스크)으로 연 파일도 등록 레포로 풉니다. 워크트리에서 만든 커밋은 그 워크트리의 HEAD에 묶입니다. 예전 버전이 워크트리를 따로 등록해 두었으면 `grimoire doctor`가 알려 줍니다.
+- **같은 변경은 한 번만**: PR을 squash로 합치면 같은 변경이 두 번 남습니다(브랜치 원본 커밋과 `(#N)` 커밋). 공변경·fix 수·최근 커밋은 제목과 파일 집합으로 둘을 접어 세고, 브랜치 커밋에 묶인 *왜*는 squash 커밋에서도 찾습니다.
 
 ### 커밋에 묶인 "왜"
 
@@ -125,7 +134,7 @@ Tests: tests/search.test.ts
 1. **커밋 트레일러, 훅 없이.** 커밋 메시지 마지막 문단의 `Key: value` 줄을 `git interpret-trailers`와 같은 규칙으로 읽습니다. Lore(`Constraint`, `Rejected: 대안 | 이유`, `Directive`, `Tested`, `Not-tested` …), QAC(`Agent`, `Mode`, `What`, `Why`), 플랫폼 꼬리표(`Claude-Session`, `Agent-Logs-Url`, `Co-Authored-By` …). 값은 자유 문자열이고 모르는 키도 저장합니다. `Co-Authored-By: Claude…`·`Claude-Session`·`Agent-Logs-Url`·`Agent:`가 있으면 에이전트가 만든 커밋으로 표시합니다. 옛 DB는 다음 동기화 때 레포당 한 번 백필됩니다.
 2. **세션 캡처, 훅이 있을 때.** `UserPromptSubmit`은 프롬프트(슬래시 명령·서브에이전트 제외), `PostToolUse`는 테스트·린트·타입체크 명령과 결과, 편집한 줄의 해시를 모읍니다. `git commit`이 성공하면 직전 커밋 이후의 것을 새 sha에 묶습니다: 프롬프트(최대 10건, 각 1,000자), 검증(최대 20건), 그리고 *dropped* — 세션에서 고쳤지만 그 줄이 커밋에 하나도 없는 파일. 커밋은 그 자리에서 색인되므로 다음 동기화를 기다리지 않습니다.
 
-프라이버시: 캡처는 훅을 설치했을 때만 켜집니다(`GRIMOIRE_CAPTURE=0`이면 주입은 두고 캡처만 끔). 저장 전에 `<private>…</private>` 구간, 붙여 넣은 블록, API 토큰·키·JWT, `password=…` 류 값은 `[redacted]`로 바뀝니다. 도구 출력은 실패한 검증의 마지막 300자 말고는 저장하지 않습니다. 커밋에 묶이지 않은 기록은 14일 뒤 지웁니다. 전부 로컬 SQLite 파일 안에 있고 git에는 아무것도 쓰지 않습니다.
+프라이버시: 캡처는 훅을 설치했을 때만 켜집니다(`GRIMOIRE_CAPTURE=0`이면 주입은 두고 캡처만 끔). 저장 전에 `<private>…</private>` 구간, 붙여 넣은 블록, API 토큰·키·JWT, `password=…` 류 값(`OPENAI_API_KEY=…`처럼 접두 붙은 이름 포함), 연결 문자열의 비밀번호는 `[redacted]`로 바뀝니다 — 노트에도 같은 규칙이 적용되고, 옛 버전이 저장한 기록은 업그레이드 때 한 번 정리됩니다. 도구 출력은 실패한 검증의 마지막 300자 말고는 저장하지 않습니다. 커밋에 묶이지 않은 기록은 14일 뒤 지웁니다. 전부 로컬 SQLite 파일 안에 있고 git에는 아무것도 쓰지 않습니다.
 
 ### 현재 코드 색인
 
@@ -144,7 +153,7 @@ Tests: tests/search.test.ts
 `detail: "summary"`로 검색하면 결과에 `changed`("webhook.ts: dedupeWebhookEvent")로 실립니다. 기본값은 간결한 목록입니다. 오프라인 평가에서 summary는 응답을 66% 키웠지만, 검색 한 번으로 답할 수 있는 비율을 유의하게 올리지 못했습니다(docs/improvement-plan.md §7).
 이 이름들도 검색되지만, 제목·본문·경로만으로 결과가 모자랄 때 채우는 데만 씁니다(지금은 어디에도 없는 지워진 함수 등). 순위에 섞으면 검색이 2~3배 느려지는데, 오프라인 평가에서 정확도 이득은 아직 유의하지 않습니다(docs/improvement-plan.md §7).
 
-서버는 기동 직후 등록된 레포를 백그라운드로 동기화하고, 이어서 diff 단계를 채웁니다. 작업 중인 레포는 검색 전에 15초가 지났으면 다시 동기화하므로 방금 만든 커밋도 검색됩니다. 기동 시 동기화를 끄려면 `GRIMOIRE_SYNC_ON_START=0`을 주세요.
+서버는 기동 직후 등록된 레포를 백그라운드로 동기화하고, 이어서 diff 단계를 채웁니다. 작업 중인 레포는 검색 전에 15초가 지났으면 다시 동기화하므로 방금 만든 커밋도 검색됩니다. 훅을 설치했다면 세션 시작 훅도 그 세션의 레포를 마지막으로 동기화한 지 10분이 넘었거나(또는 업그레이드로 공변경 이력이 비었으면) 백그라운드로 `grimoire sync`를 띄웁니다 — 훅은 기다리지 않습니다. 둘 다 끄려면 `GRIMOIRE_SYNC_ON_START=0`을 주세요.
 
 ### 검색 품질 재기
 
@@ -218,6 +227,16 @@ grimoire update --dry-run  # 무엇을 실행할지만 보기
   민감한 레포는 등록하지 말거나 `grimoire remove <repo>`로 빼세요.
 - macOS·Linux에서는 DB를 나만 읽을 수 있게(`chmod 600`) 만듭니다. Windows에서는 chmod가 의미 없어 사용자 프로필(`%USERPROFILE%\.grimoire`)의 NTFS 권한에 기대므로, `GRIMOIRE_HOME`을 공유 폴더로 지정하지 마세요.
 
+### 보안 스캐너 경고
+
+Socket 같은 스캐너는 배포된 패키지에 공급망 경고 몇 개를 띄웁니다. 모두 취약점이 아니며, 각각의 출처는 다음과 같습니다.
+
+- **Network access** — MCP SDK(`@modelcontextprotocol/server`)에 HTTP 전송·OAuth 헬퍼가 함께 들어 있어 `fetch` 호출이 잡힙니다. Grimoire는 stdio 전송만 쓰므로 그 코드는 실행되지 않습니다.
+- **URL strings** — MCP SDK가 JSON Schema 메타스키마 ID(`json-schema.org/...`)를 식별자 문자열로 갖고 있을 뿐 요청하지 않습니다. 나머지 하나는 위에 적은 Grimoire 자체의 `api.github.com` 업데이트 확인입니다.
+- **AI-detected code anomaly** — MCP SDK가 쓰는 `zod`가 속도를 위해 `new Function`으로 객체 파서를 만듭니다. 생성되는 코드는 소스에 정의된 스키마에서 나오며 사용자 입력과 무관합니다.
+
+설치 스크립트(`postinstall`)는 없고, 이 밖에 외부로 나가는 것은 없습니다.
+
 ## 개발
 
 ```bash
@@ -228,6 +247,7 @@ npm run e2e:agent   # 에이전트 하네스 (아래, 실제 Claude 호출)
 npm run bench       # 핀포인트 벤치 (아래, 실제 Claude 호출)
 npm run taskbench   # 작업 완수 벤치: 실제 fix 작업을 Grimoire 있음/없음으로 (아래, 실제 Claude 호출)
 npm run eval -- --cochange   # 오프라인: 공변경이 같이 바뀔 파일을 맞히나 (시간 분할)
+npm run upgrade-check -- --from <옛 dist>   # 지난 릴리스로 만든 DB를 지금 소스로 열어 마이그레이션·공변경 재계산·비밀 지우기 확인 (임시 폴더만)
 ```
 
 ### MCP 종단 하네스 (`e2e/harness.ts`)
@@ -300,6 +320,7 @@ npm run taskbench -- --run --tasks bench/tasks.local.json --seeds 3             
 
 - **채굴**은 테스트 패치만 부모에 얹었을 때 3회 모두 실패하고 커밋 전체가 3회 모두 통과하는 fix 커밋만 남깁니다(뒤집히는 테스트는 버림). 필터: 머지 아님, 파일 1~15개, 테스트 파일 ≥1과 소스 ≥1, 비테스트 ≤100줄, 의존성 파일 변경 없음. 테스트를 건드린 커밋의 5~10%쯤 남습니다. 그다음 각 사례의 `prompt`를 증상 서술로 고치세요(기본값은 커밋 제목이라 수정 힌트가 샐 수 있습니다).
 - **실행**은 부모 커밋의 새 worktree에서 `claude -p`에 프롬프트를 줍니다. 기본은 Claude 구독(Pro/Max) 로그인으로 돌아 추가 요금이 없고 구독 사용량을 씁니다. 결과의 `$`는 API 환산 추정치일 뿐입니다. 내 `~/.claude` 설정은 두 모드에 똑같이 적용되고, 전역에 설치한 Grimoire 훅은 `GRIMOIRE_HOOKS=0`으로 꺼서 대조군에 새거나 실험 프롬프트가 실제 DB에 기록되지 않게 합니다. `--bare`를 주면 사용자 설정을 모두 끈 깨끗한 비교가 되지만, 문서상 `ANTHROPIC_API_KEY`가 필요하고 토큰당 과금됩니다. `grimoire` 모드는 부모까지만 보이는 임시 색인(시간 마스킹)과 편집 직전 훅(`--settings`)을 씁니다. 채점은 실제 테스트 패치를 얹어(`pass`), 부모 테스트를 얹어(`p2p_broken`), 고친 파일을 실제 fix와 대조(`stray`·`missed`)하고, `total_cost_usd`/`modelUsage`의 청구 비용·턴·되돌린 편집·churn 비율을 적습니다.
+- 실행마다 **그리모어가 에이전트에 실제로 닿았는지**도 남깁니다. 훅이 맥락을 몇 번 넣었는지(이벤트별, 글자 수·파일까지, `GRIMOIRE_HOOK_TRACE`)와 그리모어 MCP 도구를 몇 번 불렀는지입니다. `grimoire` 모드의 훅은 `grimoire install claude-code --hooks`가 쓰는 것과 같은 묶음이고, 캡처는 임시 DB에만 켭니다. 요약은 짝을 그리모어가 닿은 것과 안 닿은 것으로 나눠 보여 주고(안 닿은 짝의 비용 차이는 그리모어 덕이 아니라 실행 간 흔들림), 대조군에 훅 주입이 새면 경고합니다.
 - 요약은 사례·시드별로 짝짓고, 비용·턴은 둘 다 푼 짝(`_ok`)에서 윌콕슨 부호 순위 p와 함께 비교합니다. 채택 기준은 보기 전에 고정돼 있습니다(§3-4): 통과율 안 떨어지고, 회귀 안 늘고, 청구 비용이나 턴이 15% 이상 줄거나 `missed`/`p2p_broken`이 유의하게 줄 것. 규모: 파일럿 10사례 × 1시드는 20회, 본 실험 40 × 3 × 2는 240회라 구독 사용량 한도를 크게 씁니다. 먼저 파일럿으로.
 
 ### 릴리스 내기

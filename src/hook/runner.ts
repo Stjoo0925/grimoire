@@ -16,6 +16,8 @@ import path from "node:path";
 import {
   bindToCommit,
   commitContextOf,
+  commitDir,
+  committedShas,
   commitSucceeded,
   isGitCommit,
   isSymptomOnly,
@@ -26,19 +28,25 @@ import {
   recordEvent,
   recordPrompt,
   verifyOutcome,
+  verifyRecord,
   whyLine,
 } from "../core/capture";
 import { isIndexable } from "../core/code";
 import { grimoireHome, type Env } from "../core/config";
-import { fileContext, formatFileContext, TEST_PATH, HOOK_BUDGET } from "../core/context";
+import { fileContext, formatFileContext, needsCochangeBackfill, TEST_PATH, HOOK_BUDGET } from "../core/context";
 import type { DB } from "../core/db";
-import { addedLines, headSha } from "../core/git";
-import { indexCommitSha, relativeToRepo, repoOfPath, type RepoRow } from "../core/indexer";
+import { addedLines, commitTime, dirtyFiles, headSha } from "../core/git";
+
+/** git 요약 줄이 없을 때 "방금 만든 커밋"으로 보는 HEAD 커밋 시각의 한도 */
+const FRESH_COMMIT_MS = 2 * 60_000;
+import { indexCommitSha, resolveRepoFile, type RepoRow } from "../core/indexer";
 
 /** 훅이 돌려주는 것 — Claude Code 규약(JSON은 hookSpecificOutput, 일부 이벤트는 plain stdout) */
 export interface HookOutput {
   json?: { hookSpecificOutput: { hookEventName: string; additionalContext: string } };
   stdout?: string;
+  /** 응답을 낸 뒤 백그라운드로 동기화할 레포 경로 — 훅은 기다리지 않는다(hook.ts가 떼어 낸 프로세스로 띄운다) */
+  syncRepo?: string;
 }
 
 export interface HookInput {
@@ -90,13 +98,28 @@ export function loadSession(env: Env, sessionId: string): SessionState {
   }
 }
 
-export function saveSession(env: Env, sessionId: string, state: SessionState): void {
+/**
+ * 세션 파일 저장 — 실패해도 던지지 않는다(false). 세션 파일은 "이미 보여 줬다"를 기억하는 보조 장치라, 저장에 실패하면
+ * 다음에 한 번 더 보여 줄 뿐이다. 던지면 이미 만든 맥락까지 주입되지 않는다 — Windows에서는 다른 훅 프로세스가
+ * 읽는 중인 파일 위로 rename하면 EPERM/EBUSY가 난다(병렬 편집).
+ */
+export function saveSession(env: Env, sessionId: string, state: SessionState): boolean {
   const dir = sessionsDir(env);
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const file = path.join(dir, `${safeId(sessionId)}.json`);
   const temp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(temp, JSON.stringify({ ...state, updatedAt: new Date().toISOString() }), { mode: 0o600 });
-  fs.renameSync(temp, file);
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(temp, JSON.stringify({ ...state, updatedAt: new Date().toISOString() }), { mode: 0o600 });
+    fs.renameSync(temp, file);
+    return true;
+  } catch {
+    try {
+      fs.rmSync(temp, { force: true });
+    } catch {
+      // 남으면 pruneSessions가 14일 뒤 지운다
+    }
+    return false;
+  }
 }
 
 /** 오래된 세션 파일 정리 (SessionStart 때) */
@@ -165,24 +188,28 @@ function captureOn(context: HookContext, input: HookInput): boolean {
   return context.env.GRIMOIRE_CAPTURE !== "0" && !input.agent_id;
 }
 
-function sessionRepo(context: HookContext, input: HookInput): RepoRow | undefined {
-  return input.cwd ? repoOfPath(context.db, input.cwd) : undefined;
+/** 세션의 작업 폴더가 속한 등록 레포 — 레포 밖의 추가 작업 트리(git worktree)면 본 레포 */
+async function sessionRepo(context: HookContext, input: HookInput): Promise<RepoRow | undefined> {
+  return input.cwd ? (await resolveRepoFile(context.db, input.cwd))?.repo : undefined;
 }
 
-function userPromptSubmit(context: HookContext, input: HookInput): HookOutput | null {
+async function userPromptSubmit(context: HookContext, input: HookInput): Promise<HookOutput | null> {
   if (!captureOn(context, input) || typeof input.prompt !== "string" || !input.session_id) return null;
-  recordPrompt(context.db, input.session_id, sessionRepo(context, input)?.id ?? null, input.prompt);
+  recordPrompt(context.db, input.session_id, (await sessionRepo(context, input))?.id ?? null, input.prompt);
   return null;
 }
 
 async function postToolUse(context: HookContext, input: HookInput): Promise<HookOutput | null> {
   if (!captureOn(context, input) || !input.session_id) return null;
-  const repo = sessionRepo(context, input);
+  const repo = await sessionRepo(context, input);
   if (!repo) return null;
   if (EDIT_TOOLS.has(input.tool_name ?? "")) {
     const file = editedPath(input);
     if (!file) return null;
-    const relative = relativeToRepo(repo.path, file);
+    // 세션 레포의 파일만 — 다른 레포 파일을 고친 것은 이 세션의 커밋에 묶이지 않는다
+    const resolved = await resolveRepoFile(context.db, file);
+    if (!resolved || resolved.repo.id !== repo.id) return null;
+    const relative = resolved.relative;
     const added = newText(input.tool_input ?? {});
     recordEvent(context.db, { sessionId: input.session_id, repoId: repo.id, kind: "edit", text: relative, path: relative, lineHashes: lineHashes(added) });
     return null;
@@ -190,9 +217,14 @@ async function postToolUse(context: HookContext, input: HookInput): Promise<Hook
   if (input.tool_name !== "Bash") return null;
   const command = typeof input.tool_input?.command === "string" ? input.tool_input.command : "";
   if (!command) return null;
+  // 백그라운드로 띄운 명령(run_in_background)은 응답이 "실행 중" 안내뿐이라 결과를 모른다 — 실패 요약이 없다고
+  // 통과로 적으면 안 되고, git commit도 아직 안 끝났을 수 있다(HEAD가 그 커밋이 아니다). 둘 다 건너뛴다
+  if (input.tool_input?.run_in_background === true || typeof input.tool_response?.backgroundTaskId === "string") return null;
+  // 막혔을 때 2단계 맥락은 끝에 돌려준다 — `npm test; git commit`처럼 한 명령에 커밋도 있으면 그 커밋부터 묶어야 한다
+  let struggle: HookOutput | null = null;
   if (isVerifyCommand(command)) {
     const outcome = verifyOutcome(input.tool_response);
-    const text = `${command.trim().slice(0, 200)} → ${outcome.ok ? "pass" : "fail"}${outcome.tail ? ` :: ${outcome.tail}` : ""}`;
+    const text = verifyRecord(command, outcome);
     recordEvent(context.db, { sessionId: input.session_id, repoId: repo.id, kind: "verify", text });
     if (!outcome.ok) {
       // 막혔을 때 2단계(§3-5): 이 세션의 첫 번째 실패한 검증 뒤 한 번만, 편집 중인 파일들의 왜·검증·버린 편집을 건넨다.
@@ -202,19 +234,35 @@ async function postToolUse(context: HookContext, input: HookInput): Promise<Hook
         state.struggled = true;
         saveSession(context.env, input.session_id, state);
         const text = struggleContext(context, repo, input.session_id);
-        if (text) return { json: { hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: text } } };
+        if (text) struggle = { json: { hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: text } } };
       }
     }
   }
   if (isGitCommit(command) && commitSucceeded(input.tool_response)) {
-    const sha = await headSha(repo.path);
-    if (!sha) return null;
+    // 커밋은 명령이 돈 작업 폴더의 HEAD다 — 워크트리에서 일하는 세션이면 본 레포 폴더의 HEAD와 다르다
+    // (본 레포 폴더에서 읽으면 세션 기록이 엉뚱한 커밋에 묶인다). 커밋 저장소는 같으므로 색인은 본 레포로 한다
+    const cwd = input.cwd ?? repo.path;
+    const where = commitDir(command, cwd);
+    // `git -C ../다른레포 commit`이면 그 커밋은 이 세션 레포의 것이 아니다 — 세션 기록을 남의 sha에 묶지 않는다
+    if (where !== cwd && (await resolveRepoFile(context.db, where))?.repo.id !== repo.id) return struggle;
+    const sha = await headSha(where);
+    if (!sha) return struggle;
+    // git이 찍은 새 커밋 sha와 읽은 HEAD가 다르면 커밋은 다른 곳(cd로 옮겨 간 다른 레포 등)에서 만들어졌다 — 묶지 않는다
+    const made = committedShas(input.tool_response);
+    if (made.length > 0 && !made.some((short) => sha.startsWith(short))) return struggle;
+    // 요약 줄이 없으면(-q 등) HEAD가 방금 만든 커밋인지 시각으로 본다 — 오래된 HEAD(커밋할 것 없음, 다른 곳에서 커밋)에 묶지 않는다
+    if (made.length === 0) {
+      const at = await commitTime(where, sha);
+      if (at !== null && Date.now() - at > FRESH_COMMIT_MS) return struggle;
+    }
     // 커밋을 바로 색인해 두면(다음 동기화를 기다리지 않고) 묶을 수 있고 검색에도 바로 걸린다
     const files = (await indexCommitSha(context.db, repo, sha)) ?? [];
-    const addedHashes = new Set(lineHashes((await addedLines(repo.path, sha)).join("\n")));
-    bindToCommit(context.db, { sessionId: input.session_id, repoId: repo.id, sha, files, addedHashes });
+    // 커밋 뒤에도 변경이 남은 파일 — 나눠 커밋하는 중이면 이번 커밋에 없는 편집은 "버림"이 아니라 아직 커밋 전이다
+    const [added, stillDirty] = await Promise.all([addedLines(where, sha), dirtyFiles(where)]);
+    const addedHashes = new Set(lineHashes(added.join("\n")));
+    bindToCommit(context.db, { sessionId: input.session_id, repoId: repo.id, sha, files, addedHashes, stillDirty });
   }
-  return null;
+  return struggle;
 }
 
 /** 편집 도구가 새로 넣는 텍스트 (Edit의 new_string, Write의 content, MultiEdit의 edits[].new_string) */
@@ -236,7 +284,9 @@ function struggleContext(context: HookContext, repo: RepoRow, sessionId: string)
   const edited = [...new Set(pendingEvents(context.db, sessionId, repo.id).filter((event) => event.kind === "edit" && event.path).map((event) => event.path as string))];
   if (edited.length === 0) return "";
   const lines: string[] = [`Grimoire: first failing check in this session — what past commits on the files you're editing recorded`];
-  const seen = new Set<string>();
+  // 본 커밋은 줄 것이 없었어도 다시 보지 않는다 — 여러 파일이 같은 커밋을 공유한다
+  const checked = new Set<string>();
+  let shown = 0;
   for (const file of edited.slice(0, 5)) {
     const recent = context.db
       .prepare(
@@ -245,18 +295,23 @@ function struggleContext(context: HookContext, repo: RepoRow, sessionId: string)
       )
       .all(repo.id, file) as { sha: string }[];
     for (const { sha } of recent) {
-      if (seen.has(sha) || seen.size >= STRUGGLE_COMMITS) continue;
+      if (checked.has(sha) || shown >= STRUGGLE_COMMITS) continue;
+      checked.add(sha);
       const view = commitContextOf(context.db, repo.id, sha);
       if (!view) continue;
-      seen.add(sha);
+      // 줄 것부터 모은다 — Co-Authored-By 같은 꼬리표만 있는 커밋은 머리줄만 남는 빈 항목이 되므로 뺀다(도그푸딩).
+      // 이 커밋에 줄 것이 없으면 자리(STRUGGLE_COMMITS)도 쓰지 않고 다음 커밋을 본다
+      const details: string[] = [];
       const why = whyLine(context.db, repo.id, sha, 160);
-      lines.push(`${sha.slice(0, 10)} ${file}:`);
-      if (why) lines.push(`  why: ${why}`);
+      if (why) details.push(`  why: ${why}`);
       const verify = [...view.verify.slice(-2), ...view.trailers.filter((trailer) => trailer.key === "tested").map((trailer) => trailer.value)];
-      if (verify.length > 0) lines.push(`  verified: ${verify.join(" · ").slice(0, 200)}`);
-      if (view.dropped.length > 0) lines.push(`  dropped (edited then left out of the commit): ${view.dropped.slice(0, 4).join(", ")}`);
+      if (verify.length > 0) details.push(`  verified: ${verify.join(" · ").slice(0, 200)}`);
+      if (view.dropped.length > 0) details.push(`  dropped (edited then left out of the commit): ${view.dropped.slice(0, 4).join(", ")}`);
       const rejected = view.trailers.filter((trailer) => trailer.key === "rejected" || trailer.key === "constraint").slice(0, 2);
-      for (const trailer of rejected) lines.push(`  ${trailer.key}: ${trailer.value.slice(0, 160)}`);
+      for (const trailer of rejected) details.push(`  ${trailer.key}: ${trailer.value.slice(0, 160)}`);
+      if (details.length === 0) continue;
+      shown++;
+      lines.push(`${sha.slice(0, 10)} ${file}:`, ...details);
     }
   }
   if (lines.length === 1) return "";
@@ -267,16 +322,31 @@ function struggleContext(context: HookContext, repo: RepoRow, sessionId: string)
 /** 세션 시작 요약의 글자 예산 */
 const START_BUDGET = 600;
 
+/** 마지막 동기화가 이보다 오래면 세션 시작 때 백그라운드로 다시 동기화한다 */
+export const SYNC_STALE_MS = 10 * 60_000;
+
+/**
+ * 세션 시작 때 이 레포를 백그라운드로 동기화해야 하나 — MCP 없이 훅만 쓰면 아무도 sync를 돌리지 않아
+ * 터미널에서 한 커밋·pull로 받은 커밋이 색인되지 않고, 업그레이드로 비워진 공변경 이력도 그대로 남는다.
+ * GRIMOIRE_SYNC_ON_START=0이면 MCP 서버와 똑같이 끈다.
+ */
+export function needsBackgroundSync(db: DB, env: Env, repo: RepoRow, now = Date.now()): boolean {
+  if (env.GRIMOIRE_SYNC_ON_START === "0") return false;
+  if (!repo.synced_at || needsCochangeBackfill(db, repo.id)) return true;
+  return now - Date.parse(repo.synced_at) > SYNC_STALE_MS;
+}
+
 /**
  * SessionStart(startup·clear·compact): 작업 레포의 "지난 세션 이후 내 커밋 + 묶인 왜 + 커밋 안 된 편집"을 600자 안에
  * plain stdout으로 (이 이벤트는 stdout이 그대로 컨텍스트가 된다). resume은 세션 파일을 이어 쓸 뿐 다시 내지 않는다.
  */
-function sessionStart(context: HookContext, input: HookInput): HookOutput | null {
+async function sessionStart(context: HookContext, input: HookInput): Promise<HookOutput | null> {
   pruneSessions(context.env);
   pruneEvents(context.db);
-  if (input.source === "resume") return null;
-  const repo = sessionRepo(context, input);
+  const repo = await sessionRepo(context, input);
   if (!repo) return null;
+  const sync = needsBackgroundSync(context.db, context.env, repo) ? { syncRepo: repo.path } : null;
+  if (input.source === "resume") return sync;
   const mine = context.me.map((email) => email.toLowerCase());
   const recent = context.db
     .prepare(
@@ -285,7 +355,7 @@ function sessionStart(context: HookContext, input: HookInput): HookOutput | null
         ORDER BY authored_at DESC LIMIT 3`,
     )
     .all(repo.id, ...mine) as { sha: string; date: string; email: string; subject: string }[];
-  if (recent.length === 0) return null;
+  if (recent.length === 0) return sync;
   const lines = [`Grimoire: ${repo.name} — recent commits${mine.length > 0 ? " (me)" : ""}`];
   for (const commit of recent) {
     const why = whyLine(context.db, repo.id, commit.sha, 100);
@@ -306,16 +376,17 @@ function sessionStart(context: HookContext, input: HookInput): HookOutput | null
     lines.splice(lines.length - 2, 1);
     text = lines.join("\n");
   }
-  return { stdout: text };
+  return { stdout: text, ...sync };
 }
 
-function preToolUse(context: HookContext, input: HookInput): HookOutput | null {
+async function preToolUse(context: HookContext, input: HookInput): Promise<HookOutput | null> {
   if (!input.tool_name || !EDIT_TOOLS.has(input.tool_name)) return null;
   const file = editedPath(input);
   if (!file) return null;
-  const repo = repoOfPath(context.db, file);
-  if (!repo) return null;
-  const relative = relativeToRepo(repo.path, file);
+  // 레포 폴더 안이면 git을 부르지 않는다. 레포 밖 워크트리의 파일이면 git 한 번으로 본 레포를 찾는다
+  const resolved = await resolveRepoFile(context.db, file);
+  if (!resolved) return null;
+  const { repo, relative } = resolved;
   // 테스트·생성·비소스 파일은 건너뛴다 — 맥락을 줄 가치가 낮고 매 편집마다 글자를 쓴다
   if (TEST_PATH.test(relative) || !isIndexable(relative, 0)) return null;
 

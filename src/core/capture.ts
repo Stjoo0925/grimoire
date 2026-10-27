@@ -9,8 +9,10 @@
  * 원문만, 요약 없음. 저장되는 것은 사용자의 말·명령 문자열·줄 해시뿐이다(도구 출력은 실패 stderr 끝 300자만).
  */
 import { createHash } from "node:crypto";
+import path from "node:path";
 
 import type { DB } from "./db";
+import { noteDocFields } from "./note-doc";
 import { redact } from "./redact";
 import { parseTrailers, whyLines, type Trailer } from "./trailers";
 
@@ -36,35 +38,153 @@ const STDERR_TAIL = 300;
 const HASHES_PER_EDIT = 200;
 export const SESSION_TTL_DAYS = 14;
 
-/** 검증 명령 — 테스트·린트·타입체크·빌드 */
-export const VERIFY_COMMAND =
-  /\b(npm (test|run (test|e2e|typecheck|lint|check|build)\w*)|npx (vitest|jest|tsc|eslint|playwright)|pnpm (test|run (test|lint|typecheck)\w*)|yarn (test|lint|typecheck)|bun test|pytest|python -m (pytest|unittest)|go (test|vet)|cargo (test|check|clippy)|gradle(w)? (test|check)|mvn (test|verify)|make (test|check)|dotnet test|mix test|rspec|bundle exec rspec|phpunit|swift test|ruff|mypy|flake8)\b/;
-const GIT_COMMIT = /(^|[;&|]\s*)git\s+(-C\s+\S+\s+)?commit\b/;
+/**
+ * 검증 명령 — 테스트·린트·타입체크·빌드. 명령 조각(&&·;·| 로 나눈 것)의 **맨 앞**에서만 본다 —
+ * 어디서든 낱말만 맞으면 `git commit -m "pytest 경고 정리"`·`echo npm test`·`grep "npm test"`까지 검증으로 잡혀
+ * 커밋에 가짜 "verified … → pass"가 붙었다.
+ */
+const TEST_TOOLS = "vitest|jest|tsc|eslint|playwright|mocha|ava";
+export const VERIFY_COMMAND = new RegExp(
+  "^(?:" +
+    [
+      "npm (?:test|t|run (?:test|e2e|typecheck|lint|check|build)[\\w:-]*)",
+      `npx (?:${TEST_TOOLS})`,
+      `pnpm (?:test|run (?:test|e2e|lint|typecheck|check|build)[\\w:-]*|exec (?:${TEST_TOOLS})|${TEST_TOOLS})`,
+      `yarn (?:test|lint|typecheck|run (?:test|lint|typecheck)[\\w:-]*|${TEST_TOOLS})`,
+      `bunx? (?:test|${TEST_TOOLS})`,
+      "node --test",
+      "deno (?:test|check|lint)",
+      `(?:${TEST_TOOLS}|pytest|ruff|mypy|flake8|rspec|phpunit)`,
+      "python3? -m (?:pytest|unittest|mypy)",
+      "(?:uv|poetry|pipenv) run (?:pytest|ruff|mypy)",
+      "go (?:test|vet)",
+      "cargo (?:test|check|clippy|nextest)",
+      "(?:\\./)?gradlew? (?:test|check)",
+      "mvn (?:test|verify)",
+      "make (?:test|check)",
+      "dotnet test",
+      "mix test",
+      "bundle exec (?:rspec|rails test)",
+      "rails test",
+      "php artisan test",
+      "swift test",
+    ].join("|") +
+    ")\\b",
+);
+/** 명령 조각 앞의 `CI=1 FOO=bar ` 같은 환경 변수 */
+const LEADING_ENV = /^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+)+/;
+/**
+ * `git … commit` — 앞의 환경 변수(`GIT_AUTHOR_NAME=x`)와 git 전역 옵션(`-C <경로>`·`-c k=v`·`--no-pager` 등)이
+ * 몇 개든 붙을 수 있다. 1번 묶음이 전역 옵션 전체. `commit-tree` 같은 다른 명령은 아니다.
+ */
+const GIT_COMMIT =
+  /(?:^|[;&|]\s*)(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*git((?:\s+(?:-C\s+(?:"[^"]+"|'[^']+'|\S+)|-c\s+\S+|--[\w-]+(?:=\S+)?))*)\s+commit(?=\s|$|[;&|])/;
 const COMMIT_FAILED = /nothing to commit|nothing added to commit|error:|fatal:|Aborting commit/i;
 
+/** 명령에서 검증 조각만 — `cd "긴 경로" && npm test 2>&1 | tail`이면 "npm test 2>&1". 앞의 환경 변수는 뗀다 */
+function verifySegments(command: string): string[] {
+  return command
+    .split(/&&|\|\|?|;|\n/)
+    .map((segment) => segment.trim().replace(LEADING_ENV, ""))
+    .filter((segment) => VERIFY_COMMAND.test(segment));
+}
+
 export function isVerifyCommand(command: string): boolean {
-  return VERIFY_COMMAND.test(command);
+  return verifySegments(command).length > 0;
 }
 
 export function isGitCommit(command: string): boolean {
   return GIT_COMMIT.test(command);
 }
 
+/**
+ * `git commit`이 돈 폴더 — `git -C <경로> commit`이면 그 경로(따옴표 허용, 상대경로는 cwd 기준), 아니면 cwd.
+ * 에이전트가 다른 폴더(다른 워크트리)를 -C로 가리키고 커밋하면 세션 폴더의 HEAD는 그 커밋이 아니다.
+ */
+export function commitDir(command: string, cwd: string): string {
+  const options = GIT_COMMIT.exec(command)?.[1] ?? "";
+  // -C가 여럿이면 git처럼 차례로 이어 붙인다 (`-C a -C b` → a/b)
+  let dir = cwd;
+  for (const match of options.matchAll(/-C\s+(?:"([^"]+)"|'([^']+)'|(\S+))/g)) dir = path.resolve(dir, match[1] ?? match[2] ?? match[3]);
+  return dir;
+}
+
 /** `git commit`이 실제로 커밋을 만들었나 — tool_response로 추정 */
+/** 커밋이 만들어지면 git이 찍는 요약 줄 — "[main 1a2b3c4] 제목", "[main (root-commit) 1a2b3c4] …", "[detached HEAD 1a2b3c4] …" */
+const COMMIT_SUMMARY = /^\[[^\]\n]*\b([0-9a-f]{7,40})\] /gm;
+
+/**
+ * 요약 줄에 찍힌 새 커밋의 짧은 sha들. 훅이 읽은 HEAD가 이것과 다르면 커밋은 다른 곳에서 만들어진 것이다
+ * (`cd ../다른레포 && git commit` — 세션 폴더의 HEAD는 예전 커밋이라 거기 묶으면 엉뚱한 커밋에 기록이 붙는다).
+ */
+export function committedShas(response: { stdout?: unknown; stderr?: unknown } | undefined): string[] {
+  const text = `${String(response?.stdout ?? "")}\n${String(response?.stderr ?? "")}`;
+  return [...text.matchAll(COMMIT_SUMMARY)].map((match) => match[1]);
+}
+
 export function commitSucceeded(response: { stdout?: unknown; stderr?: unknown; interrupted?: unknown } | undefined): boolean {
   if (!response || response.interrupted === true) return false;
   const text = `${String(response.stdout ?? "")}\n${String(response.stderr ?? "")}`;
+  // 요약 줄이 있으면 커밋은 만들어졌다 — pre-commit 훅의 "error:" 경고나, 같은 명령의 뒤쪽(`&& git push`) 실패가
+  // 찍혀도 실패로 보지 않는다. 요약 줄이 없을 때(-q 등)만 실패 낱말로 짐작한다
+  if (committedShas(response).length > 0) return true;
   return !COMMIT_FAILED.test(text);
 }
 
-/** 검증 결과 추정 — exit code가 없으므로 stderr가 비고 중단되지 않았으면 통과로 본다 */
+/**
+ * 검증 도구들이 실패했을 때 실제로 찍는 요약 꼴. Bash 응답에는 종료 코드가 없어 출력으로 짐작하는데,
+ * "error"·"FAIL" 낱말이나 stderr가 비지 않은 것만으로는 판정하지 않는다 — git의 줄바꿈 경고, npm warn, 검증 명령과 함께
+ * 돌린 다른 명령의 출력(소스 줄의 `row.error` 등)이 모두 실패로 잡혔다(도그푸딩). 실패 수는 1 이상일 때만 센다.
+ */
+const FAILURE_SUMMARY: RegExp[] = [
+  /^ℹ fail [1-9]\d*/m, // node:test
+  /^# fail [1-9]\d*/m, // node:test TAP
+  /^not ok \d+ /m, // TAP
+  // 실패 수는 요약 줄 모양일 때만 — 통과한 테스트 이름에 "2 failed attempts" 같은 말이 들어 있을 수 있다
+  /^\s*Tests?:?\s+(.*[,|]\s*)?[1-9]\d* failed\b/m, // jest "Tests:  1 failed, 2 passed" · vitest "Tests  1 failed | 2 passed"
+  /^\s*Test Files\s+[1-9]\d* failed\b/m, // vitest
+  /^\s+[1-9]\d* failing\b/m, // mocha
+  /^=+ .*\b[1-9]\d* (failed|errors?)\b.*=+\s*$/m, // pytest "==== 1 failed, 2 passed in 0.1s ===="
+  /^\s*FAIL\s+\S/m, // jest·vitest 파일 줄
+  /^(--- )?FAIL\b/m, // go test
+  /^FAILED\s+\S/m, // pytest
+  /\btest result: FAILED\b/, // cargo test
+  /\berror TS\d+:/, // tsc
+  /^\S+\.(ts|tsx|js|jsx|py|go|rs):\d+(:\d+)?: error\b/m, // 컴파일러 꼴 "file:line: error"
+  /^error(\[E\d+\])?: /m, // rustc·cargo
+  /^npm (ERR!|error) /m, // npm (10+는 "npm error")
+  /✖ [1-9]\d* problems?\b/, // eslint
+  /^Found [1-9]\d* errors?\b/m, // tsc --build·mypy
+  /\bexit(ed)? (with )?code [1-9]\d*\b/i, // 실행기가 남기는 종료 코드
+  // 요약을 찍기 전에 죽은 경우 — 러너·빌드 도구가 시작부터 실패하면 위의 요약 줄이 없다
+  /^Traceback \(most recent call last\):/m, // python
+  /^Error: Cannot find module\b/m, // node: 없는 모듈로 러너가 못 뜸
+  /^\w*Error \[ERR_[A-Z_]+\]/m, // node 내부 오류 코드 (ERR_MODULE_NOT_FOUND 등)
+  /^error during build:/m, // vite
+  /^ERROR in /m, // webpack
+  /^Build failed\b/im, // esbuild·tsup 등
+];
+
 export function verifyOutcome(response: { stdout?: unknown; stderr?: unknown; interrupted?: unknown } | undefined): { ok: boolean; tail: string } {
-  const stderr = String(response?.stderr ?? "").trim();
   const stdout = String(response?.stdout ?? "");
-  const failedWords = /\b(FAIL|failed|failing|error|Error|✗|✖|not ok)\b/.test(stdout) && !/\b0 (failed|failing)\b/.test(stdout);
-  const ok = response?.interrupted !== true && !stderr && !failedWords;
-  const tail = ok ? "" : (stderr || stdout).slice(-STDERR_TAIL).trim();
-  return { ok, tail };
+  const stderr = String(response?.stderr ?? "");
+  const text = `${stdout}\n${stderr}`;
+  const failed = response?.interrupted === true || FAILURE_SUMMARY.some((pattern) => pattern.test(text));
+  const tail = failed ? text.trim().slice(-STDERR_TAIL).trim() : "";
+  return { ok: !failed, tail };
+}
+
+/**
+ * 저장할 검증 기록 한 줄 — "명령 → pass|fail :: 실패 출력 끝". 명령과 출력은 저장 전에 비밀을 지운다
+ * (`API_KEY=sk-… npm test`처럼 명령에 값을 붙여 돌리거나, 실패 출력에 토큰이 찍힐 수 있다). 자르기 전에 지운다 —
+ * 자른 뒤 지우면 반쯤 잘린 토큰이 패턴에 안 걸려 남는다. 명령은 검증 조각만 남긴다 — 통째로 200자에서 자르면
+ * `cd "긴 경로" && …`의 경로가 자리를 다 먹어 무엇을 돌렸는지가 잘려 나갔다(실제 DB).
+ */
+export function verifyRecord(command: string, outcome: { ok: boolean; tail: string }): string {
+  const segments = verifySegments(command);
+  const cleanCommand = redact(segments.length > 0 ? segments.join(" && ") : command).trim().slice(0, 200);
+  const cleanTail = outcome.tail ? redact(outcome.tail) : "";
+  return `${cleanCommand} → ${outcome.ok ? "pass" : "fail"}${cleanTail ? ` :: ${cleanTail}` : ""}`;
 }
 
 /** 줄 해시 — 정확 해시와 공백 제거 해시 (Agent Blame 방식: 1.0 / 0.95) */
@@ -100,10 +220,22 @@ export function recordEvent(
   );
 }
 
-/** 프롬프트 하나를 기록한다 — 슬래시 명령·빈 것은 버리고, 비밀을 지우고, 길이를 자른다 */
+/** 슬래시 명령 이름 — `/goal`·`/review`·`/plugin:skill` (경로 `/src/a.ts`는 아니다) */
+const SLASH_COMMAND = /^\/[A-Za-z][\w:-]*(?=\s|$)/;
+
+/**
+ * 프롬프트 하나를 기록한다 — 빈 것은 버리고, 비밀을 지우고, 길이를 자른다. 슬래시 명령은 이름을 떼고 뒤에 사용자의 말이
+ * 남을 때만(`/goal 완성도를 계속 올려라` → "완성도를 계속 올려라") — `/clear`·`/model x`·`/loop 5m /foo`처럼 설정·인자뿐이면 버린다.
+ */
 export function recordPrompt(db: DB, sessionId: string, repoId: number | null, prompt: string): boolean {
-  const cleaned = redact(prompt).trim();
-  if (!cleaned || cleaned.startsWith("/")) return false;
+  let cleaned = redact(prompt).trim();
+  const command = SLASH_COMMAND.exec(cleaned);
+  if (command) {
+    cleaned = cleaned.slice(command[0].length).trim();
+    const words = cleaned.split(/\s+/).filter((word) => word && !/^[/-]/.test(word));
+    if (words.length < 2) return false;
+  }
+  if (!cleaned) return false;
   recordEvent(db, { sessionId, repoId, kind: "prompt", text: cleaned.slice(0, PROMPT_MAX) });
   return true;
 }
@@ -137,6 +269,11 @@ export interface BindInput {
   files: string[];
   /** 커밋 diff에 새로 들어간 줄의 해시 집합 (edit 이벤트의 해시와 대조해 dropped를 가린다) */
   addedHashes: Set<string>;
+  /**
+   * 커밋 뒤에도 작업 폴더에 변경이 남은 파일 (git status). 나눠서 커밋하는 중이면 이번 커밋에 없는 편집도 버린 게 아니라
+   * 아직 커밋 전이다 — dropped로 적지 않고 다음 커밋으로 넘긴다. 모르면(null·생략) 예전처럼 판정한다.
+   */
+  stillDirty?: Set<string> | null;
 }
 
 export interface BindResult {
@@ -157,8 +294,13 @@ export function bindToCommit(db: DB, input: BindInput): BindResult {
   const edits = events.filter((event) => event.kind === "edit").slice(-EDITS_PER_COMMIT);
   const committed = new Set(input.files);
   const dropped = new Set<string>();
+  const carried: SessionEvent[] = [];
   for (const edit of edits) {
     if (!edit.path || committed.has(edit.path)) continue;
+    if (input.stillDirty?.has(edit.path)) {
+      carried.push(edit);
+      continue;
+    }
     const hashes = edit.line_hashes ? (JSON.parse(edit.line_hashes) as string[]) : [];
     if (hashes.length === 0 || !hashes.some((item) => input.addedHashes.has(item))) dropped.add(edit.path);
   }
@@ -170,7 +312,13 @@ export function bindToCommit(db: DB, input: BindInput): BindResult {
     ordered.forEach((event, index) => insert.run(input.repoId, input.sha, "prompt", event.text, index));
     verifies.forEach((event, index) => insert.run(input.repoId, input.sha, "verify", event.text, index));
     [...dropped].forEach((file, index) => insert.run(input.repoId, input.sha, "dropped", file, index));
-    recordEvent(db, { sessionId: input.sessionId, repoId: input.repoId, kind: "commit", text: input.sha });
+    const committedAt = Date.now();
+    recordEvent(db, { sessionId: input.sessionId, repoId: input.repoId, kind: "commit", text: input.sha }, new Date(committedAt).toISOString());
+    // 아직 커밋 전인 파일의 편집은 커밋 표식 뒤로 다시 적어 다음 커밋이 묶게 한다 (pendingEvents는 표식보다 뒤만 본다)
+    for (const edit of carried) {
+      const lineHashes = edit.line_hashes ? (JSON.parse(edit.line_hashes) as string[]) : undefined;
+      recordEvent(db, { sessionId: input.sessionId, repoId: input.repoId, kind: "edit", text: edit.text, path: edit.path, lineHashes }, new Date(committedAt + 1).toISOString());
+    }
     refreshWhy(db, input.repoId, input.sha);
   })();
   return { prompts: prompts.length, verifies: verifies.length, dropped: [...dropped] };
@@ -229,6 +377,58 @@ export function refreshWhy(db: DB, repoId: number, sha: string): void {
   db.prepare("INSERT INTO docs_fts (rowid, title, body, paths, code) VALUES (?, ?, ?, ?, ?)").run(doc.id, doc.title, body, doc.paths, doc.code ?? "");
 }
 
+/**
+ * 이미 저장된 세션 기록(대기 중인 이벤트와 커밋에 묶인 프롬프트·검증)에 지금의 비밀 지우기 규칙을 다시 적용한다 —
+ * 규칙이 보강되면 그 전에 저장된 것에도 닿게(마이그레이션 8). 프롬프트가 바뀐 커밋은 검색 문서의 [why]도 다시 쓴다.
+ * 트레일러는 git 커밋 본문 그대로라 건드리지 않는다. 바뀐 행 수를 돌려준다.
+ */
+export function reRedactStored(db: DB): number {
+  let changed = 0;
+  const events = db.prepare("SELECT id, text FROM session_events WHERE kind IN ('prompt', 'verify')").all() as { id: number; text: string }[];
+  const setEvent = db.prepare("UPDATE session_events SET text = ? WHERE id = ?");
+  for (const row of events) {
+    const clean = redact(row.text);
+    if (clean === row.text) continue;
+    setEvent.run(clean, row.id);
+    changed++;
+  }
+  const rows = db.prepare("SELECT repo_id, sha, kind, ord, text FROM commit_context WHERE kind IN ('prompt', 'verify')").all() as {
+    repo_id: number;
+    sha: string;
+    kind: string;
+    ord: number;
+    text: string;
+  }[];
+  const setContext = db.prepare("UPDATE commit_context SET text = ? WHERE repo_id = ? AND sha = ? AND kind = ? AND ord = ?");
+  const touched = new Map<string, { repoId: number; sha: string }>();
+  for (const row of rows) {
+    const clean = redact(row.text);
+    if (clean === row.text) continue;
+    setContext.run(clean, row.repo_id, row.sha, row.kind, row.ord);
+    changed++;
+    if (row.kind === "prompt") touched.set(`${row.repo_id}\0${row.sha}`, { repoId: row.repo_id, sha: row.sha });
+  }
+  for (const { repoId, sha } of touched.values()) refreshWhy(db, repoId, sha);
+
+  // 노트 — 검색 문서는 지운 본문과 원래 태그로 새 노트와 똑같이 다시 만든다(문서 본문 통째로 지우면 끝에 붙은
+  // 태그 "auth token"이 "auth [redacted]"로 망가진다)
+  const notes = db.prepare("SELECT id, text, tags FROM notes").all() as { id: number; text: string; tags: string }[];
+  const setNote = db.prepare("UPDATE notes SET text = ? WHERE id = ?");
+  const noteDoc = db.prepare("SELECT d.id, f.paths, f.code FROM docs d JOIN docs_fts f ON f.rowid = d.id WHERE d.kind = 'note' AND d.ref = ?");
+  for (const note of notes) {
+    const clean = redact(note.text);
+    if (clean === note.text) continue;
+    setNote.run(clean, note.id);
+    changed++;
+    const doc = noteDoc.get(String(note.id)) as { id: number; paths: string; code: string | null } | undefined;
+    if (!doc) continue;
+    const { title, body } = noteDocFields(clean, note.tags);
+    db.prepare("DELETE FROM docs_fts WHERE rowid = ?").run(doc.id);
+    db.prepare("INSERT INTO docs_fts (rowid, title, body, paths, code) VALUES (?, ?, ?, ?, ?)").run(doc.id, title, body, doc.paths, doc.code ?? "");
+  }
+  return changed;
+}
+
 /* ── 읽기 ───────────────────────────────────────────────── */
 
 export interface CommitContextView {
@@ -238,8 +438,44 @@ export interface CommitContextView {
   trailers: Trailer[];
 }
 
+/** 같은 변경으로 남은 다른 커밋들 (squash 머지 ↔ 브랜치 원본, commits.change_key) */
+export function sameChangeShas(db: DB, repoId: number, sha: string): string[] {
+  return (
+    db
+      .prepare(
+        `SELECT other.sha FROM commits self JOIN commits other ON other.repo_id = self.repo_id AND other.change_key = self.change_key
+          WHERE self.repo_id = ? AND self.sha = ? AND self.change_key IS NOT NULL AND other.sha <> self.sha
+          ORDER BY other.authored_at DESC`,
+      )
+      .all(repoId, sha) as { sha: string }[]
+  ).map((row) => row.sha);
+}
+
+/**
+ * 커밋에 묶인 맥락. 세션 기록(프롬프트·검증·버린 편집)은 커밋이 생긴 자리(워크트리의 브랜치 커밋)에 묶이는데,
+ * PR을 squash로 합치면 main에는 다른 sha가 남는다 — 그 커밋에 세션 기록이 없으면 같은 변경의 다른 커밋에서 가져온다.
+ * 트레일러도 자기 것이 없을 때만 빌려 온다(squash 메시지가 다시 쓰였을 수 있다).
+ */
 export function commitContextOf(db: DB, repoId: number, sha: string): CommitContextView | null {
-  const rows = db.prepare("SELECT kind, text FROM commit_context WHERE repo_id = ? AND sha = ? ORDER BY kind, ord").all(repoId, sha) as { kind: string; text: string }[];
+  const query = db.prepare("SELECT kind, text FROM commit_context WHERE repo_id = ? AND sha = ? ORDER BY kind, ord");
+  let rows = query.all(repoId, sha) as { kind: string; text: string }[];
+  const isSession = (kind: string) => kind === "prompt" || kind === "verify" || kind === "dropped";
+  const isTrailer = (kind: string) => kind.startsWith("trailer:");
+  // 세션 기록과 트레일러는 따로 찾는다 — 한 형제에 트레일러만, 다른 형제에 세션 기록만 있을 수 있다.
+  // 같은 종류는 한 커밋 것만 통째로 (두 커밋 것을 섞지 않는다)
+  let needSession = !rows.some((row) => isSession(row.kind));
+  let needTrailers = !rows.some((row) => isTrailer(row.kind));
+  if (needSession || needTrailers) {
+    for (const other of sameChangeShas(db, repoId, sha)) {
+      const theirs = query.all(repoId, other) as { kind: string; text: string }[];
+      const session = needSession ? theirs.filter((row) => isSession(row.kind)) : [];
+      const trailers = needTrailers ? theirs.filter((row) => isTrailer(row.kind)) : [];
+      rows = [...rows, ...session, ...trailers];
+      if (session.length > 0) needSession = false;
+      if (trailers.length > 0) needTrailers = false;
+      if (!needSession && !needTrailers) break;
+    }
+  }
   if (rows.length === 0) return null;
   return {
     prompts: rows.filter((row) => row.kind === "prompt").map((row) => row.text),

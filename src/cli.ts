@@ -24,7 +24,7 @@ import { fileContext, formatFileContext } from "./core/context";
 import { openDb, type DB } from "./core/db";
 import { myEmails, resolveAuthors } from "./core/identity";
 import { indexCommitCode } from "./core/diffs";
-import { addRepo, discoverRepos, listRepos, matchRepos, relativeToRepo, removeRepo, repoOfPath, syncRepo, type RepoRow } from "./core/indexer";
+import { addRepo, discoverRepos, listRepos, matchRepos, relativeToRepo, removeRepo, resolveRepoFile, syncRepo, type RepoRow } from "./core/indexer";
 import { addNote } from "./core/notes";
 import { commitDetail, repoOverview, repoSummaries } from "./core/overview";
 import { search } from "./core/search";
@@ -163,10 +163,12 @@ async function main(argv: string[]): Promise<number> {
         return 0;
       }
       case "context": {
-        const target = need(positionals[0], "파일 경로");
-        const repo = values.repo ? requireRepo(db, values.repo) : repoOfPath(db, path.resolve(target)) ?? repoOfPath(db, path.resolve(process.cwd()));
+        const target = path.resolve(need(positionals[0], "파일 경로"));
+        // 레포 밖 워크트리에서 불러도 본 레포의 기억을 쓴다 (resolveRepoFile)
+        const located = values.repo ? null : await resolveRepoFile(db, target);
+        const repo = values.repo ? requireRepo(db, values.repo) : located?.repo;
         if (!repo) throw new UsageError("어느 레포의 파일인지 알 수 없습니다 — --repo로 지정하세요");
-        const context = fileContext(db, repo.id, relativeToRepo(repo.path, path.isAbsolute(target) ? target : path.resolve(target)));
+        const context = fileContext(db, repo.id, located?.relative ?? relativeToRepo(repo.path, target));
         if (values.json) return printJson(context);
         print(formatFileContext(context, { me: await myEmails(), budget: 2000 }) || `${context.path}: 이력에서 더 알려 줄 것이 없습니다`);
         return 0;
@@ -178,7 +180,7 @@ async function main(argv: string[]): Promise<number> {
           tags: values.tag,
           source: "cli",
         });
-        print(`노트 #${note.id} 저장`);
+        print(`노트 #${note.id} 저장${note.redacted ? " (비밀로 보이는 값은 [redacted]로 바꿨습니다)" : ""}`);
         return 0;
       }
       case "remove": {
@@ -210,7 +212,7 @@ async function cmdInstall(client: string | undefined, project: string | undefine
     const target = result.file ?? "claude CLI (사용자 범위)";
     if (dryRun) {
       print(`[dry-run] ${target}에 다음을 넣습니다:`);
-      print(result.command ?? JSON.stringify({ mcpServers: { grimoire: result.spec } }, null, 2));
+      print(result.command ?? result.preview ?? JSON.stringify({ mcpServers: { grimoire: result.spec } }, null, 2));
       if (result.permissions) {
         print(
           result.permissions.added.length > 0
@@ -228,6 +230,8 @@ async function cmdInstall(client: string | undefined, project: string | undefine
       print(added.length > 0 ? `  읽기 도구 승인 생략: ${file}에 ${added.length}개 추가` : `  읽기 도구 권한: 이미 있음 (${file})`);
       if (backup) print(`  이전 설정 백업: ${backup}`);
     }
+    if (result.approved) print(`  읽기 도구 승인 생략: ${result.approved.join(", ")}`);
+    if (result.verified === false) print("  codex 명령을 찾지 못해 Codex가 설정을 읽는지는 확인하지 못했습니다.");
     print(`  node: ${result.spec.command}`);
     print(`  다음: ${result.next}`);
     print("  확인: grimoire doctor");

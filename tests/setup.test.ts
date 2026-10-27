@@ -354,3 +354,100 @@ test("DB 파일은 나만 읽을 수 있게 만든다 (이전 버전의 0644도 
   assert.equal(fs.statSync(`${file}-wal`).mode & 0o777, 0o600, "WAL도 DB 파일 권한을 따른다");
   db.close();
 });
+
+test("doctor: hook.log의 최근 오류만 센다 (7일 밖은 무시)", async () => {
+  const { recentHookErrors } = await import("../src/setup/doctor.js");
+  const home = tempDir();
+  assert.deepEqual(recentHookErrors(home), { count: 0, last: null });
+  const now = Date.parse("2026-10-27T00:00:00.000Z");
+  fs.writeFileSync(
+    path.join(home, "hook.log"),
+    [
+      "2026-10-01T00:00:00.000Z PreToolUse: old error",
+      "2026-10-25T00:00:00.000Z PreToolUse: db locked",
+      "garbage line",
+      "2026-10-26T12:00:00.000Z bad stdin: Unexpected token",
+      "",
+    ].join("\n"),
+  );
+  assert.deepEqual(recentHookErrors(home, now), { count: 2, last: "2026-10-26T12:00:00.000Z bad stdin: Unexpected token" });
+});
+
+test("doctor: 업그레이드로 비워진 공변경 이력을 sync 전까지 알린다", async () => {
+  const { addRepo, syncRepo } = await import("../src/core/indexer.js");
+  const home = tempDir();
+  const env = { GRIMOIRE_HOME: path.join(home, ".grimoire"), GRIMOIRE_ME: "me@example.com" };
+  const offline = (async () => {
+    throw new Error("down");
+  }) as unknown as typeof fetch;
+  const repoDir = makeRepo([{ message: "fix: 결제와 영수증을 함께", files: { "src/pay.ts": "a", "src/receipt.ts": "b" } }], "cochange-doctor");
+  const db = openDb(path.join(env.GRIMOIRE_HOME, "grimoire.db"));
+  const repo = await addRepo(db, repoDir);
+  await syncRepo(db, repo);
+  const title = "공변경 이력을 다시 계산해야 하는 레포";
+  db.close();
+  let checks = await doctor({ cliPath: fakeCli(), env, home, fetchImpl: offline });
+  assert.ok(!checks.some((c) => c.title.includes(title)), "sync 직후에는 조용해야 합니다");
+
+  // 마이그레이션 7처럼 표를 비운다 → 경고, sync로 다시 채우면 사라진다
+  const again = openDb(path.join(env.GRIMOIRE_HOME, "grimoire.db"));
+  again.exec("DELETE FROM cochange; DELETE FROM file_touches;");
+  again.close();
+  checks = await doctor({ cliPath: fakeCli(), env, home, fetchImpl: offline });
+  const warn = checks.find((c) => c.title.includes(title));
+  assert.equal(warn?.level, "warn", formatChecks(checks));
+  assert.equal(warn?.detail, "cochange-doctor");
+
+  const fixDb = openDb(path.join(env.GRIMOIRE_HOME, "grimoire.db"));
+  await syncRepo(fixDb, fixDb.prepare("SELECT * FROM repos").get() as never);
+  fixDb.close();
+  checks = await doctor({ cliPath: fakeCli(), env, home, fetchImpl: offline });
+  assert.ok(!checks.some((c) => c.title.includes(title)), formatChecks(checks));
+});
+
+test("openDb busyTimeoutMs: 다른 연결이 쓰기 잠금을 쥐면 그만큼만 기다리고 실패한다 (훅이 5초 timeout에 걸리지 않게)", async () => {
+  const { isBusyError } = await import("../src/core/db.js");
+  const file = path.join(tempDir(), "busy.db");
+  const holder = openDb(file);
+  holder.exec("BEGIN IMMEDIATE");
+  try {
+    const hook = openDb(file, { busyTimeoutMs: 200 });
+    const started = Date.now();
+    assert.throws(() => hook.exec("CREATE TABLE t (x)"), (error: unknown) => isBusyError(error));
+    const waited = Date.now() - started;
+    assert.ok(waited >= 150 && waited < 2_000, `대기 ${waited}ms`);
+    hook.close();
+  } finally {
+    holder.exec("ROLLBACK");
+    holder.close();
+  }
+});
+
+test("doctor: 훅이 CLI와 다른 데이터 폴더를 보면 알리고, hook.log는 훅의 폴더에서 읽는다", async () => {
+  const { installHooks, hookCommandEnv } = await import("../src/setup/hooks.js");
+  const home = tempDir();
+  // 훅은 CLI와 같은 설치(dist/hook.js 옆에 dist/cli.js)
+  const cliPath = fakeCli();
+  const hookPath = path.join(path.dirname(cliPath), "hook.js");
+  fs.writeFileSync(hookPath, "");
+  const hookHome = path.join(home, "hook-home");
+  await installHooks({ hookPath, env: { GRIMOIRE_HOME: hookHome }, home });
+  fs.mkdirSync(hookHome, { recursive: true });
+  fs.writeFileSync(path.join(hookHome, "hook.log"), `${new Date().toISOString()} PreToolUse: boom\n`);
+  const offline = (async () => {
+    throw new Error("down");
+  }) as unknown as typeof fetch;
+
+  const other = await doctor({ cliPath, env: { GRIMOIRE_HOME: path.join(home, "cli-home"), GRIMOIRE_ME: "me@example.com" }, home, fetchImpl: offline });
+  assert.ok(other.some((c) => c.level === "warn" && c.title === "claude-code 훅: CLI와 다른 데이터 폴더를 봅니다"), formatChecks(other));
+  assert.ok(other.some((c) => c.title.includes("오류 1건")), "CLI 폴더가 아니라 훅 폴더의 hook.log를 읽어야 합니다");
+
+  // 같은 폴더(설정엔 /로 적혀도)면 조용하다
+  const same = await doctor({ cliPath, env: { GRIMOIRE_HOME: hookHome, GRIMOIRE_ME: "me@example.com" }, home, fetchImpl: offline });
+  assert.ok(!same.some((c) => c.title === "claude-code 훅: CLI와 다른 데이터 폴더를 봅니다"), formatChecks(same));
+
+  // 다른 설치(개발 중 워크트리 빌드 등)의 hook.js를 가리키면 — 업데이트가 훅에 닿지 않는다
+  const elsewhere = await doctor({ cliPath: fakeCli(), env: { GRIMOIRE_HOME: hookHome, GRIMOIRE_ME: "me@example.com" }, home, fetchImpl: offline });
+  assert.ok(elsewhere.some((c) => c.level === "warn" && c.title.startsWith("claude-code 훅: 지금 CLI와 다른 위치의 grimoire")), formatChecks(elsewhere));
+  assert.deepEqual(hookCommandEnv('"n" "h" --env "GRIMOIRE_HOME=C:/x y" --env "GRIMOIRE_ME=a@b"'), { GRIMOIRE_HOME: "C:/x y", GRIMOIRE_ME: "a@b" });
+});

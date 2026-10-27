@@ -49,6 +49,13 @@ export function hookCommand(hookPath: string, env: Env = process.env, nodePath =
   return parts.join(" ");
 }
 
+/** 훅 명령에 실린 `--env "KEY=VALUE"`들 (hookCommand가 적은 것) */
+export function hookCommandEnv(command: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const match of command.matchAll(/--env\s+"([A-Z_]+)=([^"]*)"/g)) out[match[1]] = match[2];
+  return out;
+}
+
 export function isOurs(group: HookGroup): boolean {
   return (group.hooks ?? []).some((hook) => hook?.type === "command" && MARKER.test(hook.command ?? ""));
 }

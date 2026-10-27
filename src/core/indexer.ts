@@ -14,7 +14,7 @@ import path from "node:path";
 
 import { refreshWhy, storeTrailers } from "./capture";
 import { BLOB_BATCH_BYTES, extractSymbols, headerComment, listHeadFiles, readBlobs, splitIdentifier, type CodeSymbol, type HeadFile } from "./code";
-import { addCochange, cochangeInput, extractImportSpecs, needsCochangeBackfill, rebuildCochange, resolveImportSpecs } from "./context";
+import { addCochange, changeKey, cochangeInput, extractImportSpecs, needsCochangeBackfill, rebuildCochange, resolveImportSpecs } from "./context";
 import { deleteDoc, upsertDoc, pruneOrphanFts, type DB } from "./db";
 import {
   headTree,
@@ -24,9 +24,10 @@ import {
   readCommits,
   readFileAtHead,
   refTips,
+  mainRepoRoot,
   remoteUrl,
-  repoRoot,
   throwIfCancelled,
+  worktreeRoots,
   type GitCommit,
 } from "./git";
 import { isMeaningfulSubject } from "./meaningful";
@@ -72,7 +73,8 @@ export interface SyncResult {
 }
 
 export async function addRepo(db: DB, dir: string, signal?: AbortSignal): Promise<RepoRow> {
-  const root = await repoRoot(path.resolve(dir), signal);
+  // 추가 작업 트리(git worktree)면 본 레포로 등록한다 — 커밋 저장소가 같아 따로 두면 같은 기억이 세션 수만큼 쌓인다
+  const root = await mainRepoRoot(path.resolve(dir), signal);
   if (!root) throw new Error(`git 레포가 아닙니다: ${dir}`);
 
   const existing = db.prepare("SELECT * FROM repos WHERE path = ?").get(root) as
@@ -136,6 +138,116 @@ const NESTED_WORKTREE = /^\.claude\/worktrees\/[^/]+\//;
 export function relativeToRepo(repoPath: string, target: string): string {
   const relative = path.isAbsolute(target) ? path.relative(repoPath, path.resolve(target)) : target;
   return relative.split(path.sep).join("/").replace(/^\.\//, "").replace(NESTED_WORKTREE, "");
+}
+
+/** 있는 가장 가까운 폴더 (새로 만들 파일·폴더면 위로 올라간다) */
+function existingDir(target: string): string | null {
+  let dir = path.resolve(target);
+  for (;;) {
+    try {
+      if (fs.statSync(dir).isDirectory()) return dir;
+    } catch {
+      // 아직 없음
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+export interface RepoFile {
+  repo: RepoRow;
+  /** 색인과 같은 꼴의 레포 기준 경로 (폴더면 "" 또는 그 폴더 경로) */
+  relative: string;
+}
+
+/** `.git` 파일의 "gitdir: <본 레포>/.git/worktrees/<이름>" — 추가 작업 트리의 표식 */
+const WORKTREE_GITDIR = /^gitdir:\s*(.+?)[\\/]\.git[\\/]worktrees[\\/][^\\/]+[\\/]?\s*$/m;
+
+/**
+ * 폴더가 속한 추가 작업 트리(git worktree)의 최상위와 본 레포 — git을 띄우지 않고 `.git` 파일만 읽는다.
+ * 위로 올라가다 처음 만난 `.git`이 폴더면 평범한 레포(추가 작업 트리 아님), 파일이면 그 gitdir를 본다.
+ * 서브모듈(gitdir이 .git/modules/x)이나 레포 밖이면 null. 훅은 편집마다 도니 프로세스 하나(Windows 20~40ms)도 아낀다.
+ */
+function linkedWorktree(dir: string): { top: string; main: string } | null {
+  let current = dir;
+  for (;;) {
+    const dotGit = path.join(current, ".git");
+    let stat: fs.Stats | null = null;
+    try {
+      stat = fs.statSync(dotGit);
+    } catch {
+      // 없음 — 위로
+    }
+    if (stat?.isDirectory()) return null;
+    if (stat?.isFile()) {
+      let text: string;
+      try {
+        text = fs.readFileSync(dotGit, "utf8");
+      } catch {
+        return null;
+      }
+      const match = WORKTREE_GITDIR.exec(text);
+      return match ? { top: current, main: path.resolve(current, match[1]) } : null;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+/**
+ * 절대경로 → 등록 레포와 레포 기준 경로. git을 부르지 않는다 — 등록 레포 폴더 안(`.claude/worktrees/x/` 포함)이면
+ * 경로만으로, 레포 밖에 만든 추가 작업 트리(git worktree)의 파일이면 그 `.git` 파일로 본 레포를 찾아 작업 트리 기준
+ * 경로로 푼다 — 훅·file_context가 워크트리에서 일하는 세션에도 같은 기억을 쓰게. 해당 없으면 null.
+ */
+export async function resolveRepoFile(db: DB, target: string, _signal?: AbortSignal): Promise<RepoFile | null> {
+  if (!path.isAbsolute(target)) return null;
+  const direct = repoOfPath(db, target);
+  if (direct) return { repo: direct, relative: relativeToRepo(direct.path, target) };
+  const dir = existingDir(target);
+  if (!dir) return null;
+  // 심볼릭 링크·정션 너머(예: ~/code → /Volumes/work)로 연 파일 — 등록 경로는 git이 준 실제 경로라 그대로는 안 맞는다.
+  // 있는 가장 가까운 폴더만 실제 경로로 바꿔 다시 본다 (시스템 호출 하나)
+  const real = realDir(dir);
+  if (real !== dir) {
+    const realTarget = path.join(real, path.relative(dir, path.resolve(target)));
+    const viaLink = repoOfPath(db, realTarget);
+    if (viaLink) return { repo: viaLink, relative: relativeToRepo(viaLink.path, realTarget) };
+  }
+  const roots = linkedWorktree(real);
+  if (!roots) return null;
+  // gitdir이 상대경로면(git 2.48+) 링크 너머의 경로로 풀릴 수 있다 — 본 레포 경로도 실제 경로로
+  const main = realDir(roots.main);
+  const repo = repoOfPath(db, main);
+  if (!repo || repo.path !== main) return null;
+  return { repo, relative: path.relative(roots.top, path.join(real, path.relative(dir, path.resolve(target)))).split(path.sep).join("/") };
+}
+
+/** 폴더의 실제 경로(링크·정션·macOS /var → /private/var를 푼다). 못 풀면 그대로 */
+function realDir(dir: string): string {
+  try {
+    return fs.realpathSync.native(dir);
+  } catch {
+    return dir;
+  }
+}
+
+/**
+ * 등록된 레포 중 다른 레포의 추가 작업 트리인 것 — 예전 버전이 워크트리를 따로 등록했던 흔적 (doctor가 알린다).
+ * 본 레포도 등록돼 있으면 같은 커밋이 두 번 색인돼 검색에 겹쳐 나온다.
+ */
+export async function worktreeRegistrations(db: DB): Promise<{ repo: RepoRow; main: string; mainRegistered: boolean }[]> {
+  const repos = listRepos(db);
+  const registered = new Set(repos.map((repo) => repo.path));
+  const out: { repo: RepoRow; main: string; mainRegistered: boolean }[] = [];
+  for (const repo of repos) {
+    if (!fs.existsSync(repo.path)) continue;
+    const roots = await worktreeRoots(repo.path);
+    if (!roots || roots.main === roots.top || path.resolve(roots.top) !== path.resolve(repo.path)) continue;
+    out.push({ repo, main: roots.main, mainRegistered: registered.has(roots.main) });
+  }
+  return out;
 }
 
 /** 이름·경로·원격 URL 일부로 레포 하나를 찾는다. 정확한 일치가 우선이고, 부분 일치가 여럿이면(모호) null. */
@@ -216,11 +328,13 @@ async function syncRepoNow(db: DB, repo: RepoRow, signal?: AbortSignal): Promise
       throwIfCancelled(signal);
       db.transaction(() => {
         for (const commit of batch) {
+          // 실제로 들어간 커밋만 센다 — 동시에 돈 다른 sync가 먼저 넣은 커밋은 "새 커밋"이 아니다
+          if (!insertCommit(db, repo, commit)) continue;
+          added++;
           // 공변경은 새로 들어간 커밋만 더한다 — 옛 DB는 끝에 전체를 다시 만들므로 여기서는 건너뛴다
-          if (insertCommit(db, repo, commit) && !backfill) addCochange(db, repo.id, cochangeInput(commit, isMeaningfulSubject(commit.subject)));
+          if (!backfill) addCochange(db, repo.id, cochangeInput(commit, isMeaningfulSubject(commit.subject)));
         }
       })();
-      added += batch.length;
     }
     return added;
   };
@@ -238,6 +352,7 @@ async function syncRepoNow(db: DB, repo: RepoRow, signal?: AbortSignal): Promise
 
   db.transaction(() => {
     if (backfill) rebuildCochange(db, repo.id);
+    backfillChangeKeys(db, repo);
     backfillTrailers(db, repo);
 
     if (tech) {
@@ -424,6 +539,17 @@ function applyCode(db: DB, repo: RepoRow, code: CodeChanges): void {
   }
 }
 
+/** 옛 DB(마이그레이션 7 직후)의 커밋에 같은 변경 키를 채운다 — 한 번 채우면 새 커밋은 insertCommit이 넣는다 */
+function backfillChangeKeys(db: DB, repo: RepoRow): void {
+  const rows = db.prepare("SELECT sha, subject FROM commits WHERE repo_id = ? AND change_key IS NULL").all(repo.id) as { sha: string; subject: string }[];
+  if (rows.length === 0) return;
+  const filesOf = db.prepare("SELECT path FROM commit_files WHERE repo_id = ? AND sha = ?");
+  const set = db.prepare("UPDATE commits SET change_key = ? WHERE repo_id = ? AND sha = ?");
+  for (const row of rows) {
+    set.run(changeKey(row.subject, (filesOf.all(repo.id, row.sha) as { path: string }[]).map((item) => item.path)), repo.id, row.sha);
+  }
+}
+
 /**
  * 옛 DB(마이그레이션 직후)의 커밋 본문에서 트레일러를 한 번 읽어 둔다 — 훅 없이도 "왜"가 생기는 재료 (capture.ts).
  * 레포당 한 번(repos.trailers_done). 새 커밋은 insertCommit이 그때그때 읽는다.
@@ -467,8 +593,8 @@ function insertCommit(db: DB, repo: RepoRow, commit: GitCommit): boolean {
   const inserted = db.prepare(
     `INSERT OR IGNORE INTO commits
        (sha, repo_id, author_name, author_email, authored_at, subject, body,
-        files_changed, insertions, deletions, meaningful)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        files_changed, insertions, deletions, meaningful, change_key)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     commit.sha,
     repo.id,
@@ -481,6 +607,7 @@ function insertCommit(db: DB, repo: RepoRow, commit: GitCommit): boolean {
     insertions,
     deletions,
     isMeaningfulSubject(commit.subject) ? 1 : 0,
+    changeKey(commit.subject, commit.files.map((file) => file.path)),
   );
   // 이미 있던 커밋(다른 프로세스가 먼저 넣음)이면 파일·문서도 이미 같은 트랜잭션으로 들어가 있다 — 중복 행을 만들지 않는다
   if (inserted.changes === 0) return false;

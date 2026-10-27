@@ -10,6 +10,7 @@ import {
   formatFileContext,
   isCochangeCommit,
   namedTests,
+  needsCochangeBackfill,
   rebuildCochange,
   HOOK_BUDGET,
 } from "../src/core/context";
@@ -189,4 +190,27 @@ test("relativeToRepo: 레포 안 Claude Code worktree의 파일은 레포 기준
   assert.equal(relativeToRepo(repo, path.join(repo, "src", "a.ts")), "src/a.ts");
   assert.equal(relativeToRepo(repo, path.join(repo, ".claude", "worktrees", "x-1", "src", "a.ts")), "src/a.ts");
   assert.equal(relativeToRepo(repo, "src/b.ts"), "src/b.ts");
+});
+
+test("shortSubject: 넘칠 때 PR 번호부터 떼고, 그래도 넘치면 자른다 — 번호 중간에서 잘리지 않게", async () => {
+  const { shortSubject } = await import("../src/core/context.js");
+  assert.equal(shortSubject("fix: 짧음 (#12)", 60), "fix: 짧음 (#12)");
+  assert.equal(shortSubject("feat: 편집 직전 훅·커밋에 묶인 왜·공변경 (#17)", 30), "feat: 편집 직전 훅·커밋에 묶인 왜·공변경");
+  const cut = shortSubject("feat: 편집 직전 훅·커밋에 묶인 왜·공변경·작업 완수 벤치 — 에이전트 코딩 강화 (P0~P4) (#17)", 40);
+  assert.ok(cut.length <= 40 && cut.endsWith("…") && !cut.includes("(#"), cut);
+});
+
+test("needsCochangeBackfill: 다시 만들어도 비는 레포(의미 없는 커밋뿐)는 재계산 대상이 아니다", async () => {
+  const db = memoryDb();
+  const dir = makeRepo(
+    [
+      { message: "wip", files: { "src/a.ts": "1", "src/b.ts": "1" } },
+      { message: "tmp", files: { "src/a.ts": "2", "src/b.ts": "2" } },
+    ],
+    "trivial-only",
+  );
+  const repo = await addRepo(db, dir);
+  await syncRepo(db, repo);
+  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM cochange").get() as { n: number }).n, 0, "의미 없는 커밋은 공변경에 안 들어간다");
+  assert.equal(needsCochangeBackfill(db, repo.id), false, "그렇다고 영원히 '다시 계산해야 함'이면 세션마다 sync가 돈다");
 });

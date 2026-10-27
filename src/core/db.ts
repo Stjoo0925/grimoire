@@ -9,6 +9,8 @@ import path from "node:path";
 
 import type * as NodeSqlite from "node:sqlite";
 
+import { reRedactStored } from "./capture";
+
 /** node:sqlite가 들어간 첫 버전(플래그 없이) — package.json engines와 맞춘다 */
 export const MIN_NODE = "22.13.0";
 
@@ -108,7 +110,8 @@ export class DB {
 }
 
 /** 스키마 버전 — 바꾸면 MIGRATIONS에 한 단계를 덧붙인다. */
-const MIGRATIONS: string[] = [
+/** SQL 한 덩어리, 또는 SQL로 못 하는 데이터 손질(같은 트랜잭션 안에서 돈다) */
+const MIGRATIONS: (string | ((db: DB) => void))[] = [
   `
   CREATE TABLE repos (
     id          INTEGER PRIMARY KEY,
@@ -278,15 +281,36 @@ const MIGRATIONS: string[] = [
   ALTER TABLE commits ADD COLUMN agent_signal TEXT;
   ALTER TABLE repos ADD COLUMN trailers_done INTEGER NOT NULL DEFAULT 0;
   `,
+  // 7: 같은 변경 키 — squash 머지 커밋과 브랜치 원본 커밋은 제목(PR 번호 접미 제외)과 변경 파일 집합이 같다.
+  //    공변경·취약도·최근 커밋이 같은 수정을 두 번 세지 않게(context.ts), 브랜치 커밋에 묶인 "왜"를 squash 커밋에서도
+  //    찾게(capture.ts). change_key는 동기화가 채우고, 중복으로 부풀었던 공변경 표는 비워 다음 동기화가 다시 만든다.
+  `
+  ALTER TABLE commits ADD COLUMN change_key TEXT;
+  CREATE INDEX commits_change_key ON commits(repo_id, change_key);
+  CREATE TABLE cochange_seen (
+    repo_id  INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    key      TEXT NOT NULL,
+    PRIMARY KEY (repo_id, key)
+  );
+  DELETE FROM cochange;
+  DELETE FROM file_touches;
+  `,
+  // 8: 이미 저장된 세션 기록(프롬프트·검증)에 보강된 비밀 지우기 규칙을 다시 적용한다 (capture.ts) —
+  //    0.7.x는 OPENAI_API_KEY=… 같은 접두 붙은 이름·연결 문자열 비밀번호 등을 놓쳤다
+  reRedactStored,
 ];
 
-export function openDb(file: string): DB {
+/**
+ * busyTimeoutMs: 다른 프로세스가 쓰기 잠금을 쥐었을 때 기다리는 시간. SQLite의 대기는 동기라 그동안 타이머도 안 돈다 —
+ * 훅(hook.ts)은 Claude Code의 훅 timeout(5초) 안에 끝나야 해서 짧게 준다.
+ */
+export function openDb(file: string, options: { busyTimeoutMs?: number } = {}): DB {
   if (file !== ":memory:") makePrivate(file);
   const { DatabaseSync } = loadSqlite();
   const db = new DB(new DatabaseSync(file));
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
-  db.pragma("busy_timeout = 5000");
+  db.pragma(`busy_timeout = ${Math.max(0, Math.floor(options.busyTimeoutMs ?? 5000))}`);
   migrate(db);
   return db;
 }
@@ -315,7 +339,9 @@ function migrate(db: DB): void {
     db.transaction(() => {
       // 첫 실행에서 두 프로세스가 동시에 열면, 잠금을 기다리는 사이 다른 쪽이 이 단계를 끝냈을 수 있다
       if ((db.pragma("user_version") as number) > version) return;
-      db.exec(MIGRATIONS[version]);
+      const step = MIGRATIONS[version];
+      if (typeof step === "string") db.exec(step);
+      else step(db);
       db.pragma(`user_version = ${version + 1}`);
     })();
   }

@@ -44,6 +44,7 @@ To run from source, clone it and run `npm install && npm run build && npm link`.
 | Claude Code (this repo only) | `grimoire install claude-code --project .` | `./.mcp.json` |
 | Claude Desktop | `grimoire install claude-desktop` | `claude_desktop_config.json` |
 | Cursor | `grimoire install cursor` (`--project .` for this repo only) | `~/.cursor/mcp.json` |
+| Codex | `grimoire install codex` | `~/.codex/config.toml` (`$CODEX_HOME` if set) |
 
 - The config contains the **absolute path of the node currently running**. GUI apps like Claude Desktop and Cursor
   don't see your shell's PATH, so `"command": "node"` fails with `spawn node ENOENT`. If you switch
@@ -52,6 +53,9 @@ To run from source, clone it and run `npm install && npm run build && npm link`.
   so the CLI and MCP server see the same DB.
 - Other server entries are left alone; only the `grimoire` entry is added. The existing file is backed up as `.bak`,
   and if its JSON is broken Grimoire stops without touching it. Add `--dry-run` to preview what would be written.
+- For Codex, only the `[mcp_servers.grimoire]` tables in `config.toml` are replaced; every other line, comment and line ending stays as it was.
+  The read-only tools get `approval_mode = "approve"`. If the `codex` command is installed, Grimoire asks Codex to read the new config back,
+  and if Codex rejects it (an older Codex that doesn't know a key), the file is restored. The Claude Code hooks don't apply to Codex.
 - For Claude Code (all projects), the read-only tools (`search_memory`, `show_commit`, `get_repo_overview`, `list_repos`)
   are added to `permissions.allow` in `~/.claude/settings.json` (under `CLAUDE_CONFIG_DIR` if set), so searches don't ask for approval.
   Tools that write (`add_repo`, `record_note`) are left out. Existing rules and keys stay as they are, and the file is backed up as `.bak` the same way.
@@ -69,6 +73,8 @@ To run from source, clone it and run `npm install && npm run build && npm link`.
 
 Checks the Grimoire version (whether a new release is out), the node version and built-in SQLite (FTS5), git, the DB and registered repos, your email, and the config
 each client has (whether the node path exists, matches the current node, and points at the same DB), and tells you the command to fix it.
+With hooks installed it also checks that they point at this install and see the same data folder, counts hook errors from the last 7 days in `hook.log`,
+and flags repos whose co-change history still needs a rebuild after an upgrade (`grimoire sync`) or worktrees an older version registered separately.
 
 ### The project you're working in is registered automatically
 
@@ -79,12 +85,13 @@ registered yet, Grimoire **registers it on startup and syncs it before any other
 - Results from the current repo are **ranked first** (other repos still show up), and responses include `current: "<repo>"`.
 - Set `GRIMOIRE_AUTO_ADD=0` to turn this off. Then, if the current repo isn't registered, the `hint` says so instead of staying silent.
 - Skipped when the repo root is your home directory or `/` (dotfile repos and the like).
-- Claude Desktop has no project folder (it starts the server in `/`), so register repos there as described below.
+- When the server isn't started in a repo (a global config launched from `/` or your home folder), Grimoire asks the client for its workspace folders (MCP roots) and uses the first one that is a git repo. Clients that don't support roots, like Claude Desktop, need repos registered as described below.
 
 ### Registering repos mid-conversation
 
 With no repos yet, results carry a `hint`, so the AI suggests registering first.
 The `add_repo` tool registers right from the conversation ("remember every repo under ~/work-dir" → `scan: true`).
+Indexing a whole folder can take a while, so clients that ask for progress get an update per repo.
 
 ### Tools
 
@@ -127,7 +134,9 @@ Tests: tests/search.test.ts
 - `Co-changes` are mined from history as association rules over commits (merge and >10-file commits excluded, confidence ≥ 0.5 as a filter, most recent first, incremental on every sync). Set `GRIMOIRE_COCHANGE_MAX_FILES=20` (then `grimoire sync`) for repos whose commits routinely touch more than 10 files. `Tests` are name-matched pairs first (`foo.ts` ↔ `foo.test.ts`, `test_foo.py`, `foo_test.go`), then tests that change together with the file. `Fixes(90d)` appears only when 2+ fix commits make up 30%+ of the file's recent commits, with the shas.
 - `SessionStart` (startup, clear, compact) adds a 600-char summary: your last 3 commits here with their *why*, and files edited but never committed in earlier sessions.
 - The **first failing check** in a session (a failing `npm test`, `pytest`, …) triggers one more hook message: what past commits on the files you're editing recorded — their why, what verified them, what was edited then dropped, `Rejected:`/`Constraint:` trailers. Once per session; sessions that never get stuck pay nothing.
-- The hook is a separate light entry point (`dist/hook.js`), always exits 0, logs errors to `~/.grimoire/hook.log`, and never syncs. `GRIMOIRE_HOOKS=0` turns injection off; `grimoire doctor` checks the hook entry.
+- The hook is a separate light entry point (`dist/hook.js`), always exits 0, logs errors to `~/.grimoire/hook.log` (capped at 512KB), and never syncs inline — at session start it may spawn a background `grimoire sync` it doesn't wait for (see below). It waits at most 1.5s for the DB write lock, so it can't hit Claude Code's hook timeout. `GRIMOIRE_HOOKS=0` turns injection off; `grimoire doctor` checks the hook entry.
+- **Git worktrees** (Claude Code opens each session in `.claude/worktrees/<session>`) share the main repo's memory: a worktree is registered as its main repo, never as a repo of its own, and files in a worktree outside the repo folder are resolved to the same paths (by reading its `.git` file — no git process per edit). Files opened through a symlink or junction (e.g. `~/code` → another disk) resolve to the registered repo too. A commit made in a worktree is bound to that worktree's HEAD. `grimoire doctor` flags worktrees that an older version registered separately.
+- **The same change counted once**: a PR squash-merged into main leaves the same change twice (the branch commit and the `(#N)` commit). Co-change, fix counts and recent commits fold them by subject and file set, and the *why* recorded on the branch commit is found from the squash commit too.
 
 ### The why, bound to the commit
 
@@ -136,7 +145,7 @@ A commit records *what* changed. The reason — what you asked for, what you tri
 1. **Commit trailers, no hooks needed.** The last paragraph of a commit message in `Key: value` form is parsed the way `git interpret-trailers` does: Lore (`Constraint`, `Rejected: alternative | reason`, `Directive`, `Tested`, `Not-tested`, …), QAC (`Agent`, `Mode`, `What`, `Why`) and platform trailers (`Claude-Session`, `Agent-Logs-Url`, `Co-Authored-By`, …). Values are free text; unknown keys are kept. `Co-Authored-By: Claude…`, `Claude-Session`, `Agent-Logs-Url` or `Agent:` mark the commit as agent-made. Older databases are back-filled once per repo on the next sync.
 2. **Session capture, with hooks on.** `UserPromptSubmit` stores your prompt (not slash commands, not subagents' prompts); `PostToolUse` stores test/lint/typecheck commands with their outcome and the line hashes of each edit. When a `git commit` succeeds, everything since the previous commit is bound to the new sha: prompts (up to 10, 1,000 chars each), checks (up to 20), and *dropped* files — edited in the session but with none of those lines in the commit. The commit is indexed immediately; no need to wait for the next sync.
 
-Privacy: capture is on only when you installed the hooks (`GRIMOIRE_CAPTURE=0` turns it off while keeping injection). Before anything is stored, `<private>…</private>` blocks, pasted content, API tokens/keys/JWTs and `password=…`-style values are replaced with `[redacted]`. Tool output is never stored except the last 300 chars of a failing check. Records that never get bound to a commit are deleted after 14 days. Everything stays in your local SQLite file — nothing is written into git.
+Privacy: capture is on only when you installed the hooks (`GRIMOIRE_CAPTURE=0` turns it off while keeping injection). Before anything is stored, `<private>…</private>` blocks, pasted content, API tokens/keys/JWTs, `password=…`-style values (including prefixed names like `OPENAI_API_KEY=…`) and passwords in connection strings are replaced with `[redacted]` — the same rule applies to notes, and records stored by older versions are cleaned once on upgrade. Tool output is never stored except the last 300 chars of a failing check. Records that never get bound to a commit are deleted after 14 days. Everything stays in your local SQLite file — nothing is written into git.
 
 ### Current code index
 
@@ -155,7 +164,7 @@ After the commit metadata is indexed, a second pass reads each commit's diff (so
 With `detail: "summary"`, search results show them as `changed` ("webhook.ts: dedupeWebhookEvent"). The default stays the compact list: in the offline eval, summary made responses 66% larger without significantly raising how often one search was enough to answer (docs/improvement-plan.md §7).
 The names are also searchable, but only to fill in when titles, bodies and paths give too few results (for example a function that no longer exists anywhere). Mixing them into the main ranking made search 2–3× slower without a significant accuracy gain in the offline eval (see docs/improvement-plan.md §7).
 
-The server syncs registered repos in the background right after it starts, then fills in the diff pass. The repo you're working in is re-synced before a search when 15 seconds have passed, so a commit you just made is searchable. Set `GRIMOIRE_SYNC_ON_START=0` to turn off the startup sync.
+The server syncs registered repos in the background right after it starts, then fills in the diff pass. The repo you're working in is re-synced before a search when 15 seconds have passed, so a commit you just made is searchable. With hooks installed, the SessionStart hook also starts a background `grimoire sync` for the session's repo when it was last synced more than 10 minutes ago (or its co-change history is empty after an upgrade) — the hook itself doesn't wait. Set `GRIMOIRE_SYNC_ON_START=0` to turn off both.
 
 ### Measuring search quality
 
@@ -230,6 +239,16 @@ Set `GRIMOIRE_UPDATE_CHECK=0` to turn it off (run `grimoire install` again after
   Don't register sensitive repos, or take them out with `grimoire remove <repo>`.
 - The DB is created readable only by you (`chmod 600`) on macOS/Linux. On Windows chmod has no effect and the DB relies on the NTFS permissions of your user profile (`%USERPROFILE%\.grimoire`), so don't point `GRIMOIRE_HOME` at a shared folder.
 
+### Security scanner alerts
+
+Scanners such as Socket flag the published package with a few supply-chain alerts. None of them is a vulnerability, and here is where each comes from:
+
+- **Network access** — the MCP SDK (`@modelcontextprotocol/server`) bundles HTTP transport and OAuth helpers that call `fetch`. Grimoire only uses the stdio transport, so that code never runs.
+- **URL strings** — the MCP SDK carries JSON Schema meta-schema IDs (`json-schema.org/...`) as plain identifiers, never fetched. The other hit is Grimoire's own update check against `api.github.com`, described above.
+- **AI-detected code anomaly** — `zod` (a dependency of the MCP SDK) builds its object parsers with `new Function` for speed. The generated code comes from schemas defined in source, not from user input.
+
+There is no install script (`postinstall`), and nothing else leaves your machine.
+
 ## Development
 
 ```bash
@@ -239,6 +258,7 @@ npm run e2e         # end-to-end MCP harness (below)
 npm run e2e:agent   # agent harness (below, calls real Claude)
 npm run bench       # pinpoint benchmark (below, calls real Claude)
 npm run perf        # speed A/B of two builds on your indexed repos (docs/perf-loop.md, no model calls)
+npm run upgrade-check -- --from <old dist>   # build a DB with the last release, open it with this source: migrations, co-change rebuild, redaction (temp folder only)
 npm run taskbench   # task benchmark: with vs without Grimoire on real fix tasks (below, calls real Claude)
 npm run eval -- --cochange   # offline: does co-change predict the files that change together? (time split)
 ```
@@ -314,6 +334,7 @@ npm run taskbench -- --run --tasks bench/tasks.local.json --seeds 3             
 
 - **Mining** keeps a fix commit only if the test patch alone fails on the parent (3 runs) and the whole commit passes (3 runs) — flaky tests are dropped. Filters: non-merge, 1–15 files, ≥1 test file and ≥1 source file, ≤100 non-test lines, no dependency-file changes. Expect roughly 5–10% of test-touching commits to qualify. Then edit each task's `prompt` into a symptom description (the default is the commit subject, which may leak the fix).
 - **Running** gives `claude -p` the prompt in a fresh worktree at the parent commit. By default it runs on your Claude subscription login (Pro/Max): no extra charge, but it uses your plan's usage limits, and the `$` in the results is only the API-equivalent estimate. Your own `~/.claude` settings apply equally to both modes; a globally installed Grimoire hook is switched off with `GRIMOIRE_HOOKS=0` so it can't leak into the control group or capture benchmark prompts into your real database. `--bare` gives a cleaner comparison with all user settings off, but per the docs it needs `ANTHROPIC_API_KEY` and is billed per token. In `grimoire` mode the temp index sees only commits up to the parent (time masking) and the edit-time hook is passed via `--settings`. Scoring applies the real test patch (`pass`), then the parent's tests (`p2p_broken`), and compares edited files with the real fix (`stray`, `missed`), plus billed cost from `total_cost_usd`/`modelUsage`, turns, reverted edits and churn ratio.
+- Each run also records **whether Grimoire actually reached the agent**: how many times the hook injected context (per event, with chars and files, via `GRIMOIRE_HOOK_TRACE`) and how many Grimoire MCP tools it called. In `grimoire` mode the hooks are the same set `grimoire install claude-code --hooks` writes, with capture on in the temp database only. The summary splits paired runs into those Grimoire touched and those it didn't — a cost gap on untouched pairs is run-to-run noise, not Grimoire — and warns if a hook injected anything into the control group.
 - The summary pairs runs per task and seed; cost and turns are compared on pairs both modes solved (`_ok`), with a Wilcoxon signed-rank p. The acceptance criteria are fixed before looking (§3-4): pass rate not lower, no more regressions, and billed cost or turns down 15%+ or `missed`/`p2p_broken` significantly down. Size: a pilot of 10 tasks × 1 seed is 20 runs; the full 40 × 3 × 2 is 240 runs and will eat a large share of a subscription's usage limits.
 
 ### Cutting a release

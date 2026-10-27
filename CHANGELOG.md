@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/Stjoo0925/grimoire/compare/v0.7.0...v0.7.1) (2026-10-27)
+
+
+### 버그 수정
+
+* **update:** Windows에서 grimoire update가 내던 DEP0190 경고를 없앤다 ([#19](https://github.com/Stjoo0925/grimoire/issues/19)) ([2ca134b](https://github.com/Stjoo0925/grimoire/commit/2ca134b147f0fa01f88d66434b73d097f2ca8ebb))
+
 ## [0.7.0](https://github.com/Stjoo0925/grimoire/compare/v0.6.2...v0.7.0) (2026-10-27)
 
 

@@ -76,10 +76,16 @@ const LEADING_ENV = /^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+)+/;
 const GIT_COMMIT = /(^|[;&|]\s*)git\s+(-C\s+("[^"]+"|'[^']+'|\S+)\s+)?commit\b/;
 const COMMIT_FAILED = /nothing to commit|nothing added to commit|error:|fatal:|Aborting commit/i;
 
-export function isVerifyCommand(command: string): boolean {
+/** 명령에서 검증 조각만 — `cd "긴 경로" && npm test 2>&1 | tail`이면 "npm test 2>&1". 앞의 환경 변수는 뗀다 */
+function verifySegments(command: string): string[] {
   return command
     .split(/&&|\|\|?|;|\n/)
-    .some((segment) => VERIFY_COMMAND.test(segment.trim().replace(LEADING_ENV, "")));
+    .map((segment) => segment.trim().replace(LEADING_ENV, ""))
+    .filter((segment) => VERIFY_COMMAND.test(segment));
+}
+
+export function isVerifyCommand(command: string): boolean {
+  return verifySegments(command).length > 0;
 }
 
 export function isGitCommit(command: string): boolean {
@@ -149,10 +155,12 @@ export function verifyOutcome(response: { stdout?: unknown; stderr?: unknown; in
 /**
  * 저장할 검증 기록 한 줄 — "명령 → pass|fail :: 실패 출력 끝". 명령과 출력은 저장 전에 비밀을 지운다
  * (`API_KEY=sk-… npm test`처럼 명령에 값을 붙여 돌리거나, 실패 출력에 토큰이 찍힐 수 있다). 자르기 전에 지운다 —
- * 자른 뒤 지우면 반쯤 잘린 토큰이 패턴에 안 걸려 남는다.
+ * 자른 뒤 지우면 반쯤 잘린 토큰이 패턴에 안 걸려 남는다. 명령은 검증 조각만 남긴다 — 통째로 200자에서 자르면
+ * `cd "긴 경로" && …`의 경로가 자리를 다 먹어 무엇을 돌렸는지가 잘려 나갔다(실제 DB).
  */
 export function verifyRecord(command: string, outcome: { ok: boolean; tail: string }): string {
-  const cleanCommand = redact(command).trim().slice(0, 200);
+  const segments = verifySegments(command);
+  const cleanCommand = redact(segments.length > 0 ? segments.join(" && ") : command).trim().slice(0, 200);
   const cleanTail = outcome.tail ? redact(outcome.tail) : "";
   return `${cleanCommand} → ${outcome.ok ? "pass" : "fail"}${cleanTail ? ` :: ${cleanTail}` : ""}`;
 }

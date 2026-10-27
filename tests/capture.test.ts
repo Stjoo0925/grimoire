@@ -365,6 +365,9 @@ test("verifyRecord: 검증 명령과 실패 출력의 비밀을 저장 전에 �
   // 200자에서 잘리는 자리에 걸친 토큰도 남지 않는다 (자르기 전에 지운다)
   const long = verifyRecord(`${"x".repeat(185)} ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123 npm test`, { ok: true, tail: "" });
   assert.ok(!long.includes("ghp_ABCDEF"), long);
+  // 검증 조각만 — 긴 cd 경로·파이프 뒤 꼬리·앞의 환경 변수는 남기지 않는다
+  const where = `cd "${"C:/very/long/path/".repeat(12)}" && CI=1 npm run typecheck 2>&1 | grep -c error && npm test 2>&1 | tail -5`;
+  assert.equal(verifyRecord(where, { ok: true, tail: "" }), "npm run typecheck 2>&1 && npm test 2>&1 → pass");
 });
 
 test("git -C <다른 레포> commit: 세션 기록을 남의 레포 커밋에 묶지 않는다", async () => {

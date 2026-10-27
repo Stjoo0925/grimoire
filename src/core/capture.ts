@@ -73,7 +73,12 @@ export const VERIFY_COMMAND = new RegExp(
 );
 /** 명령 조각 앞의 `CI=1 FOO=bar ` 같은 환경 변수 */
 const LEADING_ENV = /^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+)+/;
-const GIT_COMMIT = /(^|[;&|]\s*)git\s+(-C\s+("[^"]+"|'[^']+'|\S+)\s+)?commit\b/;
+/**
+ * `git … commit` — 앞의 환경 변수(`GIT_AUTHOR_NAME=x`)와 git 전역 옵션(`-C <경로>`·`-c k=v`·`--no-pager` 등)이
+ * 몇 개든 붙을 수 있다. 1번 묶음이 전역 옵션 전체. `commit-tree` 같은 다른 명령은 아니다.
+ */
+const GIT_COMMIT =
+  /(?:^|[;&|]\s*)(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*git((?:\s+(?:-C\s+(?:"[^"]+"|'[^']+'|\S+)|-c\s+\S+|--[\w-]+(?:=\S+)?))*)\s+commit(?=\s|$|[;&|])/;
 const COMMIT_FAILED = /nothing to commit|nothing added to commit|error:|fatal:|Aborting commit/i;
 
 /** 명령에서 검증 조각만 — `cd "긴 경로" && npm test 2>&1 | tail`이면 "npm test 2>&1". 앞의 환경 변수는 뗀다 */
@@ -97,9 +102,11 @@ export function isGitCommit(command: string): boolean {
  * 에이전트가 다른 폴더(다른 워크트리)를 -C로 가리키고 커밋하면 세션 폴더의 HEAD는 그 커밋이 아니다.
  */
 export function commitDir(command: string, cwd: string): string {
-  const match = /(?:^|[;&|]\s*)git\s+-C\s+("([^"]+)"|'([^']+)'|(\S+))\s+commit\b/.exec(command);
-  const target = match ? (match[2] ?? match[3] ?? match[4]) : null;
-  return target ? path.resolve(cwd, target) : cwd;
+  const options = GIT_COMMIT.exec(command)?.[1] ?? "";
+  // -C가 여럿이면 git처럼 차례로 이어 붙인다 (`-C a -C b` → a/b)
+  let dir = cwd;
+  for (const match of options.matchAll(/-C\s+(?:"([^"]+)"|'([^']+)'|(\S+))/g)) dir = path.resolve(dir, match[1] ?? match[2] ?? match[3]);
+  return dir;
 }
 
 /** `git commit`이 실제로 커밋을 만들었나 — tool_response로 추정 */

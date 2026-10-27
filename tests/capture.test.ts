@@ -359,6 +359,15 @@ test("commitDir: git -C <경로> commit이면 그 폴더(따옴표·상대경로
   assert.equal(commitDir("git -C '/tmp/x y' commit", cwd), path.resolve(cwd, "/tmp/x y"));
   assert.equal(commitDir("git -C other log && git commit -m y", cwd), cwd, "-C가 다른 명령에 붙은 것은 무시");
   assert.equal(isGitCommit('git -C "C:/a b/wt" commit -m x'), true);
+  // git 전역 옵션·앞의 환경 변수가 붙어도 커밋이다 — 전엔 놓쳐 세션 기록이 묶이지 않았다
+  for (const command of ["git -c user.name=a -c user.email=b commit -m x", "git --no-pager commit -m x", 'git -C "a b" -c core.hooksPath=/dev/null commit -m x', "GIT_AUTHOR_NAME=x git commit -m y", "git commit --amend --no-edit"]) {
+    assert.equal(isGitCommit(command), true, command);
+  }
+  for (const command of ["git commit-tree abc", "git log --grep=commit", "echo git commit"]) {
+    assert.equal(isGitCommit(command), false, command);
+  }
+  assert.equal(commitDir("git -c a=b -C ../wt commit -m x", cwd), path.resolve(cwd, "../wt"), "-c가 앞에 있어도 -C를 따른다");
+  assert.equal(commitDir("git -C a -C b commit", cwd), path.resolve(cwd, "a", "b"), "-C 여럿은 git처럼 이어 붙인다");
 });
 
 test("verifyRecord: 검증 명령과 실패 출력의 비밀을 저장 전에 지운다", async () => {

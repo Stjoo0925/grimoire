@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { test } from "node:test";
 
-import { bindToCommit, commitContextOf, isGitCommit, isSymptomOnly, isVerifyCommand, lineHashes, pendingEvents, recordPrompt, verifyOutcome, whyLine } from "../src/core/capture";
+import { bindToCommit, commitContextOf, commitDir, isGitCommit, isSymptomOnly, isVerifyCommand, lineHashes, pendingEvents, recordPrompt, verifyOutcome, whyLine } from "../src/core/capture";
 import { fileContext } from "../src/core/context";
 import { addedLines, headSha } from "../src/core/git";
 import { addRepo, indexCommitSha, syncRepo } from "../src/core/indexer";
@@ -291,4 +291,14 @@ test("막혔을 때 2단계: 꼬리표만 있는 커밋은 빈 항목으로 내�
   const passing = { ...fail, tool_response: { stdout: "const x = row.error;\nℹ fail 0\n", stderr: "warning: LF will be replaced by CRLF\n" } };
   assert.equal(await handleHook(context, event(dir, "s-c", passing)), null);
   assert.deepEqual(pendingEvents(db, "s-c", repo.id).filter((e) => e.kind === "verify").map((e) => e.text), ["npm test → pass"]);
+});
+
+test("commitDir: git -C <경로> commit이면 그 폴더(따옴표·상대경로), 아니면 cwd", () => {
+  const cwd = path.resolve(path.sep, "work", "repo");
+  assert.equal(commitDir('git commit -m "x"', cwd), cwd);
+  assert.equal(commitDir("git -C ../wt commit -m x", cwd), path.resolve(cwd, "../wt"));
+  assert.equal(commitDir('git add -A && git -C "C:/a b/wt" commit -q -F -', cwd), path.resolve(cwd, "C:/a b/wt"));
+  assert.equal(commitDir("git -C '/tmp/x y' commit", cwd), path.resolve(cwd, "/tmp/x y"));
+  assert.equal(commitDir("git -C other log && git commit -m y", cwd), cwd, "-C가 다른 명령에 붙은 것은 무시");
+  assert.equal(isGitCommit('git -C "C:/a b/wt" commit -m x'), true);
 });

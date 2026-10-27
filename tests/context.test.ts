@@ -190,3 +190,11 @@ test("relativeToRepo: 레포 안 Claude Code worktree의 파일은 레포 기준
   assert.equal(relativeToRepo(repo, path.join(repo, ".claude", "worktrees", "x-1", "src", "a.ts")), "src/a.ts");
   assert.equal(relativeToRepo(repo, "src/b.ts"), "src/b.ts");
 });
+
+test("shortSubject: 넘칠 때 PR 번호부터 떼고, 그래도 넘치면 자른다 — 번호 중간에서 잘리지 않게", async () => {
+  const { shortSubject } = await import("../src/core/context.js");
+  assert.equal(shortSubject("fix: 짧음 (#12)", 60), "fix: 짧음 (#12)");
+  assert.equal(shortSubject("feat: 편집 직전 훅·커밋에 묶인 왜·공변경 (#17)", 30), "feat: 편집 직전 훅·커밋에 묶인 왜·공변경");
+  const cut = shortSubject("feat: 편집 직전 훅·커밋에 묶인 왜·공변경·작업 완수 벤치 — 에이전트 코딩 강화 (P0~P4) (#17)", 40);
+  assert.ok(cut.length <= 40 && cut.endsWith("…") && !cut.includes("(#"), cut);
+});

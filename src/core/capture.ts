@@ -9,6 +9,7 @@
  * 원문만, 요약 없음. 저장되는 것은 사용자의 말·명령 문자열·줄 해시뿐이다(도구 출력은 실패 stderr 끝 300자만).
  */
 import { createHash } from "node:crypto";
+import path from "node:path";
 
 import type { DB } from "./db";
 import { redact } from "./redact";
@@ -39,7 +40,7 @@ export const SESSION_TTL_DAYS = 14;
 /** 검증 명령 — 테스트·린트·타입체크·빌드 */
 export const VERIFY_COMMAND =
   /\b(npm (test|run (test|e2e|typecheck|lint|check|build)\w*)|npx (vitest|jest|tsc|eslint|playwright)|pnpm (test|run (test|lint|typecheck)\w*)|yarn (test|lint|typecheck)|bun test|pytest|python -m (pytest|unittest)|go (test|vet)|cargo (test|check|clippy)|gradle(w)? (test|check)|mvn (test|verify)|make (test|check)|dotnet test|mix test|rspec|bundle exec rspec|phpunit|swift test|ruff|mypy|flake8)\b/;
-const GIT_COMMIT = /(^|[;&|]\s*)git\s+(-C\s+\S+\s+)?commit\b/;
+const GIT_COMMIT = /(^|[;&|]\s*)git\s+(-C\s+("[^"]+"|'[^']+'|\S+)\s+)?commit\b/;
 const COMMIT_FAILED = /nothing to commit|nothing added to commit|error:|fatal:|Aborting commit/i;
 
 export function isVerifyCommand(command: string): boolean {
@@ -48,6 +49,16 @@ export function isVerifyCommand(command: string): boolean {
 
 export function isGitCommit(command: string): boolean {
   return GIT_COMMIT.test(command);
+}
+
+/**
+ * `git commit`이 돈 폴더 — `git -C <경로> commit`이면 그 경로(따옴표 허용, 상대경로는 cwd 기준), 아니면 cwd.
+ * 에이전트가 다른 폴더(다른 워크트리)를 -C로 가리키고 커밋하면 세션 폴더의 HEAD는 그 커밋이 아니다.
+ */
+export function commitDir(command: string, cwd: string): string {
+  const match = /(?:^|[;&|]\s*)git\s+-C\s+("([^"]+)"|'([^']+)'|(\S+))\s+commit\b/.exec(command);
+  const target = match ? (match[2] ?? match[3] ?? match[4]) : null;
+  return target ? path.resolve(cwd, target) : cwd;
 }
 
 /** `git commit`이 실제로 커밋을 만들었나 — tool_response로 추정 */

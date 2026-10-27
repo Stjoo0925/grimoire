@@ -128,6 +128,8 @@ Tests: tests/search.test.ts
 - `SessionStart` (startup, clear, compact) adds a 600-char summary: your last 3 commits here with their *why*, and files edited but never committed in earlier sessions.
 - The **first failing check** in a session (a failing `npm test`, `pytest`, …) triggers one more hook message: what past commits on the files you're editing recorded — their why, what verified them, what was edited then dropped, `Rejected:`/`Constraint:` trailers. Once per session; sessions that never get stuck pay nothing.
 - The hook is a separate light entry point (`dist/hook.js`), always exits 0, logs errors to `~/.grimoire/hook.log`, and never syncs. `GRIMOIRE_HOOKS=0` turns injection off; `grimoire doctor` checks the hook entry.
+- **Git worktrees** (Claude Code opens each session in `.claude/worktrees/<session>`) share the main repo's memory: a worktree is registered as its main repo, never as a repo of its own, and files in a worktree outside the repo folder are resolved to the same paths. A commit made in a worktree is bound to that worktree's HEAD. `grimoire doctor` flags worktrees that an older version registered separately.
+- **The same change counted once**: a PR squash-merged into main leaves the same change twice (the branch commit and the `(#N)` commit). Co-change, fix counts and recent commits fold them by subject and file set, and the *why* recorded on the branch commit is found from the squash commit too.
 
 ### The why, bound to the commit
 

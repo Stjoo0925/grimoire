@@ -117,6 +117,8 @@ Tests: tests/search.test.ts
 - `SessionStart`(startup·clear·compact)에는 600자 요약: 이 레포의 내 최근 커밋 3개와 그 *왜*, 이전 세션에서 고쳤지만 커밋하지 않은 파일.
 - 세션에서 **처음 실패한 검증**(`npm test`·`pytest` 등)이 나오면 한 번 더: 고치고 있는 파일들의 과거 커밋이 남긴 왜·검증·고쳤다가 뺀 파일·`Rejected:`/`Constraint:` 트레일러. 세션당 한 번이고, 막히지 않은 세션은 비용이 없습니다.
 - 훅은 가벼운 별도 진입점(`dist/hook.js`)이라 MCP 모듈을 불러오지 않고, 항상 exit 0, 오류는 `~/.grimoire/hook.log`, 동기화는 하지 않습니다. `GRIMOIRE_HOOKS=0`이면 주입을 끄고, `grimoire doctor`가 훅 항목을 점검합니다.
+- **git worktree**(Claude Code는 세션마다 `.claude/worktrees/<세션>`을 엽니다)는 본 레포의 기억을 같이 씁니다. 워크트리는 따로 등록되지 않고 본 레포로 등록되며, 레포 폴더 밖에 만든 워크트리의 파일도 같은 경로로 풉니다. 워크트리에서 만든 커밋은 그 워크트리의 HEAD에 묶입니다. 예전 버전이 워크트리를 따로 등록해 두었으면 `grimoire doctor`가 알려 줍니다.
+- **같은 변경은 한 번만**: PR을 squash로 합치면 같은 변경이 두 번 남습니다(브랜치 원본 커밋과 `(#N)` 커밋). 공변경·fix 수·최근 커밋은 제목과 파일 집합으로 둘을 접어 세고, 브랜치 커밋에 묶인 *왜*는 squash 커밋에서도 찾습니다.
 
 ### 커밋에 묶인 "왜"
 

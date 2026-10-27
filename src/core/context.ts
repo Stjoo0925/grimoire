@@ -428,6 +428,16 @@ export interface FormatOptions {
 export const HOOK_BUDGET = 400;
 
 /**
+ * 제목을 max자 안으로 — 넘칠 때는 끝의 PR 번호 "(#N)"부터 뗀다(커밋 sha가 이미 근거라 PR 번호는 덜 중요하다).
+ * 그래도 넘치면 자르고 "…". "(#…"처럼 번호 중간에서 잘리는 일이 없게.
+ */
+export function shortSubject(subject: string, max: number): string {
+  if (subject.length <= max) return subject;
+  const bare = subject.replace(/\s*\(#\d+\)\s*$/, "");
+  return bare.length <= max ? bare : `${bare.slice(0, max - 1).trimEnd()}…`;
+}
+
+/**
  * `Key: value` 한 줄에 사실 하나 — Claude Code의 gitStatus 리마인더·Mistral Vibe의 git 블록과 같은 꼴이라 모델에게 익숙하다.
  * 마크다운·산문 없음. 줄 만한 것이 없으면 빈 문자열.
  */
@@ -435,7 +445,7 @@ export function formatFileContext(context: FileContext, options: FormatOptions =
   if (!context.worth) return "";
   const me = options.me ?? [];
   const who = (line: CommitLine) => (me.includes(line.authorEmail.toLowerCase()) ? "me" : line.author);
-  const commit = (line: CommitLine) => `${line.sha.slice(0, 10)} ${line.date.slice(5, 10)} ${who(line)} "${line.subject.length > 60 ? `${line.subject.slice(0, 59)}…` : line.subject}"`;
+  const commit = (line: CommitLine) => `${line.sha.slice(0, 10)} ${line.date.slice(5, 10)} ${who(line)} "${shortSubject(line.subject, 60)}"`;
   const lines: { key: string; text: string; drop: number }[] = [];
   lines.push({ key: "head", text: `Grimoire: ${context.path}`, drop: 99 });
   if (context.recent.length > 0) lines.push({ key: "recent", text: `Recent: ${context.recent.slice(0, 2).map(commit).join(" · ")}`, drop: 98 });
@@ -463,7 +473,7 @@ export function formatFileContext(context: FileContext, options: FormatOptions =
   if (context.fragile) {
     lines.push({
       key: "fragile",
-      text: `Fixes(${FRAGILE_DAYS}d): ${context.fragile.fixes} of ${context.fragile.total} commits — ${context.fragile.reasons.map((line) => `${line.sha.slice(0, 10)} "${line.subject.length > 40 ? `${line.subject.slice(0, 39)}…` : line.subject}"`).join(", ")}`,
+      text: `Fixes(${FRAGILE_DAYS}d): ${context.fragile.fixes} of ${context.fragile.total} commits — ${context.fragile.reasons.map((line) => `${line.sha.slice(0, 10)} "${shortSubject(line.subject, 40)}"`).join(", ")}`,
       drop: 3,
     });
   }

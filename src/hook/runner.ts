@@ -16,6 +16,7 @@ import path from "node:path";
 import {
   bindToCommit,
   commitContextOf,
+  commitDir,
   commitSucceeded,
   isGitCommit,
   isSymptomOnly,
@@ -213,7 +214,7 @@ async function postToolUse(context: HookContext, input: HookInput): Promise<Hook
   if (isGitCommit(command) && commitSucceeded(input.tool_response)) {
     // 커밋은 명령이 돈 작업 폴더의 HEAD다 — 워크트리에서 일하는 세션이면 본 레포 폴더의 HEAD와 다르다
     // (본 레포 폴더에서 읽으면 세션 기록이 엉뚱한 커밋에 묶인다). 커밋 저장소는 같으므로 색인은 본 레포로 한다
-    const where = input.cwd ?? repo.path;
+    const where = commitDir(command, input.cwd ?? repo.path);
     const sha = await headSha(where);
     if (!sha) return null;
     // 커밋을 바로 색인해 두면(다음 동기화를 기다리지 않고) 묶을 수 있고 검색에도 바로 걸린다

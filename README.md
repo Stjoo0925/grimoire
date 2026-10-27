@@ -241,6 +241,7 @@ npm run e2e         # end-to-end MCP harness (below)
 npm run e2e:agent   # agent harness (below, calls real Claude)
 npm run bench       # pinpoint benchmark (below, calls real Claude)
 npm run perf        # speed A/B of two builds on your indexed repos (docs/perf-loop.md, no model calls)
+npm run upgrade-check -- --from <old dist>   # build a DB with the last release, open it with this source: migrations, co-change rebuild, redaction (temp folder only)
 npm run taskbench   # task benchmark: with vs without Grimoire on real fix tasks (below, calls real Claude)
 npm run eval -- --cochange   # offline: does co-change predict the files that change together? (time split)
 ```

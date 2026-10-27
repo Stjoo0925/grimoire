@@ -230,6 +230,7 @@ npm run e2e:agent   # 에이전트 하네스 (아래, 실제 Claude 호출)
 npm run bench       # 핀포인트 벤치 (아래, 실제 Claude 호출)
 npm run taskbench   # 작업 완수 벤치: 실제 fix 작업을 Grimoire 있음/없음으로 (아래, 실제 Claude 호출)
 npm run eval -- --cochange   # 오프라인: 공변경이 같이 바뀔 파일을 맞히나 (시간 분할)
+npm run upgrade-check -- --from <옛 dist>   # 지난 릴리스로 만든 DB를 지금 소스로 열어 마이그레이션·공변경 재계산·비밀 지우기 확인 (임시 폴더만)
 ```
 
 ### MCP 종단 하네스 (`e2e/harness.ts`)

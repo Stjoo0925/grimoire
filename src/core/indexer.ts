@@ -161,21 +161,56 @@ export interface RepoFile {
   relative: string;
 }
 
+/** `.git` 파일의 "gitdir: <본 레포>/.git/worktrees/<이름>" — 추가 작업 트리의 표식 */
+const WORKTREE_GITDIR = /^gitdir:\s*(.+?)[\\/]\.git[\\/]worktrees[\\/][^\\/]+[\\/]?\s*$/m;
+
 /**
- * 절대경로 → 등록 레포와 레포 기준 경로. 등록 레포 폴더 안(`.claude/worktrees/x/` 포함)이면 git을 부르지 않는다.
- * 레포 밖에 만든 추가 작업 트리(git worktree)의 파일이면 git으로 본 레포를 찾아 그 작업 트리 기준 경로로 푼다 —
- * 훅·file_context가 워크트리에서 일하는 세션에도 같은 기억을 쓰게. 해당 없으면 null.
+ * 폴더가 속한 추가 작업 트리(git worktree)의 최상위와 본 레포 — git을 띄우지 않고 `.git` 파일만 읽는다.
+ * 위로 올라가다 처음 만난 `.git`이 폴더면 평범한 레포(추가 작업 트리 아님), 파일이면 그 gitdir를 본다.
+ * 서브모듈(gitdir이 .git/modules/x)이나 레포 밖이면 null. 훅은 편집마다 도니 프로세스 하나(Windows 20~40ms)도 아낀다.
  */
-export async function resolveRepoFile(db: DB, target: string, signal?: AbortSignal): Promise<RepoFile | null> {
+function linkedWorktree(dir: string): { top: string; main: string } | null {
+  let current = dir;
+  for (;;) {
+    const dotGit = path.join(current, ".git");
+    let stat: fs.Stats | null = null;
+    try {
+      stat = fs.statSync(dotGit);
+    } catch {
+      // 없음 — 위로
+    }
+    if (stat?.isDirectory()) return null;
+    if (stat?.isFile()) {
+      let text: string;
+      try {
+        text = fs.readFileSync(dotGit, "utf8");
+      } catch {
+        return null;
+      }
+      const match = WORKTREE_GITDIR.exec(text);
+      return match ? { top: current, main: path.resolve(current, match[1]) } : null;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+/**
+ * 절대경로 → 등록 레포와 레포 기준 경로. git을 부르지 않는다 — 등록 레포 폴더 안(`.claude/worktrees/x/` 포함)이면
+ * 경로만으로, 레포 밖에 만든 추가 작업 트리(git worktree)의 파일이면 그 `.git` 파일로 본 레포를 찾아 작업 트리 기준
+ * 경로로 푼다 — 훅·file_context가 워크트리에서 일하는 세션에도 같은 기억을 쓰게. 해당 없으면 null.
+ */
+export async function resolveRepoFile(db: DB, target: string, _signal?: AbortSignal): Promise<RepoFile | null> {
   if (!path.isAbsolute(target)) return null;
   const direct = repoOfPath(db, target);
   if (direct) return { repo: direct, relative: relativeToRepo(direct.path, target) };
   const dir = existingDir(target);
   if (!dir) return null;
-  const roots = await worktreeRoots(dir, signal);
-  if (!roots || roots.main === roots.top) return null;
-  const repo = db.prepare("SELECT * FROM repos WHERE path = ?").get(roots.main) as RepoRow | undefined;
-  if (!repo) return null;
+  const roots = linkedWorktree(dir);
+  if (!roots) return null;
+  const repo = repoOfPath(db, roots.main);
+  if (!repo || repo.path !== roots.main) return null;
   return { repo, relative: path.relative(roots.top, path.resolve(target)).split(path.sep).join("/") };
 }
 

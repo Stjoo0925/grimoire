@@ -125,3 +125,22 @@ test("worktreeRegistrations: 예전 버전이 따로 등록한 워크트리를 �
   fs.rmSync(nested, { recursive: true, force: true });
   assert.deepEqual(await worktreeRegistrations(db), [], "경로가 사라진 레포는 doctor의 다른 점검이 다룬다");
 });
+
+test("resolveRepoFile: git 없이 .git 파일로 푼다 — 상대경로 gitdir도, 서브모듈은 아니다", async () => {
+  const db = memoryDb();
+  const main = makeRepo([{ message: "feat: 시작", files: { "src/a.ts": "1\n" } }], "gitfile-main");
+  const repo = await addRepo(db, main);
+  const parent = path.dirname(main);
+  // git 2.48+ worktree.useRelativePaths: gitdir이 작업 트리 기준 상대경로
+  const relative = path.join(parent, "gitfile-wt");
+  fs.mkdirSync(path.join(relative, "src"), { recursive: true });
+  fs.writeFileSync(path.join(relative, ".git"), `gitdir: ../${path.basename(main)}/.git/worktrees/gitfile-wt\n`);
+  const found = await resolveRepoFile(db, path.join(relative, "src", "a.ts"));
+  assert.equal(found?.repo.id, repo.id);
+  assert.equal(found?.relative, "src/a.ts");
+  // 서브모듈은 .git/modules/x를 가리킨다 — 추가 작업 트리가 아니다
+  const sub = path.join(parent, "gitfile-sub");
+  fs.mkdirSync(sub, { recursive: true });
+  fs.writeFileSync(path.join(sub, ".git"), `gitdir: ${main}/.git/modules/sub\n`);
+  assert.equal(await resolveRepoFile(db, path.join(sub, "x.ts")), null);
+});

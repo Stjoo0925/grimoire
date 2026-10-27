@@ -69,6 +69,8 @@ To run from source, clone it and run `npm install && npm run build && npm link`.
 
 Checks the Grimoire version (whether a new release is out), the node version and built-in SQLite (FTS5), git, the DB and registered repos, your email, and the config
 each client has (whether the node path exists, matches the current node, and points at the same DB), and tells you the command to fix it.
+With hooks installed it also checks that they point at this install and see the same data folder, counts hook errors from the last 7 days in `hook.log`,
+and flags repos whose co-change history still needs a rebuild after an upgrade (`grimoire sync`) or worktrees an older version registered separately.
 
 ### The project you're working in is registered automatically
 
@@ -127,8 +129,8 @@ Tests: tests/search.test.ts
 - `Co-changes` are mined from history as association rules over commits (merge and >10-file commits excluded, confidence ≥ 0.5 as a filter, most recent first, incremental on every sync). Set `GRIMOIRE_COCHANGE_MAX_FILES=20` (then `grimoire sync`) for repos whose commits routinely touch more than 10 files. `Tests` are name-matched pairs first (`foo.ts` ↔ `foo.test.ts`, `test_foo.py`, `foo_test.go`), then tests that change together with the file. `Fixes(90d)` appears only when 2+ fix commits make up 30%+ of the file's recent commits, with the shas.
 - `SessionStart` (startup, clear, compact) adds a 600-char summary: your last 3 commits here with their *why*, and files edited but never committed in earlier sessions.
 - The **first failing check** in a session (a failing `npm test`, `pytest`, …) triggers one more hook message: what past commits on the files you're editing recorded — their why, what verified them, what was edited then dropped, `Rejected:`/`Constraint:` trailers. Once per session; sessions that never get stuck pay nothing.
-- The hook is a separate light entry point (`dist/hook.js`), always exits 0, logs errors to `~/.grimoire/hook.log`, and never syncs. `GRIMOIRE_HOOKS=0` turns injection off; `grimoire doctor` checks the hook entry.
-- **Git worktrees** (Claude Code opens each session in `.claude/worktrees/<session>`) share the main repo's memory: a worktree is registered as its main repo, never as a repo of its own, and files in a worktree outside the repo folder are resolved to the same paths. A commit made in a worktree is bound to that worktree's HEAD. `grimoire doctor` flags worktrees that an older version registered separately.
+- The hook is a separate light entry point (`dist/hook.js`), always exits 0, logs errors to `~/.grimoire/hook.log` (capped at 512KB), and never syncs inline — at session start it may spawn a background `grimoire sync` it doesn't wait for (see below). It waits at most 1.5s for the DB write lock, so it can't hit Claude Code's hook timeout. `GRIMOIRE_HOOKS=0` turns injection off; `grimoire doctor` checks the hook entry.
+- **Git worktrees** (Claude Code opens each session in `.claude/worktrees/<session>`) share the main repo's memory: a worktree is registered as its main repo, never as a repo of its own, and files in a worktree outside the repo folder are resolved to the same paths (by reading its `.git` file — no git process per edit). Files opened through a symlink or junction (e.g. `~/code` → another disk) resolve to the registered repo too. A commit made in a worktree is bound to that worktree's HEAD. `grimoire doctor` flags worktrees that an older version registered separately.
 - **The same change counted once**: a PR squash-merged into main leaves the same change twice (the branch commit and the `(#N)` commit). Co-change, fix counts and recent commits fold them by subject and file set, and the *why* recorded on the branch commit is found from the squash commit too.
 
 ### The why, bound to the commit

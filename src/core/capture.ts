@@ -247,6 +247,11 @@ export interface BindInput {
   files: string[];
   /** 커밋 diff에 새로 들어간 줄의 해시 집합 (edit 이벤트의 해시와 대조해 dropped를 가린다) */
   addedHashes: Set<string>;
+  /**
+   * 커밋 뒤에도 작업 폴더에 변경이 남은 파일 (git status). 나눠서 커밋하는 중이면 이번 커밋에 없는 편집도 버린 게 아니라
+   * 아직 커밋 전이다 — dropped로 적지 않고 다음 커밋으로 넘긴다. 모르면(null·생략) 예전처럼 판정한다.
+   */
+  stillDirty?: Set<string> | null;
 }
 
 export interface BindResult {
@@ -267,8 +272,13 @@ export function bindToCommit(db: DB, input: BindInput): BindResult {
   const edits = events.filter((event) => event.kind === "edit").slice(-EDITS_PER_COMMIT);
   const committed = new Set(input.files);
   const dropped = new Set<string>();
+  const carried: SessionEvent[] = [];
   for (const edit of edits) {
     if (!edit.path || committed.has(edit.path)) continue;
+    if (input.stillDirty?.has(edit.path)) {
+      carried.push(edit);
+      continue;
+    }
     const hashes = edit.line_hashes ? (JSON.parse(edit.line_hashes) as string[]) : [];
     if (hashes.length === 0 || !hashes.some((item) => input.addedHashes.has(item))) dropped.add(edit.path);
   }
@@ -280,7 +290,13 @@ export function bindToCommit(db: DB, input: BindInput): BindResult {
     ordered.forEach((event, index) => insert.run(input.repoId, input.sha, "prompt", event.text, index));
     verifies.forEach((event, index) => insert.run(input.repoId, input.sha, "verify", event.text, index));
     [...dropped].forEach((file, index) => insert.run(input.repoId, input.sha, "dropped", file, index));
-    recordEvent(db, { sessionId: input.sessionId, repoId: input.repoId, kind: "commit", text: input.sha });
+    const committedAt = Date.now();
+    recordEvent(db, { sessionId: input.sessionId, repoId: input.repoId, kind: "commit", text: input.sha }, new Date(committedAt).toISOString());
+    // 아직 커밋 전인 파일의 편집은 커밋 표식 뒤로 다시 적어 다음 커밋이 묶게 한다 (pendingEvents는 표식보다 뒤만 본다)
+    for (const edit of carried) {
+      const lineHashes = edit.line_hashes ? (JSON.parse(edit.line_hashes) as string[]) : undefined;
+      recordEvent(db, { sessionId: input.sessionId, repoId: input.repoId, kind: "edit", text: edit.text, path: edit.path, lineHashes }, new Date(committedAt + 1).toISOString());
+    }
     refreshWhy(db, input.repoId, input.sha);
   })();
   return { prompts: prompts.length, verifies: verifies.length, dropped: [...dropped] };

@@ -398,6 +398,29 @@ export async function addedLines(dir: string, sha: string, maxLines = 5_000): Pr
 }
 
 /** HEAD의 sha */
+/**
+ * 작업 폴더에서 아직 커밋되지 않은 변경이 있는 파일(수정·추가·미추적, 레포 기준 경로). 못 읽으면 null.
+ * 커밋 직후에 부르면 "이번 커밋에 안 들어갔지만 아직 작업 중인 파일"이 된다.
+ */
+export async function dirtyFiles(dir: string): Promise<Set<string> | null> {
+  let out: string;
+  try {
+    out = await runGit(dir, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+  } catch {
+    return null;
+  }
+  const files = new Set<string>();
+  const entries = out.split("\0");
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (entry.length < 4) continue;
+    files.add(entry.slice(3));
+    // 이름 바꾸기·복사는 다음 칸이 옛 경로
+    if (entry[0] === "R" || entry[0] === "C") i++;
+  }
+  return files;
+}
+
 export async function headSha(dir: string): Promise<string | null> {
   try {
     return (await runGit(dir, ["rev-parse", "--verify", "--quiet", "HEAD"])).trim() || null;

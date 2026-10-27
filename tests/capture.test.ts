@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
 
@@ -423,4 +424,33 @@ test("recordPrompt: 슬래시 명령은 뒤에 사용자의 말이 있을 때만
     recordPrompt(db, "slash", null, prompt);
   }
   assert.deepEqual(texts(), ["완성도를 계속 올려라", "/src/a.ts 이 파일의 경계값을 고쳐", "결제 재시도 로직 정리해 줘"]);
+});
+
+test("나눠 커밋하기: 이번 커밋에 없지만 아직 작업 폴더에 변경이 남은 파일은 '버림'이 아니라 다음 커밋으로 넘긴다", async () => {
+  const db = memoryDb();
+  const dir = makeRepo([{ message: "feat: 시작", files: { "src/a.ts": "export const a = 1;\n", "src/b.ts": "export const b = 1;\n" }, date: "2024-01-01T10:00:00+09:00" }], "split");
+  const repo = await addRepo(db, dir);
+  await syncRepo(db, repo);
+  const context = { db, env: { GRIMOIRE_HOME: tempDir("grimoire-split-home-") }, me: [] };
+  const session = "split-1";
+  const editEvent = (file: string, text: string) => event(dir, session, { hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: path.join(dir, file), old_string: "1", new_string: text } });
+  const commitEvent = (message: string) => event(dir, session, { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: `git commit -m "${message}"` }, tool_response: { stdout: `[main 1234567] ${message}`, stderr: "" } });
+
+  // a·b 둘 다 실제로 고치고, a만 먼저 커밋 — b는 작업 폴더에 변경이 남아 있다
+  await handleHook(context, event(dir, session, { hook_event_name: "UserPromptSubmit", prompt: "a와 b의 경계값을 둘 다 고쳐" }));
+  fs.writeFileSync(path.join(dir, "src/a.ts"), "export const a = 2;\n");
+  await handleHook(context, editEvent("src/a.ts", "export const a = 2;"));
+  fs.writeFileSync(path.join(dir, "src/b.ts"), "export const b = 2;\n");
+  await handleHook(context, editEvent("src/b.ts", "export const b = 2;"));
+  git(dir, ["add", "src/a.ts"]);
+  git(dir, ["-c", "user.email=me@example.com", "-c", "user.name=me", "commit", "-q", "-m", "fix(a): 경계값"]);
+  await handleHook(context, commitEvent("fix(a): 경계값"));
+  const first = (await headSha(dir))!;
+  assert.deepEqual(commitContextOf(db, repo.id, first)?.dropped ?? [], [], "아직 커밋 전인 b를 '버림'으로 적으면 안 됩니다");
+  assert.deepEqual(pendingEvents(db, session, repo.id).map((e) => e.path), ["src/b.ts"], "b의 편집은 다음 커밋을 기다린다");
+
+  // b를 커밋하면 그 편집이 이 커밋의 세션 기록이 된다(넘겨진 편집이 소진됨)
+  git(dir, ["-c", "user.email=me@example.com", "-c", "user.name=me", "commit", "-q", "-am", "fix(b): 경계값"]);
+  await handleHook(context, commitEvent("fix(b): 경계값"));
+  assert.deepEqual(pendingEvents(db, session, repo.id), []);
 });

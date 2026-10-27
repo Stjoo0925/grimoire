@@ -34,7 +34,7 @@ import { isIndexable } from "../core/code";
 import { grimoireHome, type Env } from "../core/config";
 import { fileContext, formatFileContext, needsCochangeBackfill, TEST_PATH, HOOK_BUDGET } from "../core/context";
 import type { DB } from "../core/db";
-import { addedLines, headSha } from "../core/git";
+import { addedLines, dirtyFiles, headSha } from "../core/git";
 import { indexCommitSha, resolveRepoFile, type RepoRow } from "../core/indexer";
 
 /** 훅이 돌려주는 것 — Claude Code 규약(JSON은 hookSpecificOutput, 일부 이벤트는 plain stdout) */
@@ -243,8 +243,10 @@ async function postToolUse(context: HookContext, input: HookInput): Promise<Hook
     if (!sha) return null;
     // 커밋을 바로 색인해 두면(다음 동기화를 기다리지 않고) 묶을 수 있고 검색에도 바로 걸린다
     const files = (await indexCommitSha(context.db, repo, sha)) ?? [];
-    const addedHashes = new Set(lineHashes((await addedLines(where, sha)).join("\n")));
-    bindToCommit(context.db, { sessionId: input.session_id, repoId: repo.id, sha, files, addedHashes });
+    // 커밋 뒤에도 변경이 남은 파일 — 나눠 커밋하는 중이면 이번 커밋에 없는 편집은 "버림"이 아니라 아직 커밋 전이다
+    const [added, stillDirty] = await Promise.all([addedLines(where, sha), dirtyFiles(where)]);
+    const addedHashes = new Set(lineHashes(added.join("\n")));
+    bindToCommit(context.db, { sessionId: input.session_id, repoId: repo.id, sha, files, addedHashes, stillDirty });
   }
   return null;
 }

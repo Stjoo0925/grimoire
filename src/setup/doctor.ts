@@ -205,7 +205,7 @@ async function clientChecks(options: DoctorOptions, env: Env): Promise<Check[]> 
       checks.push(
         wrongNode
           ? { level: "warn", title: "claude-code: 다른 node로 등록돼 있습니다", detail: listed.trim(), fix: "grimoire install claude-code" }
-          : !sameDataHome(mcpHome, grimoireHome(env))
+          : !samePath(mcpHome, grimoireHome(env))
             ? { level: "warn", title: "claude-code: CLI와 다른 데이터 폴더를 봅니다", detail: `MCP: ${mcpHome} / CLI: ${grimoireHome(env)}`, fix: "grimoire install claude-code" }
             : { level: "ok", title: "claude-code: 등록됨" },
       );
@@ -235,11 +235,19 @@ async function clientChecks(options: DoctorOptions, env: Env): Promise<Check[]> 
       });
     } else if (path.resolve(parsed.node) !== path.resolve(process.execPath)) {
       checks.push({ level: "warn", title: "claude-code 훅: 지금과 다른 node로 등록돼 있습니다", detail: parsed.node, fix: "grimoire install claude-code --hooks" });
+    } else if (options.cliPath && !samePath(path.dirname(parsed.hook), path.dirname(options.cliPath))) {
+      // 다른 설치(예: 개발 중인 워크트리 빌드)의 hook.js — grimoire를 올려도 훅은 그 빌드로 계속 돈다
+      checks.push({
+        level: "warn",
+        title: "claude-code 훅: 지금 CLI와 다른 위치의 grimoire를 가리킵니다 — 업데이트가 훅에 닿지 않습니다",
+        detail: `훅: ${parsed.hook} / CLI: ${options.cliPath}`,
+        fix: "grimoire install claude-code --hooks",
+      });
     } else {
       checks.push({ level: "ok", title: `claude-code 훅: ${hooks.map((hook) => hook.event).join(", ")}`, detail: parsed.hook });
       // 훅은 설치 때 적힌 GRIMOIRE_HOME(없으면 기본 폴더)을 본다 — CLI와 다르면 훅이 쌓은 기억을 CLI·MCP가 못 본다
       const hookHome = dataHome(hookCommandEnv(hooks[0].command).GRIMOIRE_HOME);
-      if (!sameDataHome(hookHome, grimoireHome(env))) {
+      if (!samePath(hookHome, grimoireHome(env))) {
         checks.push({
           level: "warn",
           title: "claude-code 훅: CLI와 다른 데이터 폴더를 봅니다",
@@ -297,7 +305,7 @@ function specCheck(
     };
   }
   const mcpHome = dataHome(spec.env?.GRIMOIRE_HOME);
-  if (!sameDataHome(mcpHome, grimoireHome(env))) {
+  if (!samePath(mcpHome, grimoireHome(env))) {
     return {
       level: "warn",
       title: `${client}: CLI와 다른 데이터 폴더를 봅니다`,
@@ -316,8 +324,8 @@ function dataHome(configured: string | undefined): string {
   return path.resolve(configured?.trim() ? configured.trim() : grimoireHome({}));
 }
 
-/** 같은 데이터 폴더인가 — 설정에는 /로 적히고, Windows는 대소문자를 가리지 않는다 */
-function sameDataHome(a: string, b: string): boolean {
+/** 같은 경로인가 — 설정에는 /로 적히고, Windows는 대소문자를 가리지 않는다 */
+function samePath(a: string, b: string): boolean {
   const norm = (value: string) => (process.platform === "win32" ? path.resolve(value).toLowerCase() : path.resolve(value));
   return norm(a) === norm(b);
 }

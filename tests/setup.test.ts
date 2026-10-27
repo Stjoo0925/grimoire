@@ -426,8 +426,9 @@ test("openDb busyTimeoutMs: 다른 연결이 쓰기 잠금을 쥐면 그만큼�
 test("doctor: 훅이 CLI와 다른 데이터 폴더를 보면 알리고, hook.log는 훅의 폴더에서 읽는다", async () => {
   const { installHooks, hookCommandEnv } = await import("../src/setup/hooks.js");
   const home = tempDir();
-  const hookPath = path.join(tempDir(), "dist", "hook.js");
-  fs.mkdirSync(path.dirname(hookPath), { recursive: true });
+  // 훅은 CLI와 같은 설치(dist/hook.js 옆에 dist/cli.js)
+  const cliPath = fakeCli();
+  const hookPath = path.join(path.dirname(cliPath), "hook.js");
   fs.writeFileSync(hookPath, "");
   const hookHome = path.join(home, "hook-home");
   await installHooks({ hookPath, env: { GRIMOIRE_HOME: hookHome }, home });
@@ -437,12 +438,16 @@ test("doctor: 훅이 CLI와 다른 데이터 폴더를 보면 알리고, hook.lo
     throw new Error("down");
   }) as unknown as typeof fetch;
 
-  const other = await doctor({ cliPath: fakeCli(), env: { GRIMOIRE_HOME: path.join(home, "cli-home"), GRIMOIRE_ME: "me@example.com" }, home, fetchImpl: offline });
+  const other = await doctor({ cliPath, env: { GRIMOIRE_HOME: path.join(home, "cli-home"), GRIMOIRE_ME: "me@example.com" }, home, fetchImpl: offline });
   assert.ok(other.some((c) => c.level === "warn" && c.title === "claude-code 훅: CLI와 다른 데이터 폴더를 봅니다"), formatChecks(other));
   assert.ok(other.some((c) => c.title.includes("오류 1건")), "CLI 폴더가 아니라 훅 폴더의 hook.log를 읽어야 합니다");
 
   // 같은 폴더(설정엔 /로 적혀도)면 조용하다
-  const same = await doctor({ cliPath: fakeCli(), env: { GRIMOIRE_HOME: hookHome, GRIMOIRE_ME: "me@example.com" }, home, fetchImpl: offline });
+  const same = await doctor({ cliPath, env: { GRIMOIRE_HOME: hookHome, GRIMOIRE_ME: "me@example.com" }, home, fetchImpl: offline });
   assert.ok(!same.some((c) => c.title === "claude-code 훅: CLI와 다른 데이터 폴더를 봅니다"), formatChecks(same));
+
+  // 다른 설치(개발 중 워크트리 빌드 등)의 hook.js를 가리키면 — 업데이트가 훅에 닿지 않는다
+  const elsewhere = await doctor({ cliPath: fakeCli(), env: { GRIMOIRE_HOME: hookHome, GRIMOIRE_ME: "me@example.com" }, home, fetchImpl: offline });
+  assert.ok(elsewhere.some((c) => c.level === "warn" && c.title.startsWith("claude-code 훅: 지금 CLI와 다른 위치의 grimoire")), formatChecks(elsewhere));
   assert.deepEqual(hookCommandEnv('"n" "h" --env "GRIMOIRE_HOME=C:/x y" --env "GRIMOIRE_ME=a@b"'), { GRIMOIRE_HOME: "C:/x y", GRIMOIRE_ME: "a@b" });
 });

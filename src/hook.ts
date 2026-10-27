@@ -31,11 +31,24 @@ function parseEnvArgs(argv: string[]): Env {
   return env;
 }
 
+/** hook.log 크기 상한 — 넘으면 뒤쪽 절반만 남긴다 (훅은 편집마다 돌아 로그가 끝없이 커질 수 있다) */
+const LOG_MAX_BYTES = 512 * 1024;
+
 function log(env: Env, message: string): void {
   try {
     const home = grimoireHome(env);
     fs.mkdirSync(home, { recursive: true, mode: 0o700 });
-    fs.appendFileSync(path.join(home, "hook.log"), `${new Date().toISOString()} ${message}\n`, { mode: 0o600 });
+    const file = path.join(home, "hook.log");
+    try {
+      if (fs.statSync(file).size > LOG_MAX_BYTES) {
+        const text = fs.readFileSync(file, "utf8");
+        const tail = text.slice(text.length - LOG_MAX_BYTES / 2);
+        fs.writeFileSync(file, tail.slice(tail.indexOf("\n") + 1), { mode: 0o600 });
+      }
+    } catch {
+      // 아직 없음
+    }
+    fs.appendFileSync(file, `${new Date().toISOString()} ${message.replace(/\r?\n/g, " ⏎ ")}\n`, { mode: 0o600 });
   } catch {
     // 로그도 못 쓰면 조용히
   }

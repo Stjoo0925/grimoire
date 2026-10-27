@@ -222,6 +222,16 @@ async function clientChecks(options: DoctorOptions, env: Env): Promise<Check[]> 
       checks.push({ level: "warn", title: "claude-code 훅: 지금과 다른 node로 등록돼 있습니다", detail: parsed.node, fix: "grimoire install claude-code --hooks" });
     } else {
       checks.push({ level: "ok", title: `claude-code 훅: ${hooks.map((hook) => hook.event).join(", ")}`, detail: parsed.hook });
+      // 훅은 작업을 막지 않으려고 오류를 hook.log에만 남긴다 — 여기서 보여 주지 않으면 아무도 모른다
+      const recent = recentHookErrors(grimoireHome(env));
+      if (recent.count > 0) {
+        checks.push({
+          level: "warn",
+          title: `claude-code 훅: 최근 ${HOOK_ERROR_DAYS}일 오류 ${recent.count}건 — 훅이 맥락을 못 건넸을 수 있습니다`,
+          detail: recent.last ?? undefined,
+          fix: `${path.join(grimoireHome(env), "hook.log")}를 확인하세요`,
+        });
+      }
     }
   } else {
     checks.push({
@@ -273,6 +283,25 @@ function specCheck(
     return { level: "warn", title: `${client}: 다른 위치의 grimoire를 가리킵니다`, detail: script, fix };
   }
   return { level: "ok", title: `${client}: 등록됨`, detail: file };
+}
+
+export const HOOK_ERROR_DAYS = 7;
+
+/** hook.log에서 최근 며칠의 오류 줄 수와 마지막 줄 (줄 머리가 ISO 시각) */
+export function recentHookErrors(home: string, now = Date.now()): { count: number; last: string | null } {
+  let text: string;
+  try {
+    text = fs.readFileSync(path.join(home, "hook.log"), "utf8");
+  } catch {
+    return { count: 0, last: null };
+  }
+  const since = now - HOOK_ERROR_DAYS * 86_400_000;
+  const lines = text.split("\n").filter((line) => {
+    const at = Date.parse(line.slice(0, 24));
+    return Number.isFinite(at) && at >= since;
+  });
+  const last = lines.at(-1) ?? null;
+  return { count: lines.length, last: last && last.length > 200 ? `${last.slice(0, 199)}…` : last };
 }
 
 const ICON: Record<Level, string> = { ok: "✓", warn: "!", fail: "✗" };

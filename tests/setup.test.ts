@@ -354,3 +354,21 @@ test("DB 파일은 나만 읽을 수 있게 만든다 (이전 버전의 0644도 
   assert.equal(fs.statSync(`${file}-wal`).mode & 0o777, 0o600, "WAL도 DB 파일 권한을 따른다");
   db.close();
 });
+
+test("doctor: hook.log의 최근 오류만 센다 (7일 밖은 무시)", async () => {
+  const { recentHookErrors } = await import("../src/setup/doctor.js");
+  const home = tempDir();
+  assert.deepEqual(recentHookErrors(home), { count: 0, last: null });
+  const now = Date.parse("2026-10-27T00:00:00.000Z");
+  fs.writeFileSync(
+    path.join(home, "hook.log"),
+    [
+      "2026-10-01T00:00:00.000Z PreToolUse: old error",
+      "2026-10-25T00:00:00.000Z PreToolUse: db locked",
+      "garbage line",
+      "2026-10-26T12:00:00.000Z bad stdin: Unexpected token",
+      "",
+    ].join("\n"),
+  );
+  assert.deepEqual(recentHookErrors(home, now), { count: 2, last: "2026-10-26T12:00:00.000Z bad stdin: Unexpected token" });
+});

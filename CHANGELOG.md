@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/Stjoo0925/grimoire/compare/v0.6.2...v0.7.0) (2026-10-27)
+
+
+### 기능
+
+* 편집 직전 훅·커밋에 묶인 왜·공변경·작업 완수 벤치 — 에이전트 코딩 강화 (P0~P4) ([#17](https://github.com/Stjoo0925/grimoire/issues/17)) ([f9fc3d6](https://github.com/Stjoo0925/grimoire/commit/f9fc3d6df34cbcce2e5edbd082d846242bf11ccc))
+
 ## [0.6.2](https://github.com/Stjoo0925/grimoire/compare/v0.6.1...v0.6.2) (2026-10-26)
 
 

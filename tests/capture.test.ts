@@ -59,6 +59,34 @@ test("redact: private 블록·붙여 넣기·토큰·password= 값을 지운다"
   assert.equal(redact("검색이 느려서 p95를 20ms 아래로 내려 줘"), "검색이 느려서 p95를 20ms 아래로 내려 줘");
 });
 
+test("redact: 접두가 붙은 환경 변수 이름·연결 문자열·서비스별 토큰도 지운다", () => {
+  for (const [input, secret] of [
+    ["OPENAI_API_KEY=abcd1234efgh npm test", "abcd1234efgh"],
+    ["GITHUB_TOKEN=abcd1234 gh pr list", "abcd1234"],
+    ["DB_PASSWORD=hunter22 npm run e2e", "hunter22"],
+    ["export my-service-secret: 's3cr3tval'", "s3cr3tval"],
+    ["DATABASE_URL=postgres://app:s3cretpw@db:5432/x npm test", "s3cretpw"],
+    ["git clone https://user:ghtokenvalue@example.com/r.git", "ghtokenvalue"],
+    [["sk", "live", "51HabcdefghijklmnopqrstuVWX"].join("_"), "51Habcdefghijklmnopqrstu"],
+    ["glpat-abcdefghij1234567890", "abcdefghij1234567890"],
+    ["npm_abcdefghijklmnopqrstuvwxyz0123456789", "abcdefghijklmnopqrstuvwxyz0123456789"],
+    ["hf_abcdefghijklmnopqrstuvwxyzABCD", "abcdefghijklmnopqrstuvwxyzABCD"],
+    ["https://hooks.slack.com/services/T000/B000/XXXXXXXXXXXXXXXXXXXXXXXX", "XXXXXXXXXXXXXXXXXXXXXXXX"],
+  ] as const) {
+    const out = redact(input);
+    assert.ok(!out.includes(secret), `${input} → ${out}`);
+  }
+  // 키 이름과 주변은 남는다, 비밀 아닌 말은 그대로
+  assert.equal(redact("OPENAI_API_KEY=abcd1234efgh npm test"), "OPENAI_API_KEY=[redacted] npm test");
+  assert.equal(redact("DATABASE_URL=postgres://app:s3cretpw@db:5432/x"), "DATABASE_URL=postgres://app:[redacted]@db:5432/x");
+  assert.equal(redact("author: Kim, see https://example.com/a:b and user@example.com"), "author: Kim, see https://example.com/a:b and user@example.com");
+  assert.equal(redact("MYTOKEN=abcd1234 GITHUB_TOKEN_FILE=/run/x"), "MYTOKEN=abcd1234 GITHUB_TOKEN_FILE=/run/x", "낱말 안의 키워드·다른 이름은 그대로");
+  // 긴 입력에서도 선형 — 훅 안에서 돈다
+  const started = Date.now();
+  redact(`${"ab-cd-".repeat(10_000)}token`);
+  assert.ok(Date.now() - started < 200, `${Date.now() - started}ms`);
+});
+
 test("verify·commit 판정과 줄 해시", () => {
   assert.equal(isVerifyCommand("npm test"), true);
   assert.equal(isVerifyCommand("npm run e2e -- --json"), true);

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/Stjoo0925/grimoire/compare/v0.8.1...v0.9.0) (2026-10-27)
+
+
+### 기능
+
+* 노트를 파일에 묶고, 훅은 이력만 아는 것만 말한다 — 정체성 재정립 ([#28](https://github.com/Stjoo0925/grimoire/issues/28)) ([77c4b53](https://github.com/Stjoo0925/grimoire/commit/77c4b53101167dd166cbbe3e21320dff2c79d6dc))
+
 ## [0.8.1](https://github.com/Stjoo0925/grimoire/compare/v0.8.0...v0.8.1) (2026-10-27)
 
 

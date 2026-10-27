@@ -7,6 +7,7 @@
  * cli.js와 따로 둔 이유: 훅은 편집마다 돌고 150ms 예산이라 MCP SDK·검색 모듈을 불러오면 안 된다.
  * 절대 작업을 막지 않는다 — 어떤 경우에도 exit 0, 오류는 <GRIMOIRE_HOME>/hook.log에만, 3초 지나면 스스로 끝난다.
  */
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -86,6 +87,25 @@ function trace(env: Env, input: HookInput, text: string, error?: string): void {
   }
 }
 
+/**
+ * `grimoire sync <레포>`를 떼어 낸 프로세스로 띄우고 기다리지 않는다 — 훅은 바로 끝나고 동기화는 뒤에서 돈다.
+ * 업데이트 확인(네트워크)은 끈다. 띄우지 못해도 로그만 남긴다.
+ */
+function backgroundSync(env: Env, repoPath: string): void {
+  try {
+    const child = spawn(process.execPath, [path.join(__dirname, "cli.js"), "sync", repoPath], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+      env: { ...env, GRIMOIRE_UPDATE_CHECK: "0" },
+    });
+    child.on("error", (error) => log(env, `background sync: ${error.message}`));
+    child.unref();
+  } catch (error) {
+    log(env, `background sync: ${error instanceof Error ? error.message : error}`);
+  }
+}
+
 function readStdin(): Promise<string> {
   return new Promise((resolve) => {
     let data = "";
@@ -127,6 +147,7 @@ async function main(): Promise<void> {
     if (output?.json) process.stdout.write(JSON.stringify(output.json) + "\n");
     else if (output?.stdout) process.stdout.write(output.stdout + "\n");
     trace(env, input, output?.json?.hookSpecificOutput.additionalContext ?? output?.stdout ?? "");
+    if (output?.syncRepo) backgroundSync(env, output.syncRepo);
   } catch (error) {
     log(env, `${input.hook_event_name ?? "?"}: ${error instanceof Error ? (error.stack ?? error.message) : error}`);
     trace(env, input, "", error instanceof Error ? error.message : String(error));

@@ -32,7 +32,7 @@ import {
 } from "../core/capture";
 import { isIndexable } from "../core/code";
 import { grimoireHome, type Env } from "../core/config";
-import { fileContext, formatFileContext, TEST_PATH, HOOK_BUDGET } from "../core/context";
+import { fileContext, formatFileContext, needsCochangeBackfill, TEST_PATH, HOOK_BUDGET } from "../core/context";
 import type { DB } from "../core/db";
 import { addedLines, headSha } from "../core/git";
 import { indexCommitSha, resolveRepoFile, type RepoRow } from "../core/indexer";
@@ -41,6 +41,8 @@ import { indexCommitSha, resolveRepoFile, type RepoRow } from "../core/indexer";
 export interface HookOutput {
   json?: { hookSpecificOutput: { hookEventName: string; additionalContext: string } };
   stdout?: string;
+  /** 응답을 낸 뒤 백그라운드로 동기화할 레포 경로 — 훅은 기다리지 않는다(hook.ts가 떼어 낸 프로세스로 띄운다) */
+  syncRepo?: string;
 }
 
 export interface HookInput {
@@ -280,6 +282,20 @@ function struggleContext(context: HookContext, repo: RepoRow, sessionId: string)
 /** 세션 시작 요약의 글자 예산 */
 const START_BUDGET = 600;
 
+/** 마지막 동기화가 이보다 오래면 세션 시작 때 백그라운드로 다시 동기화한다 */
+export const SYNC_STALE_MS = 10 * 60_000;
+
+/**
+ * 세션 시작 때 이 레포를 백그라운드로 동기화해야 하나 — MCP 없이 훅만 쓰면 아무도 sync를 돌리지 않아
+ * 터미널에서 한 커밋·pull로 받은 커밋이 색인되지 않고, 업그레이드로 비워진 공변경 이력도 그대로 남는다.
+ * GRIMOIRE_SYNC_ON_START=0이면 MCP 서버와 똑같이 끈다.
+ */
+export function needsBackgroundSync(db: DB, env: Env, repo: RepoRow, now = Date.now()): boolean {
+  if (env.GRIMOIRE_SYNC_ON_START === "0") return false;
+  if (!repo.synced_at || needsCochangeBackfill(db, repo.id)) return true;
+  return now - Date.parse(repo.synced_at) > SYNC_STALE_MS;
+}
+
 /**
  * SessionStart(startup·clear·compact): 작업 레포의 "지난 세션 이후 내 커밋 + 묶인 왜 + 커밋 안 된 편집"을 600자 안에
  * plain stdout으로 (이 이벤트는 stdout이 그대로 컨텍스트가 된다). resume은 세션 파일을 이어 쓸 뿐 다시 내지 않는다.
@@ -287,9 +303,10 @@ const START_BUDGET = 600;
 async function sessionStart(context: HookContext, input: HookInput): Promise<HookOutput | null> {
   pruneSessions(context.env);
   pruneEvents(context.db);
-  if (input.source === "resume") return null;
   const repo = await sessionRepo(context, input);
   if (!repo) return null;
+  const sync = needsBackgroundSync(context.db, context.env, repo) ? { syncRepo: repo.path } : null;
+  if (input.source === "resume") return sync;
   const mine = context.me.map((email) => email.toLowerCase());
   const recent = context.db
     .prepare(
@@ -298,7 +315,7 @@ async function sessionStart(context: HookContext, input: HookInput): Promise<Hoo
         ORDER BY authored_at DESC LIMIT 3`,
     )
     .all(repo.id, ...mine) as { sha: string; date: string; email: string; subject: string }[];
-  if (recent.length === 0) return null;
+  if (recent.length === 0) return sync;
   const lines = [`Grimoire: ${repo.name} — recent commits${mine.length > 0 ? " (me)" : ""}`];
   for (const commit of recent) {
     const why = whyLine(context.db, repo.id, commit.sha, 100);
@@ -319,7 +336,7 @@ async function sessionStart(context: HookContext, input: HookInput): Promise<Hoo
     lines.splice(lines.length - 2, 1);
     text = lines.join("\n");
   }
-  return { stdout: text };
+  return { stdout: text, ...sync };
 }
 
 async function preToolUse(context: HookContext, input: HookInput): Promise<HookOutput | null> {

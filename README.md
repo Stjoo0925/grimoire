@@ -44,6 +44,7 @@ To run from source, clone it and run `npm install && npm run build && npm link`.
 | Claude Code (this repo only) | `grimoire install claude-code --project .` | `./.mcp.json` |
 | Claude Desktop | `grimoire install claude-desktop` | `claude_desktop_config.json` |
 | Cursor | `grimoire install cursor` (`--project .` for this repo only) | `~/.cursor/mcp.json` |
+| Codex | `grimoire install codex` | `~/.codex/config.toml` (`$CODEX_HOME` if set) |
 
 - The config contains the **absolute path of the node currently running**. GUI apps like Claude Desktop and Cursor
   don't see your shell's PATH, so `"command": "node"` fails with `spawn node ENOENT`. If you switch
@@ -52,6 +53,9 @@ To run from source, clone it and run `npm install && npm run build && npm link`.
   so the CLI and MCP server see the same DB.
 - Other server entries are left alone; only the `grimoire` entry is added. The existing file is backed up as `.bak`,
   and if its JSON is broken Grimoire stops without touching it. Add `--dry-run` to preview what would be written.
+- For Codex, only the `[mcp_servers.grimoire]` tables in `config.toml` are replaced; every other line, comment and line ending stays as it was.
+  The read-only tools get `approval_mode = "approve"`. If the `codex` command is installed, Grimoire asks Codex to read the new config back,
+  and if Codex rejects it (an older Codex that doesn't know a key), the file is restored. The Claude Code hooks don't apply to Codex.
 - For Claude Code (all projects), the read-only tools (`search_memory`, `show_commit`, `get_repo_overview`, `list_repos`)
   are added to `permissions.allow` in `~/.claude/settings.json` (under `CLAUDE_CONFIG_DIR` if set), so searches don't ask for approval.
   Tools that write (`add_repo`, `record_note`) are left out. Existing rules and keys stay as they are, and the file is backed up as `.bak` the same way.

@@ -210,7 +210,7 @@ async function cmdInstall(client: string | undefined, project: string | undefine
     const target = result.file ?? "claude CLI (사용자 범위)";
     if (dryRun) {
       print(`[dry-run] ${target}에 다음을 넣습니다:`);
-      print(result.command ?? JSON.stringify({ mcpServers: { grimoire: result.spec } }, null, 2));
+      print(result.command ?? result.preview ?? JSON.stringify({ mcpServers: { grimoire: result.spec } }, null, 2));
       if (result.permissions) {
         print(
           result.permissions.added.length > 0
@@ -228,6 +228,8 @@ async function cmdInstall(client: string | undefined, project: string | undefine
       print(added.length > 0 ? `  읽기 도구 승인 생략: ${file}에 ${added.length}개 추가` : `  읽기 도구 권한: 이미 있음 (${file})`);
       if (backup) print(`  이전 설정 백업: ${backup}`);
     }
+    if (result.approved) print(`  읽기 도구 승인 생략: ${result.approved.join(", ")}`);
+    if (result.verified === false) print("  codex 명령을 찾지 못해 Codex가 설정을 읽는지는 확인하지 못했습니다.");
     print(`  node: ${result.spec.command}`);
     print(`  다음: ${result.next}`);
     print("  확인: grimoire doctor");

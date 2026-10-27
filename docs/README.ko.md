@@ -44,6 +44,7 @@ grimoire doctor                       # 연결 상태 점검
 | Claude Code (이 레포만) | `grimoire install claude-code --project .` | `./.mcp.json` |
 | Claude Desktop | `grimoire install claude-desktop` | `claude_desktop_config.json` |
 | Cursor | `grimoire install cursor` (`--project .`이면 이 레포만) | `~/.cursor/mcp.json` |
+| Codex | `grimoire install codex` | `~/.codex/config.toml` (`$CODEX_HOME`이 있으면 그 아래) |
 
 - 설정에는 **지금 실행 중인 node의 절대경로**가 들어갑니다. Claude Desktop·Cursor 같은 GUI 앱은 셸의 PATH를
   모르기 때문에 `"command": "node"`로 적으면 `spawn node ENOENT`로 연결이 안 됩니다. node 버전을
@@ -52,6 +53,9 @@ grimoire doctor                       # 연결 상태 점검
   CLI와 MCP가 같은 DB를 보게 됩니다.
 - 다른 서버 항목은 그대로 두고 `grimoire` 항목만 넣습니다. 기존 파일은 `.bak`으로 백업하고, JSON이 깨져 있으면
   건드리지 않고 멈춥니다. 무엇을 쓸지 먼저 보려면 `--dry-run`을 붙이세요.
+- Codex는 `config.toml`에서 `[mcp_servers.grimoire]` 표만 바꾸고, 나머지 줄·주석·줄바꿈은 그대로 둡니다.
+  읽기 도구는 `approval_mode = "approve"`로 승인을 묻지 않게 합니다. `codex` 명령이 있으면 바뀐 설정을 Codex가 다시 읽어 보게 하고,
+  Codex가 거부하면(키를 모르는 옛 버전 등) 원래 파일로 되돌립니다. Claude Code 훅은 Codex에는 해당하지 않습니다.
 - 설치한 뒤에는 클라이언트를 다시 시작하세요(Claude Desktop은 ⌘Q로 완전히 종료).
 
 ### 연결이 안 될 때 — `grimoire doctor`

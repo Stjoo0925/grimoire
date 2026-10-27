@@ -9,6 +9,7 @@
  *
  * claude-code 사용자 범위는 읽기 전용 도구(readOnlyHint)를 `~/.claude/settings.json`의 `permissions.allow`에도 더한다.
  * 검색할 때마다 승인 창이 뜨지 않게 — 쓰기 도구(add_repo·record_note)는 넣지 않는다.
+ * codex는 JSON이 아니라 `~/.codex/config.toml`이다(codex.ts). 같은 읽기 도구를 approval_mode = "approve"로 둔다.
  */
 import { execFile } from "node:child_process";
 import fs from "node:fs";
@@ -17,9 +18,10 @@ import path from "node:path";
 
 import type { Env } from "../core/config";
 import { TOOLS } from "../mcp/tools";
+import { CodexConfigError, codexConfigPath, planCodexConfig, readCodexServer, verifyCodexConfig } from "./codex";
 
 export const SERVER_NAME = "grimoire";
-export const CLIENTS = ["claude-code", "claude-desktop", "cursor"] as const;
+export const CLIENTS = ["claude-code", "claude-desktop", "cursor", "codex"] as const;
 export type ClientName = (typeof CLIENTS)[number];
 
 /** 설정에 함께 옮겨 적는 환경 변수 — CLI와 MCP·훅이 같은 DB·같은 "나"·같은 자동 등록·기동 동기화·업데이트·캡처 설정을 보게 한다. */
@@ -52,10 +54,12 @@ export interface ConfigPathOptions {
   env?: Env;
 }
 
-/** 클라이언트별 JSON 설정 파일 경로. claude-code는 프로젝트 범위(.mcp.json)일 때만 파일을 쓴다. */
+/** 클라이언트별 설정 파일 경로. claude-code는 프로젝트 범위(.mcp.json)일 때만 파일을 쓴다. codex는 TOML이다. */
 export function configPath(client: ClientName, options: ConfigPathOptions = {}): string | null {
   const home = options.home ?? os.homedir();
   switch (client) {
+    case "codex":
+      return codexConfigPath({ home: options.home, env: options.env });
     case "claude-desktop":
       return path.join(desktopDataDir(options), "claude_desktop_config.json");
     case "cursor":
@@ -147,11 +151,14 @@ export function mergeServer(existing: unknown, spec: ServerSpec): Record<string,
   return base;
 }
 
+/** 확인 없이 불러도 되는 읽기 도구(readOnlyHint) 이름 */
+export function readOnlyTools(): string[] {
+  return TOOLS.filter((tool) => "annotations" in tool && "readOnlyHint" in tool.annotations && tool.annotations.readOnlyHint).map((tool) => tool.name);
+}
+
 /** Claude Code 권한 규칙 이름 — 확인 없이 불러도 되는 읽기 도구만 */
 export function readOnlyPermissions(): string[] {
-  return TOOLS.filter((tool) => "annotations" in tool && "readOnlyHint" in tool.annotations && tool.annotations.readOnlyHint).map(
-    (tool) => `mcp__${SERVER_NAME}__${tool.name}`,
-  );
+  return readOnlyTools().map((name) => `mcp__${SERVER_NAME}__${name}`);
 }
 
 /** Claude Code 사용자 설정 파일. CLAUDE_CONFIG_DIR을 쓰면 그 아래 */
@@ -187,6 +194,12 @@ export interface InstallResult {
   next: string;
   /** claude-code 사용자 범위: settings.json에 더한 권한 규칙 (dry-run이면 더할 규칙) */
   permissions?: { file: string; added: string[]; backup: string | null };
+  /** codex: 승인 없이 부르게 한 읽기 도구 */
+  approved?: string[];
+  /** codex: 설정 파일에 붙이는 블록 (dry-run 미리보기) */
+  preview?: string;
+  /** codex: 쓴 설정을 Codex가 다시 읽어 확인했는가 (codex 명령이 없으면 false) */
+  verified?: boolean;
 }
 
 export interface InstallOptions {
@@ -210,6 +223,7 @@ export async function install(client: ClientName, options: InstallOptions): Prom
   }
 
   const next = NEXT_STEP[client];
+  if (client === "codex") return installCodex(spec, options, next);
   const file = configPath(client, { project: options.project, home: options.home, env: options.env });
 
   if (file === null) {
@@ -245,6 +259,41 @@ export async function install(client: ClientName, options: InstallOptions): Prom
     return { client, file, backup: null, unchanged: plan.unchanged, next, spec };
   }
   return { client, file, backup: writeJson(plan), unchanged: false, next, spec };
+}
+
+/**
+ * codex: config.toml에서 grimoire 표만 바꾸고, 읽기 도구는 승인 없이 부르게 한다.
+ * 쓴 뒤 Codex가 그 설정을 못 읽으면(버전이 달라 모르는 키 등) 원래 내용으로 되돌리고 멈춘다 — Codex 전체가 안 뜨는 일을 막는다.
+ */
+async function installCodex(spec: ServerSpec, options: InstallOptions, next: string): Promise<InstallResult & { spec: ServerSpec }> {
+  if (options.project) {
+    throw new InstallError("codex는 사용자 설정(~/.codex/config.toml)에만 등록합니다 — --project 없이 실행하세요.");
+  }
+  const file = codexConfigPath({ home: options.home, env: options.env });
+  const raw = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null;
+  const approved = readOnlyTools();
+  let plan;
+  try {
+    plan = planCodexConfig(file, raw, SERVER_NAME, spec, approved);
+  } catch (error) {
+    if (error instanceof CodexConfigError) throw new InstallError(`${error.message}: ${file}\n직접 고치거나 그 항목을 지운 뒤 다시 하세요.`);
+    throw error;
+  }
+  const base = { client: "codex" as const, file, next, spec, approved, preview: plan.block };
+  if (options.dryRun || plan.unchanged) return { ...base, backup: null, unchanged: plan.unchanged };
+
+  const backup = writeJson(plan);
+  let verified: boolean;
+  try {
+    verified = await verifyCodexConfig(SERVER_NAME, options.runCommand);
+  } catch (error) {
+    // 되돌린다 — 원래 없던 파일이면 지운다
+    if (raw === null) fs.rmSync(file, { force: true });
+    else fs.writeFileSync(file, raw);
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new InstallError(`Codex가 바뀐 설정을 읽지 못해 되돌렸습니다: ${file}\n${reason}`);
+  }
+  return { ...base, backup, unchanged: false, verified };
 }
 
 export interface JsonPlan {
@@ -297,6 +346,7 @@ const NEXT_STEP: Record<ClientName, string> = {
   "claude-code": "새 Claude Code 세션에서 /mcp로 grimoire가 연결됐는지 확인하세요.",
   "claude-desktop": "Claude Desktop을 완전히 종료(⌘Q)했다가 다시 여세요.",
   cursor: "Cursor 설정 → MCP에서 grimoire를 켜거나 Cursor를 다시 시작하세요.",
+  codex: "새 Codex 세션에서 /mcp로 grimoire가 연결됐는지 확인하세요 (터미널: codex mcp list).",
 };
 
 export function claudeAddArgs(spec: ServerSpec): string[] {
@@ -306,6 +356,13 @@ export function claudeAddArgs(spec: ServerSpec): string[] {
 
 /** 이미 써 둔 설정 파일에서 grimoire 항목을 읽는다 (doctor용). 없으면 null. */
 export function readInstalled(file: string): ServerSpec | null {
+  if (file.endsWith(".toml")) {
+    try {
+      return readCodexServer(fs.readFileSync(file, "utf8"), SERVER_NAME);
+    } catch {
+      return null;
+    }
+  }
   try {
     const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { mcpServers?: Record<string, ServerSpec> };
     return parsed.mcpServers?.[SERVER_NAME] ?? null;

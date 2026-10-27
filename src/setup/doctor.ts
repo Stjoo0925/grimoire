@@ -191,7 +191,7 @@ async function clientChecks(options: DoctorOptions, env: Env): Promise<Check[]> 
     checks.push({
       level: "warn",
       title: "어떤 MCP 클라이언트에도 아직 등록하지 않았습니다",
-      fix: "grimoire install claude-code | claude-desktop | cursor",
+      fix: `grimoire install ${CLIENTS.join(" | ")}`,
     });
   }
 

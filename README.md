@@ -44,6 +44,7 @@ To run from source, clone it and run `npm install && npm run build && npm link`.
 | Claude Code (this repo only) | `grimoire install claude-code --project .` | `./.mcp.json` |
 | Claude Desktop | `grimoire install claude-desktop` | `claude_desktop_config.json` |
 | Cursor | `grimoire install cursor` (`--project .` for this repo only) | `~/.cursor/mcp.json` |
+| Codex | `grimoire install codex` | `~/.codex/config.toml` (`$CODEX_HOME` if set) |
 
 - The config contains the **absolute path of the node currently running**. GUI apps like Claude Desktop and Cursor
   don't see your shell's PATH, so `"command": "node"` fails with `spawn node ENOENT`. If you switch
@@ -52,6 +53,9 @@ To run from source, clone it and run `npm install && npm run build && npm link`.
   so the CLI and MCP server see the same DB.
 - Other server entries are left alone; only the `grimoire` entry is added. The existing file is backed up as `.bak`,
   and if its JSON is broken Grimoire stops without touching it. Add `--dry-run` to preview what would be written.
+- For Codex, only the `[mcp_servers.grimoire]` tables in `config.toml` are replaced; every other line, comment and line ending stays as it was.
+  The read-only tools get `approval_mode = "approve"`. If the `codex` command is installed, Grimoire asks Codex to read the new config back,
+  and if Codex rejects it (an older Codex that doesn't know a key), the file is restored. The Claude Code hooks don't apply to Codex.
 - For Claude Code (all projects), the read-only tools (`search_memory`, `show_commit`, `get_repo_overview`, `list_repos`)
   are added to `permissions.allow` in `~/.claude/settings.json` (under `CLAUDE_CONFIG_DIR` if set), so searches don't ask for approval.
   Tools that write (`add_repo`, `record_note`) are left out. Existing rules and keys stay as they are, and the file is backed up as `.bak` the same way.
@@ -81,12 +85,13 @@ registered yet, Grimoire **registers it on startup and syncs it before any other
 - Results from the current repo are **ranked first** (other repos still show up), and responses include `current: "<repo>"`.
 - Set `GRIMOIRE_AUTO_ADD=0` to turn this off. Then, if the current repo isn't registered, the `hint` says so instead of staying silent.
 - Skipped when the repo root is your home directory or `/` (dotfile repos and the like).
-- Claude Desktop has no project folder (it starts the server in `/`), so register repos there as described below.
+- When the server isn't started in a repo (a global config launched from `/` or your home folder), Grimoire asks the client for its workspace folders (MCP roots) and uses the first one that is a git repo. Clients that don't support roots, like Claude Desktop, need repos registered as described below.
 
 ### Registering repos mid-conversation
 
 With no repos yet, results carry a `hint`, so the AI suggests registering first.
 The `add_repo` tool registers right from the conversation ("remember every repo under ~/work-dir" → `scan: true`).
+Indexing a whole folder can take a while, so clients that ask for progress get an update per repo.
 
 ### Tools
 
@@ -233,6 +238,16 @@ Set `GRIMOIRE_UPDATE_CHECK=0` to turn it off (run `grimoire install` again after
 - **When connected to an external LLM client over MCP, query results (commit messages, file paths, diffs) are passed to that LLM.**
   Don't register sensitive repos, or take them out with `grimoire remove <repo>`.
 - The DB is created readable only by you (`chmod 600`) on macOS/Linux. On Windows chmod has no effect and the DB relies on the NTFS permissions of your user profile (`%USERPROFILE%\.grimoire`), so don't point `GRIMOIRE_HOME` at a shared folder.
+
+### Security scanner alerts
+
+Scanners such as Socket flag the published package with a few supply-chain alerts. None of them is a vulnerability, and here is where each comes from:
+
+- **Network access** — the MCP SDK (`@modelcontextprotocol/server`) bundles HTTP transport and OAuth helpers that call `fetch`. Grimoire only uses the stdio transport, so that code never runs.
+- **URL strings** — the MCP SDK carries JSON Schema meta-schema IDs (`json-schema.org/...`) as plain identifiers, never fetched. The other hit is Grimoire's own update check against `api.github.com`, described above.
+- **AI-detected code anomaly** — `zod` (a dependency of the MCP SDK) builds its object parsers with `new Function` for speed. The generated code comes from schemas defined in source, not from user input.
+
+There is no install script (`postinstall`), and nothing else leaves your machine.
 
 ## Development
 

@@ -6,6 +6,9 @@
  * `claude mcp list` 같은 연결 확인은 서버를 띄웠다가 곧 끄므로, 그 사이에는 아무것도 쓰지 않는다.
  * 질의는 동기화 중에도 받는다 — DB가 WAL이라 읽기와 쓰기가 서로 막지 않는다.
  *
+ * 작업 폴더: cwd가 레포가 아니고 클라이언트가 roots를 지원하면, 시작 작업 때 roots에서 작업 레포를 찾는다(workspace.ts).
+ * 진행: 클라이언트가 progressToken을 보낸 호출(add_repo)은 레포마다 notifications/progress를 보낸다.
+ *
  * 취소: 요청의 취소 신호(notifications/cancelled, 연결 끊김)는 그 요청을 위해 부른 git까지 내려가 자식을 죽인다.
  * 뒤에서 도는 작업(기동 동기화·작업 레포 재동기화·diff 색인)은 한 요청의 취소로 멈추지 않고 서버 종료 때만 멈춘다.
  * 종료: 연결이 닫히거나 SIGTERM·SIGINT를 받으면 새 작업을 받지 않고, 진행 중인 작업을 잠깐(SHUTDOWN_WAIT_MS) 기다린 뒤
@@ -17,20 +20,22 @@
 import { Server, type Tool } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 
-import { dbPath } from "../core/config";
+import { dbPath, type Env } from "../core/config";
 import { openDb } from "../core/db";
 import { myEmails } from "../core/identity";
 import { indexCommitCode } from "../core/diffs";
 import { listRepos, syncRepo } from "../core/indexer";
 import { pendingUpdate, refreshUpdateCache, updateHint, VERSION } from "../core/update";
-import { callTool, describeError, ToolError, TOOLS, type ToolContext } from "./tools";
-import { resolveWorkspaceRoot, startWorkspace, type Background } from "./workspace";
+import { callTool, describeError, ToolError, TOOLS, type Progress, type ToolContext } from "./tools";
+import { resolveWorkspaceRoot, rootFromRoots, startWorkspace, type Background } from "./workspace";
 
 const SERVER_NAME = "grimoire";
 /** 도구 호출이 없어도 이만큼 지나면 시작 작업을 한다 — 연결 확인은 보통 이보다 빨리 끝난다 */
 const STARTUP_DELAY_MS = 3_000;
 /** 종료 때 진행 중인 작업(동기화·색인·도구 호출)을 기다리는 상한 */
 const SHUTDOWN_WAIT_MS = 5_000;
+/** 클라이언트에게 작업 폴더(roots)를 묻고 기다리는 상한 — 답이 없으면 작업 레포 없이 간다 */
+const ROOTS_TIMEOUT_MS = 5_000;
 
 export async function runMcpServer(env = process.env): Promise<void> {
   const db = openDb(dbPath(env));
@@ -49,7 +54,9 @@ export async function runMcpServer(env = process.env): Promise<void> {
   };
   const background: Background = { signal: stopping.signal, track };
 
-  const workspace = startWorkspace(db, await resolveWorkspaceRoot(process.cwd(), env), env, log, background);
+  // cwd가 레포면 그대로(Claude Code·Cursor), 아니면 시작 작업 때 클라이언트의 roots에서 찾는다
+  const cwdRoot = await resolveWorkspaceRoot(process.cwd(), env);
+  const workspace = startWorkspace(db, cwdRoot ?? (() => workspaceFromRoots(server, env, log)), env, log, background);
   let updateNotified = false;
   const context: ToolContext = {
     db,
@@ -96,7 +103,7 @@ export async function runMcpServer(env = process.env): Promise<void> {
   server.setRequestHandler("tools/call", async (request, ctx) => {
     if (closing) return { isError: true, content: [{ type: "text", text: "grimoire 서버가 종료 중입니다." }] };
     kickoff();
-    const call = callTool(context, request.params.name, request.params.arguments ?? {}, ctx.mcpReq.signal);
+    const call = callTool(context, request.params.name, request.params.arguments ?? {}, ctx.mcpReq.signal, progressOf(ctx.mcpReq));
     track(call);
     try {
       const result = await call;
@@ -147,6 +154,32 @@ export async function runMcpServer(env = process.env): Promise<void> {
   setTimeout(kickoff, STARTUP_DELAY_MS).unref();
   // 하루 한 번만 실제로 묻는다. 결과는 다음 search_memory·list_repos의 hint로 나간다.
   void refreshUpdateCache({ env });
+}
+
+/** 클라이언트가 roots를 지원하면 작업 폴더를 물어 등록할 레포를 찾는다. 못 찾거나 실패하면 null */
+async function workspaceFromRoots(server: Server, env: Env, log: (line: string) => void): Promise<string | null> {
+  if (!server.getClientCapabilities()?.roots) return null;
+  try {
+    const { roots } = await server.listRoots(undefined, { timeout: ROOTS_TIMEOUT_MS });
+    const root = await rootFromRoots(roots.map((item) => item.uri), env);
+    if (root) log(`클라이언트가 알려 준 작업 폴더를 씁니다: ${root}`);
+    return root;
+  } catch (error) {
+    log(`작업 폴더(roots)를 묻지 못했습니다 — ${error instanceof Error ? error.message : error}`);
+    return null;
+  }
+}
+
+/** 요청에 progressToken이 있으면 진행 알림을 보내는 함수. 보내기 실패는 무시한다(결과에는 영향 없음) */
+function progressOf(mcpReq: {
+  _meta?: { progressToken?: string | number };
+  notify: (notification: { method: string; params?: Record<string, unknown> }) => Promise<void>;
+}): Progress | undefined {
+  const token = mcpReq._meta?.progressToken;
+  if (token === undefined) return undefined;
+  return (progress, total, message) => {
+    void mcpReq.notify({ method: "notifications/progress", params: { progressToken: token, progress, total, message } }).catch(() => undefined);
+  };
 }
 
 async function backgroundSync(context: ToolContext, signal: AbortSignal): Promise<void> {

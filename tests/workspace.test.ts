@@ -3,11 +3,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 
 import { addRepo, listRepos, syncRepo, type RepoRow } from "../src/core/indexer";
 import { search } from "../src/core/search";
 import { callTool, emptyHint } from "../src/mcp/tools";
-import { isTempPath, resolveWorkspaceRoot, startWorkspace, waitForWorkspace, type Workspace } from "../src/mcp/workspace";
+import { isTempPath, resolveWorkspaceRoot, rootFromRoots, startWorkspace, waitForWorkspace, type Workspace } from "../src/mcp/workspace";
 import { makeRepo, memoryDb } from "./helpers";
 
 const quiet = () => undefined;
@@ -58,6 +59,77 @@ test("startWorkspace: begin 전에는 아무것도 쓰지 않고, 새 레포는 
   assert.equal(off.disabled, true);
 
   assert.equal(await waitForWorkspace(undefined, 10), null);
+});
+
+test("rootFromRoots: file:// 중 처음 등록할 만한 레포 — 다른 스킴·레포 아님·임시 폴더는 건너뛴다", async () => {
+  const dir = project("app", "feat: 결제 웹훅 서명 검증");
+  const plain = fs.mkdtempSync(path.join(os.tmpdir(), "not-a-repo-"));
+  const force = { GRIMOIRE_AUTO_ADD: "1" };
+  const uris = ["https://example.com/app", pathToFileURL(plain).href, pathToFileURL(path.join(dir, "src")).href];
+  assert.equal(await rootFromRoots(uris, force), fs.realpathSync(dir));
+  // 기본값: 임시 폴더 안의 레포는 cwd와 마찬가지로 건너뛴다
+  assert.equal(await rootFromRoots(uris, {}), null);
+  assert.equal(await rootFromRoots(["file://%zz", "not a uri"], force), null);
+  assert.equal(await rootFromRoots([], force), null);
+});
+
+test("startWorkspace(찾기 함수): begin 때 한 번만 부르고, 찾은 레포를 등록한다. 꺼져 있으면 부르지 않는다", async () => {
+  const dir = project("app", "feat: 결제 웹훅 서명 검증");
+  const root = fs.realpathSync(dir);
+  let calls = 0;
+  const lookup = async () => {
+    calls++;
+    return root;
+  };
+
+  const db = memoryDb();
+  const workspace = startWorkspace(db, lookup, {}, quiet);
+  assert.equal(workspace.root, null); // 연결 뒤에야 알 수 있다
+  assert.equal(calls, 0);
+  const repo = await workspace.begin();
+  await workspace.begin();
+  assert.equal(calls, 1);
+  assert.equal(repo?.path, root);
+  assert.equal(workspace.root, root);
+  assert.equal(listRepos(db).length, 1);
+
+  const off = startWorkspace(memoryDb(), lookup, { GRIMOIRE_AUTO_ADD: "0" }, quiet);
+  assert.equal(await off.begin(), null);
+  assert.equal(calls, 1);
+
+  // 찾기가 실패하거나 못 찾으면 작업 레포 없이 간다
+  const failing = startWorkspace(memoryDb(), () => Promise.reject(new Error("roots 실패")), {}, quiet);
+  assert.equal(await failing.begin(), null);
+  assert.equal(failing.root, null);
+  const none = startWorkspace(memoryDb(), async () => null, {}, quiet);
+  assert.equal(await none.begin(), null);
+});
+
+test("add_repo 진행: 레포마다 done/total을 늘려 가며 알리고 마지막에 완료", async () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "grimoire-progress-"));
+  for (const name of ["api", "web"]) {
+    const dir = project(name, `feat: ${name} 시작`);
+    fs.renameSync(dir, path.join(parent, name));
+  }
+  const events: [number, number, string][] = [];
+  const context = { db: memoryDb(), me: [], cwd: parent };
+  const result = (await callTool(context, "add_repo", { path: parent, scan: true }, undefined, (done, total, message) => events.push([done, total, message]))) as {
+    added: unknown[];
+  };
+  assert.equal(result.added.length, 2);
+  assert.deepEqual(
+    events.map(([done, total]) => [done, total]),
+    [
+      [0, 2],
+      [1, 2],
+      [2, 2],
+    ],
+  );
+  assert.match(events[0][2], /(api|web) 인덱싱 중 \(1\/2\)/);
+  assert.equal(events[2][2], "인덱싱 완료");
+  // 진행을 원하지 않는 호출은 그대로 동작한다
+  const plain = (await callTool({ db: memoryDb(), me: [], cwd: parent }, "add_repo", { path: path.join(parent, "api") })) as { added: unknown[] };
+  assert.equal(plain.added.length, 1);
 });
 
 test("syncRepo: 같은 레포를 동시에 돌려도 행이 중복되지 않는다", async () => {

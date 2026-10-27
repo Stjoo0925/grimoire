@@ -44,6 +44,7 @@ grimoire doctor                       # 연결 상태 점검
 | Claude Code (이 레포만) | `grimoire install claude-code --project .` | `./.mcp.json` |
 | Claude Desktop | `grimoire install claude-desktop` | `claude_desktop_config.json` |
 | Cursor | `grimoire install cursor` (`--project .`이면 이 레포만) | `~/.cursor/mcp.json` |
+| Codex | `grimoire install codex` | `~/.codex/config.toml` (`$CODEX_HOME`이 있으면 그 아래) |
 
 - 설정에는 **지금 실행 중인 node의 절대경로**가 들어갑니다. Claude Desktop·Cursor 같은 GUI 앱은 셸의 PATH를
   모르기 때문에 `"command": "node"`로 적으면 `spawn node ENOENT`로 연결이 안 됩니다. node 버전을
@@ -52,6 +53,9 @@ grimoire doctor                       # 연결 상태 점검
   CLI와 MCP가 같은 DB를 보게 됩니다.
 - 다른 서버 항목은 그대로 두고 `grimoire` 항목만 넣습니다. 기존 파일은 `.bak`으로 백업하고, JSON이 깨져 있으면
   건드리지 않고 멈춥니다. 무엇을 쓸지 먼저 보려면 `--dry-run`을 붙이세요.
+- Codex는 `config.toml`에서 `[mcp_servers.grimoire]` 표만 바꾸고, 나머지 줄·주석·줄바꿈은 그대로 둡니다.
+  읽기 도구는 `approval_mode = "approve"`로 승인을 묻지 않게 합니다. `codex` 명령이 있으면 바뀐 설정을 Codex가 다시 읽어 보게 하고,
+  Codex가 거부하면(키를 모르는 옛 버전 등) 원래 파일로 되돌립니다. Claude Code 훅은 Codex에는 해당하지 않습니다.
 - 설치한 뒤에는 클라이언트를 다시 시작하세요(Claude Desktop은 ⌘Q로 완전히 종료).
 
 ### 연결이 안 될 때 — `grimoire doctor`
@@ -70,12 +74,13 @@ Grimoire가 **서버를 띄울 때 바로 등록하고, 다른 레포보다 먼�
 - 현재 레포의 결과를 **앞으로 당깁니다**(다른 레포 결과도 같이 나옵니다). 응답에는 `current: "<레포>"`가 붙습니다.
 - 끄려면 `GRIMOIRE_AUTO_ADD=0`. 꺼 둔 상태에서 현재 레포가 등록돼 있지 않으면, 조용히 빠지지 않고 `hint`로 알립니다.
 - 레포 최상위가 홈 디렉터리나 `/`이면(닷파일 레포 등) 건너뜁니다.
-- Claude Desktop은 프로젝트 폴더가 없어서(서버를 `/`에서 띄움) 아래처럼 직접 등록합니다.
+- 서버가 레포 밖에서 뜨면(전역 설정으로 `/`나 홈 폴더에서 띄운 경우) 클라이언트에게 작업 폴더(MCP roots)를 묻고, 그중 처음 나오는 git 레포를 씁니다. Claude Desktop처럼 roots를 지원하지 않는 클라이언트는 아래처럼 직접 등록합니다.
 
 ### 레포 등록은 대화 중에도
 
 아직 레포가 없으면 검색 결과에 안내(`hint`)가 실려, AI가 등록부터 하자고 말합니다.
 `add_repo` 도구로 대화 중에 바로 등록할 수 있습니다("~/work-dir 아래 레포 전부 기억해 줘" → `scan: true`).
+폴더 전체를 인덱싱하면 시간이 걸리므로, 진행 상황을 요청한 클라이언트에는 레포마다 진행을 알립니다.
 
 ### 도구
 
@@ -221,6 +226,16 @@ grimoire update --dry-run  # 무엇을 실행할지만 보기
 - **MCP로 외부 LLM 클라이언트에 연결하면 질의 결과(커밋 메시지·파일 경로·diff)는 그 LLM에 전달됩니다.**
   민감한 레포는 등록하지 말거나 `grimoire remove <repo>`로 빼세요.
 - macOS·Linux에서는 DB를 나만 읽을 수 있게(`chmod 600`) 만듭니다. Windows에서는 chmod가 의미 없어 사용자 프로필(`%USERPROFILE%\.grimoire`)의 NTFS 권한에 기대므로, `GRIMOIRE_HOME`을 공유 폴더로 지정하지 마세요.
+
+### 보안 스캐너 경고
+
+Socket 같은 스캐너는 배포된 패키지에 공급망 경고 몇 개를 띄웁니다. 모두 취약점이 아니며, 각각의 출처는 다음과 같습니다.
+
+- **Network access** — MCP SDK(`@modelcontextprotocol/server`)에 HTTP 전송·OAuth 헬퍼가 함께 들어 있어 `fetch` 호출이 잡힙니다. Grimoire는 stdio 전송만 쓰므로 그 코드는 실행되지 않습니다.
+- **URL strings** — MCP SDK가 JSON Schema 메타스키마 ID(`json-schema.org/...`)를 식별자 문자열로 갖고 있을 뿐 요청하지 않습니다. 나머지 하나는 위에 적은 Grimoire 자체의 `api.github.com` 업데이트 확인입니다.
+- **AI-detected code anomaly** — MCP SDK가 쓰는 `zod`가 속도를 위해 `new Function`으로 객체 파서를 만듭니다. 생성되는 코드는 소스에 정의된 스키마에서 나오며 사용자 입력과 무관합니다.
+
+설치 스크립트(`postinstall`)는 없고, 이 밖에 외부로 나가는 것은 없습니다.
 
 ## 개발
 

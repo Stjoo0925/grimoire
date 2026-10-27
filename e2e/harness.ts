@@ -16,7 +16,7 @@ import { parseArgs } from "node:util";
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
-import { addCommit, tempDir } from "../tests/helpers";
+import { addCommit, git, tempDir } from "../tests/helpers";
 
 import { makeFixture, ME } from "./fixture";
 
@@ -460,7 +460,9 @@ async function runScenario(spec: ServerSpec): Promise<StepResult[]> {
       email: ME,
       date: "2024-09-01T10:00:00+09:00",
     });
-    send({ ...base, hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: 'git commit -am "fix(pay): 웹훅 재전송 공격 방지"' }, tool_response: { stdout: "[main 1234567] fix(pay)", stderr: "" } });
+    // git이 찍는 요약 줄처럼 실제 새 커밋의 짧은 sha를 — 훅은 이것과 HEAD가 다르면 묶지 않는다
+    const made = git(fixture.api, ["rev-parse", "--short=7", "HEAD"]).trim();
+    send({ ...base, hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: 'git commit -am "fix(pay): 웹훅 재전송 공격 방지"' }, tool_response: { stdout: `[main ${made}] fix(pay)`, stderr: "" } });
     // 훅이 커밋을 바로 색인해 묶었으므로 MCP 세션은 동기화 없이도 찾는다 (제목에 없는 말 "타임스탬프"로)
     const found = await call(live(), "search_memory", { query: "타임스탬프 재전송" });
     const top = found.json?.hits?.[0];

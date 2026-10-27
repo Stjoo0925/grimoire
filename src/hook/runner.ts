@@ -17,6 +17,7 @@ import {
   bindToCommit,
   commitContextOf,
   commitDir,
+  committedShas,
   commitSucceeded,
   isGitCommit,
   isSymptomOnly,
@@ -241,6 +242,9 @@ async function postToolUse(context: HookContext, input: HookInput): Promise<Hook
     if (where !== cwd && (await resolveRepoFile(context.db, where))?.repo.id !== repo.id) return null;
     const sha = await headSha(where);
     if (!sha) return null;
+    // git이 찍은 새 커밋 sha와 읽은 HEAD가 다르면 커밋은 다른 곳(cd로 옮겨 간 다른 레포 등)에서 만들어졌다 — 묶지 않는다
+    const made = committedShas(input.tool_response);
+    if (made.length > 0 && !made.some((short) => sha.startsWith(short))) return null;
     // 커밋을 바로 색인해 두면(다음 동기화를 기다리지 않고) 묶을 수 있고 검색에도 바로 걸린다
     const files = (await indexCommitSha(context.db, repo, sha)) ?? [];
     // 커밋 뒤에도 변경이 남은 파일 — 나눠 커밋하는 중이면 이번 커밋에 없는 편집은 "버림"이 아니라 아직 커밋 전이다

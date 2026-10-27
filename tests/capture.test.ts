@@ -188,7 +188,8 @@ test("세션 캡처 → git commit 뒤 커밋에 묶이고 [why]로 검색된다
 
   // 실제 커밋은 search.ts만 (other.ts의 편집은 되돌린 셈)
   addCommit(dir, { message: "perf(search): 재정렬 후보 질의 개선", files: { "src/search.ts": "export const q = 2; // fast\n" }, date: "2024-02-01T10:00:00+09:00" });
-  await handleHook(context, event(dir, session, { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: 'git commit -am "perf(search): 재정렬 후보 질의 개선"' }, tool_response: { stdout: "[main abc1234] perf(search)", stderr: "" } }));
+  const made = (await headSha(dir))!.slice(0, 7);
+  await handleHook(context, event(dir, session, { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: 'git commit -am "perf(search): 재정렬 후보 질의 개선"' }, tool_response: { stdout: `[main ${made}] perf(search)`, stderr: "" } }));
 
   const sha = (await headSha(dir))!;
   const view = commitContextOf(db, repo.id, sha);
@@ -443,7 +444,7 @@ test("나눠 커밋하기: 이번 커밋에 없지만 아직 작업 폴더에 �
   const context = { db, env: { GRIMOIRE_HOME: tempDir("grimoire-split-home-") }, me: [] };
   const session = "split-1";
   const editEvent = (file: string, text: string) => event(dir, session, { hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: path.join(dir, file), old_string: "1", new_string: text } });
-  const commitEvent = (message: string) => event(dir, session, { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: `git commit -m "${message}"` }, tool_response: { stdout: `[main 1234567] ${message}`, stderr: "" } });
+  const commitEvent = async (message: string) => event(dir, session, { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: `git commit -m "${message}"` }, tool_response: { stdout: `[main ${(await headSha(dir))!.slice(0, 7)}] ${message}`, stderr: "" } });
 
   // a·b 둘 다 실제로 고치고, a만 먼저 커밋 — b는 작업 폴더에 변경이 남아 있다
   await handleHook(context, event(dir, session, { hook_event_name: "UserPromptSubmit", prompt: "a와 b의 경계값을 둘 다 고쳐" }));
@@ -453,14 +454,14 @@ test("나눠 커밋하기: 이번 커밋에 없지만 아직 작업 폴더에 �
   await handleHook(context, editEvent("src/b.ts", "export const b = 2;"));
   git(dir, ["add", "src/a.ts"]);
   git(dir, ["-c", "user.email=me@example.com", "-c", "user.name=me", "commit", "-q", "-m", "fix(a): 경계값"]);
-  await handleHook(context, commitEvent("fix(a): 경계값"));
+  await handleHook(context, await commitEvent("fix(a): 경계값"));
   const first = (await headSha(dir))!;
   assert.deepEqual(commitContextOf(db, repo.id, first)?.dropped ?? [], [], "아직 커밋 전인 b를 '버림'으로 적으면 안 됩니다");
   assert.deepEqual(pendingEvents(db, session, repo.id).map((e) => e.path), ["src/b.ts"], "b의 편집은 다음 커밋을 기다린다");
 
   // b를 커밋하면 그 편집이 이 커밋의 세션 기록이 된다(넘겨진 편집이 소진됨)
   git(dir, ["-c", "user.email=me@example.com", "-c", "user.name=me", "commit", "-q", "-am", "fix(b): 경계값"]);
-  await handleHook(context, commitEvent("fix(b): 경계값"));
+  await handleHook(context, await commitEvent("fix(b): 경계값"));
   assert.deepEqual(pendingEvents(db, session, repo.id), []);
 });
 
@@ -477,4 +478,21 @@ test("commitSucceeded: 요약 줄이 있으면 성공 — pre-commit 경고나 �
   assert.equal(commitSucceeded({ stdout: "[main 1a2b3c4] x\n", stderr: "", interrupted: true }), false);
   // -q로 요약 줄이 없으면 실패 낱말로 짐작
   assert.equal(commitSucceeded({ stdout: "", stderr: "" }), true);
+});
+
+test("cd ../다른레포 && git commit: git이 찍은 새 sha가 세션 폴더의 HEAD와 다르면 묶지 않는다", async () => {
+  const db = memoryDb();
+  const a = makeRepo([{ message: "feat: A 시작", files: { "src/a.ts": "1\n" } }], "cd-a");
+  const b = makeRepo([{ message: "feat: B 시작", files: { "src/b.ts": "1\n" } }], "cd-b");
+  const repoA = await addRepo(db, a);
+  await syncRepo(db, repoA);
+  const context = { db, env: { GRIMOIRE_HOME: tempDir() }, me: [] };
+  await handleHook(context, event(a, "s-cd", { hook_event_name: "UserPromptSubmit", prompt: "A의 경계값을 고치자" }));
+  const aHead = (await headSha(a))!;
+  addCommit(b, { message: "fix(b): B 고침", files: { "src/b.ts": "2\n" } });
+  const bShort = (await headSha(b))!.slice(0, 7);
+  const commit = { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: `cd "${b}" && git commit -am "fix(b): B 고침"` }, tool_response: { stdout: `[main ${bShort}] fix(b): B 고침\n`, stderr: "" } } as const;
+  await handleHook(context, event(a, "s-cd", commit));
+  assert.equal(commitContextOf(db, repoA.id, aHead), null, "A의 옛 HEAD에 세션 기록이 붙으면 안 됩니다");
+  assert.deepEqual(pendingEvents(db, "s-cd", repoA.id).map((e) => e.kind), ["prompt"], "A의 세션 기록은 A의 다음 커밋을 기다린다");
 });

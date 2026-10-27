@@ -111,14 +111,23 @@ export function commitDir(command: string, cwd: string): string {
 
 /** `git commit`이 실제로 커밋을 만들었나 — tool_response로 추정 */
 /** 커밋이 만들어지면 git이 찍는 요약 줄 — "[main 1a2b3c4] 제목", "[main (root-commit) 1a2b3c4] …", "[detached HEAD 1a2b3c4] …" */
-const COMMIT_SUMMARY = /^\[[^\]\n]*\b[0-9a-f]{7,40}\] /m;
+const COMMIT_SUMMARY = /^\[[^\]\n]*\b([0-9a-f]{7,40})\] /gm;
+
+/**
+ * 요약 줄에 찍힌 새 커밋의 짧은 sha들. 훅이 읽은 HEAD가 이것과 다르면 커밋은 다른 곳에서 만들어진 것이다
+ * (`cd ../다른레포 && git commit` — 세션 폴더의 HEAD는 예전 커밋이라 거기 묶으면 엉뚱한 커밋에 기록이 붙는다).
+ */
+export function committedShas(response: { stdout?: unknown; stderr?: unknown } | undefined): string[] {
+  const text = `${String(response?.stdout ?? "")}\n${String(response?.stderr ?? "")}`;
+  return [...text.matchAll(COMMIT_SUMMARY)].map((match) => match[1]);
+}
 
 export function commitSucceeded(response: { stdout?: unknown; stderr?: unknown; interrupted?: unknown } | undefined): boolean {
   if (!response || response.interrupted === true) return false;
   const text = `${String(response.stdout ?? "")}\n${String(response.stderr ?? "")}`;
   // 요약 줄이 있으면 커밋은 만들어졌다 — pre-commit 훅의 "error:" 경고나, 같은 명령의 뒤쪽(`&& git push`) 실패가
   // 찍혀도 실패로 보지 않는다. 요약 줄이 없을 때(-q 등)만 실패 낱말로 짐작한다
-  if (COMMIT_SUMMARY.test(text)) return true;
+  if (committedShas(response).length > 0) return true;
   return !COMMIT_FAILED.test(text);
 }
 

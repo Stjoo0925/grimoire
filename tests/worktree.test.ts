@@ -104,7 +104,7 @@ test("캡처: 워크트리에서 만든 커밋은 그 워크트리의 HEAD에 �
     hook_event_name: "PostToolUse",
     tool_name: "Bash",
     tool_input: { command: 'git commit -am "fix(a): 경계값"' },
-    tool_response: { stdout: "[feature abc1234] fix(a)", stderr: "" },
+    tool_response: { stdout: `[feature ${worktreeHead.slice(0, 7)}] fix(a)`, stderr: "" },
   } as HookInput);
 
   assert.deepEqual(commitContextOf(db, repo.id, worktreeHead)?.prompts, ["워크트리에서 a를 5로 바꾸는 이유는 경계값 때문"]);

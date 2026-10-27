@@ -103,12 +103,16 @@ export async function runMcpServer(env = process.env): Promise<void> {
   server.setRequestHandler("tools/call", async (request, ctx) => {
     if (closing) return { isError: true, content: [{ type: "text", text: "grimoire 서버가 종료 중입니다." }] };
     kickoff();
-    const call = callTool(context, request.params.name, request.params.arguments ?? {}, ctx.mcpReq.signal, progressOf(ctx.mcpReq));
+    const progress = progressOf(ctx.mcpReq);
+    const call = callTool(context, request.params.name, request.params.arguments ?? {}, ctx.mcpReq.signal, progress?.report);
     track(call);
     try {
       const result = await call;
+      // 보낸 진행 알림이 다 나간 뒤에 응답한다 — 안 그러면 마지막 알림("인덱싱 완료")이 응답보다 늦게 도착해 클라이언트가 놓친다
+      await progress?.settled();
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (error) {
+      await progress?.settled();
       // 알려진 원인은 사용자용 문장으로, 나머지는 일반 문장으로 — 전체 오류는 stderr에만 남긴다
       const { message } = describeError(error);
       if (!(error instanceof ToolError)) console.error(`[grimoire] ${request.params.name} 실패`, error);
@@ -170,15 +174,25 @@ async function workspaceFromRoots(server: Server, env: Env, log: (line: string) 
   }
 }
 
-/** 요청에 progressToken이 있으면 진행 알림을 보내는 함수. 보내기 실패는 무시한다(결과에는 영향 없음) */
-function progressOf(mcpReq: {
+/**
+ * 요청에 progressToken이 있으면 진행 알림을 보내는 함수(report)와, 보낸 알림이 다 나갈 때까지 기다리는 함수(settled).
+ * 도구는 알림을 기다리지 않고 보내므로, 응답 전에 settled()로 기다려야 마지막 알림이 응답보다 먼저 나간다.
+ * 보내기 실패는 무시한다(결과에는 영향 없음).
+ */
+export function progressOf(mcpReq: {
   _meta?: { progressToken?: string | number };
   notify: (notification: { method: string; params?: Record<string, unknown> }) => Promise<void>;
-}): Progress | undefined {
+}): { report: Progress; settled: () => Promise<void> } | undefined {
   const token = mcpReq._meta?.progressToken;
   if (token === undefined) return undefined;
-  return (progress, total, message) => {
-    void mcpReq.notify({ method: "notifications/progress", params: { progressToken: token, progress, total, message } }).catch(() => undefined);
+  const pending: Promise<void>[] = [];
+  return {
+    report: (progress, total, message) => {
+      pending.push(mcpReq.notify({ method: "notifications/progress", params: { progressToken: token, progress, total, message } }).catch(() => undefined));
+    },
+    settled: async () => {
+      await Promise.all(pending);
+    },
   };
 }
 

@@ -463,3 +463,18 @@ test("나눠 커밋하기: 이번 커밋에 없지만 아직 작업 폴더에 �
   await handleHook(context, commitEvent("fix(b): 경계값"));
   assert.deepEqual(pendingEvents(db, session, repo.id), []);
 });
+
+test("commitSucceeded: 요약 줄이 있으면 성공 — pre-commit 경고나 뒤쪽 git push 실패에 속지 않는다", async () => {
+  const { commitSucceeded } = await import("../src/core/capture.js");
+  // 커밋은 됐다
+  assert.equal(commitSucceeded({ stdout: "[main 1a2b3c4] fix(a): 경계값\n 1 file changed\n", stderr: "error: failed to push some refs to 'origin'\n" }), true, "&& git push 실패");
+  assert.equal(commitSucceeded({ stdout: "✖ eslint found 2 warnings\nerror: unused var (warning only)\n[feat/x 9f8e7d6] feat: 추가\n", stderr: "" }), true, "pre-commit 경고");
+  assert.equal(commitSucceeded({ stdout: "[main (root-commit) abcdef1] 시작\n", stderr: "" }), true);
+  assert.equal(commitSucceeded({ stdout: "[detached HEAD 1234567] wip\n", stderr: "" }), true);
+  // 커밋이 안 됐다
+  assert.equal(commitSucceeded({ stdout: "On branch main\nnothing to commit, working tree clean\n", stderr: "" }), false);
+  assert.equal(commitSucceeded({ stdout: "", stderr: "husky - pre-commit hook exited with code 1 (error)\nerror: lint failed\n" }), false);
+  assert.equal(commitSucceeded({ stdout: "[main 1a2b3c4] x\n", stderr: "", interrupted: true }), false);
+  // -q로 요약 줄이 없으면 실패 낱말로 짐작
+  assert.equal(commitSucceeded({ stdout: "", stderr: "" }), true);
+});

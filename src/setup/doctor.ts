@@ -13,7 +13,7 @@ import { runGit } from "../core/git";
 import { myEmails } from "../core/identity";
 import { listRepos, worktreeRegistrations } from "../core/indexer";
 import { compareVersions, RELEASES_URL, refreshUpdateCache, updateCheckEnabled, VERSION } from "../core/update";
-import { parseHookCommand, readInstalledHooks, settingsPath } from "./hooks";
+import { hookCommandEnv, parseHookCommand, readInstalledHooks, settingsPath } from "./hooks";
 import { CLIENTS, configPath, hasCommand, readInstalled, run, SERVER_NAME, staleDesktopConfigs } from "./install";
 
 export type Level = "ok" | "warn" | "fail";
@@ -200,10 +200,14 @@ async function clientChecks(options: DoctorOptions, env: Env): Promise<Check[]> 
       const listed = await run("claude", ["mcp", "get", SERVER_NAME]);
       anyInstalled = true;
       const wrongNode = !listed.includes(process.execPath);
+      // `claude mcp get`의 "Environment:" 아래 "GRIMOIRE_HOME=…" 줄 — 없으면 기본 폴더
+      const mcpHome = dataHome(/^\s*GRIMOIRE_HOME=(.+?)\s*$/m.exec(listed)?.[1]);
       checks.push(
         wrongNode
           ? { level: "warn", title: "claude-code: 다른 node로 등록돼 있습니다", detail: listed.trim(), fix: "grimoire install claude-code" }
-          : { level: "ok", title: "claude-code: 등록됨" },
+          : !sameDataHome(mcpHome, grimoireHome(env))
+            ? { level: "warn", title: "claude-code: CLI와 다른 데이터 폴더를 봅니다", detail: `MCP: ${mcpHome} / CLI: ${grimoireHome(env)}`, fix: "grimoire install claude-code" }
+            : { level: "ok", title: "claude-code: 등록됨" },
       );
     } catch {
       // 등록 안 됨 — 아래 공통 안내로
@@ -233,14 +237,24 @@ async function clientChecks(options: DoctorOptions, env: Env): Promise<Check[]> 
       checks.push({ level: "warn", title: "claude-code 훅: 지금과 다른 node로 등록돼 있습니다", detail: parsed.node, fix: "grimoire install claude-code --hooks" });
     } else {
       checks.push({ level: "ok", title: `claude-code 훅: ${hooks.map((hook) => hook.event).join(", ")}`, detail: parsed.hook });
-      // 훅은 작업을 막지 않으려고 오류를 hook.log에만 남긴다 — 여기서 보여 주지 않으면 아무도 모른다
-      const recent = recentHookErrors(grimoireHome(env));
+      // 훅은 설치 때 적힌 GRIMOIRE_HOME(없으면 기본 폴더)을 본다 — CLI와 다르면 훅이 쌓은 기억을 CLI·MCP가 못 본다
+      const hookHome = dataHome(hookCommandEnv(hooks[0].command).GRIMOIRE_HOME);
+      if (!sameDataHome(hookHome, grimoireHome(env))) {
+        checks.push({
+          level: "warn",
+          title: "claude-code 훅: CLI와 다른 데이터 폴더를 봅니다",
+          detail: `훅: ${hookHome} / CLI: ${grimoireHome(env)}`,
+          fix: "grimoire install claude-code --hooks",
+        });
+      }
+      // 훅은 작업을 막지 않으려고 오류를 hook.log에만 남긴다 — 여기서 보여 주지 않으면 아무도 모른다. 훅의 폴더에서 읽는다
+      const recent = recentHookErrors(hookHome);
       if (recent.count > 0) {
         checks.push({
           level: "warn",
           title: `claude-code 훅: 최근 ${HOOK_ERROR_DAYS}일 오류 ${recent.count}건 — 훅이 맥락을 못 건넸을 수 있습니다`,
           detail: recent.last ?? undefined,
-          fix: `${path.join(grimoireHome(env), "hook.log")}를 확인하세요`,
+          fix: `${path.join(hookHome, "hook.log")}를 확인하세요`,
         });
       }
     }
@@ -282,11 +296,12 @@ function specCheck(
       fix,
     };
   }
-  if ((spec.env?.GRIMOIRE_HOME ?? grimoireHome({})) !== grimoireHome(env)) {
+  const mcpHome = dataHome(spec.env?.GRIMOIRE_HOME);
+  if (!sameDataHome(mcpHome, grimoireHome(env))) {
     return {
       level: "warn",
       title: `${client}: CLI와 다른 데이터 폴더를 봅니다`,
-      detail: `MCP: ${spec.env?.GRIMOIRE_HOME ?? grimoireHome({})} / CLI: ${grimoireHome(env)}`,
+      detail: `MCP: ${mcpHome} / CLI: ${grimoireHome(env)}`,
       fix,
     };
   }
@@ -294,6 +309,17 @@ function specCheck(
     return { level: "warn", title: `${client}: 다른 위치의 grimoire를 가리킵니다`, detail: script, fix };
   }
   return { level: "ok", title: `${client}: 등록됨`, detail: file };
+}
+
+/** 클라이언트 설정에 적힌 GRIMOIRE_HOME(없으면 기본 폴더)을 절대경로로 */
+function dataHome(configured: string | undefined): string {
+  return path.resolve(configured?.trim() ? configured.trim() : grimoireHome({}));
+}
+
+/** 같은 데이터 폴더인가 — 설정에는 /로 적히고, Windows는 대소문자를 가리지 않는다 */
+function sameDataHome(a: string, b: string): boolean {
+  const norm = (value: string) => (process.platform === "win32" ? path.resolve(value).toLowerCase() : path.resolve(value));
+  return norm(a) === norm(b);
 }
 
 export const HOOK_ERROR_DAYS = 7;

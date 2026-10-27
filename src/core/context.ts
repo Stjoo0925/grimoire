@@ -167,10 +167,14 @@ export function rebuildCochange(db: DB, repoId: number, until?: string): number 
   return added;
 }
 
-/** 공변경 테이블이 아직 없는 레포인가 (마이그레이션 직후) */
+/**
+ * 공변경 테이블을 다시 만들어야 하는 레포인가 — 비어 있거나(마이그레이션 직후), 같은 변경을 걸러 내지 않은 옛 버전이
+ * 만든 것이거나. 후자는 업그레이드 중 아직 떠 있던 옛 프로세스(0.7.x MCP 서버 등)가 비워진 표를 다시 채운 경우로,
+ * 공변경 행은 있는데 cochange_seen이 비어 있다 — 그대로 두면 squash 중복으로 부푼 지지도가 영영 남는다.
+ */
 export function needsCochangeBackfill(db: DB, repoId: number): boolean {
   const has = db.prepare("SELECT 1 FROM cochange WHERE repo_id = ? LIMIT 1").get(repoId);
-  if (has) return false;
+  if (has) return !db.prepare("SELECT 1 FROM cochange_seen WHERE repo_id = ? LIMIT 1").get(repoId);
   // rebuildCochange와 같은 조건이어야 한다 — 의미 없는 커밋(wip·merge 등)만 있는 레포는 다시 만들어도 비어 있어서,
   // 조건이 다르면 영원히 "다시 계산해야 함"이 되어 세션마다 백그라운드 sync가 돌고 doctor가 계속 경고한다
   const commits = (

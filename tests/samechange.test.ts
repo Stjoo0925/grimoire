@@ -115,3 +115,21 @@ test("squash 중복: 세션 기록과 트레일러를 서로 다른 형제 커�
   assert.deepEqual(view?.prompts, ["경계값 0으로 막자"], "트레일러를 찾았다고 세션 기록 찾기를 멈추면 안 됩니다");
   assert.deepEqual(view?.trailers.map((trailer) => trailer.value), ["npm test"]);
 });
+
+test("옛 버전이 다시 채운 공변경(중복 거르기 기록 없음)은 다음 동기화에서 걸러 다시 만든다", async () => {
+  const { needsCochangeBackfill } = await import("../src/core/context.js");
+  const { dir } = await squashRepo();
+  const db = memoryDb();
+  const repo = await addRepo(db, dir);
+  await syncRepo(db, repo);
+  const support = () => cochangeOf(db, repo.id, "src/a.ts", { minSupport: 1 }).find((item) => item.path === "src/b.ts")?.support;
+  assert.equal(support(), 3);
+  assert.equal(needsCochangeBackfill(db, repo.id), false);
+  // 0.7.x가 업그레이드 중에 표를 다시 채운 상태를 흉내 — 지지도가 부풀고 cochange_seen은 없다
+  db.exec("UPDATE cochange SET support = support * 2; DELETE FROM cochange_seen;");
+  assert.equal(needsCochangeBackfill(db, repo.id), true);
+  addCommit(dir, { message: "docs: 메모", files: { "NOTES.md": "x\n" } });
+  await syncRepo(db, repo);
+  assert.equal(support(), 3, "다시 만들어 중복이 걸러져야 합니다");
+  assert.equal(needsCochangeBackfill(db, repo.id), false);
+});

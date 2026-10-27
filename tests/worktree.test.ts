@@ -144,3 +144,20 @@ test("resolveRepoFile: git 없이 .git 파일로 푼다 — 상대경로 gitdir�
   fs.writeFileSync(path.join(sub, ".git"), `gitdir: ${main}/.git/modules/sub\n`);
   assert.equal(await resolveRepoFile(db, path.join(sub, "x.ts")), null);
 });
+
+test("resolveRepoFile: 심볼릭 링크·정션 너머로 연 파일도 등록 레포로 푼다 (~/code → /Volumes/work 같은 경우)", async () => {
+  const db = memoryDb();
+  const main = makeRepo([{ message: "feat: 시작", files: { "src/a.ts": "1\n" } }], "symlink-main");
+  const repo = await addRepo(db, main);
+  const link = path.join(tempDir(), "linked");
+  fs.symlinkSync(main, link, process.platform === "win32" ? "junction" : "dir");
+  try {
+    const found = await resolveRepoFile(db, path.join(link, "src", "a.ts"));
+    assert.equal(found?.repo.id, repo.id);
+    assert.equal(found?.relative, "src/a.ts");
+    // 아직 없는 파일(새로 만들 파일)도
+    assert.equal((await resolveRepoFile(db, path.join(link, "src", "new", "b.ts")))?.relative, "src/new/b.ts");
+  } finally {
+    fs.unlinkSync(link);
+  }
+});

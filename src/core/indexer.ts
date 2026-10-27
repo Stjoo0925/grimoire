@@ -207,11 +207,30 @@ export async function resolveRepoFile(db: DB, target: string, _signal?: AbortSig
   if (direct) return { repo: direct, relative: relativeToRepo(direct.path, target) };
   const dir = existingDir(target);
   if (!dir) return null;
-  const roots = linkedWorktree(dir);
+  // 심볼릭 링크·정션 너머(예: ~/code → /Volumes/work)로 연 파일 — 등록 경로는 git이 준 실제 경로라 그대로는 안 맞는다.
+  // 있는 가장 가까운 폴더만 실제 경로로 바꿔 다시 본다 (시스템 호출 하나)
+  const real = realDir(dir);
+  if (real !== dir) {
+    const realTarget = path.join(real, path.relative(dir, path.resolve(target)));
+    const viaLink = repoOfPath(db, realTarget);
+    if (viaLink) return { repo: viaLink, relative: relativeToRepo(viaLink.path, realTarget) };
+  }
+  const roots = linkedWorktree(real);
   if (!roots) return null;
-  const repo = repoOfPath(db, roots.main);
-  if (!repo || repo.path !== roots.main) return null;
-  return { repo, relative: path.relative(roots.top, path.resolve(target)).split(path.sep).join("/") };
+  // gitdir이 상대경로면(git 2.48+) 링크 너머의 경로로 풀릴 수 있다 — 본 레포 경로도 실제 경로로
+  const main = realDir(roots.main);
+  const repo = repoOfPath(db, main);
+  if (!repo || repo.path !== main) return null;
+  return { repo, relative: path.relative(roots.top, path.join(real, path.relative(dir, path.resolve(target)))).split(path.sep).join("/") };
+}
+
+/** 폴더의 실제 경로(링크·정션·macOS /var → /private/var를 푼다). 못 풀면 그대로 */
+function realDir(dir: string): string {
+  try {
+    return fs.realpathSync.native(dir);
+  } catch {
+    return dir;
+  }
 }
 
 /**

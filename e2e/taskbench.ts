@@ -6,6 +6,7 @@
  *    --all: 브랜치 커밋까지 본다 (squash 머지 레포용, 같은 변경의 중복은 한 번만)
  *    --link backend/node_modules[,node_modules]: 작업 폴더마다 원본 레포의 그 폴더를 연결(Windows는 정션) — 의존성을 새로 깔지 않게.
  *      사례에 저장돼 실행 때도 같이 쓴다. 지울 때는 연결을 Node로 먼저 끊는다(git worktree remove는 정션 너머를 지운다)
+ *    --under backend/: 변경 파일이 모두 그 폴더 아래인 커밋만 (테스트 명령이 그 폴더에서 돌 때)
  *    --test의 {tests}: 그 사례의 테스트 파일들(레포 기준 경로)로 바뀐다 — 예: "cd backend && npx vitest run {tests}"
  *    사람이 tasks.local.json의 `prompt`를 증상 서술로 다듬는다 (기본값은 커밋 제목 — 수정 힌트가 들어 있을 수 있다).
  *
@@ -248,7 +249,7 @@ function changeKey(subject: string, files: string[]): string {
   return `${subject.replace(/\s*\(#\d+\)\s*$/, "").trim()}\0${[...files].sort().join("\n")}`;
 }
 
-function mine(repo: string, test: string, limit: number, existing: Task[], all = false, links: string[] = []): Task[] {
+function mine(repo: string, test: string, limit: number, existing: Task[], all = false, links: string[] = [], under = ""): Task[] {
   const known = new Set(existing.map((task) => task.sha));
   // --all: 브랜치·원격 브랜치의 커밋까지 — PR을 squash로 합치는 레포는 main만 보면 후보가 적다
   const log = git(repo, ["log", ...(all ? ["--all"] : []), "--no-merges", "--format=%H%x1f%P%x1f%s", "-n", "2000"]).trim().split("\n");
@@ -268,6 +269,8 @@ function mine(repo: string, test: string, limit: number, existing: Task[], all =
     const testFiles = changed.filter((file) => TEST_PATH.test(file));
     const files = changed.filter((file) => !TEST_PATH.test(file));
     if (testFiles.length === 0 || files.length === 0) continue;
+    // --under: 테스트 명령이 도는 하위 폴더(예: backend/)의 사례만 — 다른 폴더 테스트는 그 명령으로 못 돌린다
+    if (under && !changed.every((file) => file.startsWith(under))) continue;
     // 같은 변경이 커밋 둘로 남은 것(squash 머지 ↔ 브랜치 원본)은 한 번만
     const key = changeKey(subject, changed);
     if (seen.has(key)) continue;
@@ -526,6 +529,7 @@ async function main(): Promise<number> {
       limit: { type: "string" },
       all: { type: "boolean" },
       link: { type: "string" },
+      under: { type: "string" },
       out: { type: "string" },
       tasks: { type: "string" },
       seeds: { type: "string" },
@@ -543,7 +547,7 @@ async function main(): Promise<number> {
     const repo = path.resolve(expandHome(values.repo));
     const out = path.resolve(values.out ?? "bench/tasks.local.json");
     const existing: TaskFile = fs.existsSync(out) ? (JSON.parse(fs.readFileSync(out, "utf8")) as TaskFile) : { tasks: [] };
-    const tasks = mine(repo, values.test, Number.parseInt(values.limit ?? "40", 10) || 40, existing.tasks, values.all === true, (values.link ?? "").split(",").map((item) => item.trim()).filter(Boolean));
+    const tasks = mine(repo, values.test, Number.parseInt(values.limit ?? "40", 10) || 40, existing.tasks, values.all === true, (values.link ?? "").split(",").map((item) => item.trim()).filter(Boolean), values.under ?? "");
     fs.mkdirSync(path.dirname(out), { recursive: true });
     fs.writeFileSync(out, JSON.stringify({ tasks }, null, 2) + "\n");
     process.stdout.write(`${out}: 사례 ${tasks.length}개. 각 사례의 "prompt"를 증상 서술로 다듬으세요(비면 커밋 제목을 씁니다 — 수정 힌트가 샐 수 있습니다).\n`);

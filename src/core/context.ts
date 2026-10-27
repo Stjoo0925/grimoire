@@ -15,6 +15,7 @@
  *  - 동기화마다 새 커밋의 쌍만 더하는 증분 (모델은 커밋 20개 뒤 3%, 200개 뒤 8% 낡는다)
  * 훅(hook.ts)·MCP 도구(file_context)·CLI가 같은 함수를 쓴다.
  */
+import { createHash } from "node:crypto";
 import path from "node:path";
 
 import { isIndexable, SOURCE_EXT } from "./code";
@@ -99,6 +100,16 @@ export interface FileContext {
 
 /* ── 공변경 집계 ────────────────────────────────────────── */
 
+/**
+ * 같은 변경 키 — squash 머지 커밋과 브랜치의 원본 커밋은 제목(끝의 "(#N)" 제외)과 변경 파일 집합이 같다.
+ * 둘 다 색인되므로(브랜치·태그·원격까지 읽는다) 이 키로 한 번만 센다. 제목만 같고 파일이 다르면 다른 변경이다.
+ */
+export function changeKey(subject: string, files: string[]): string {
+  const normalized = subject.replace(/\s*\(#\d+\)\s*$/, "").trim();
+  const set = [...new Set(files)].sort().join("\n");
+  return createHash("sha1").update(`${normalized}\0${set}`).digest("hex").slice(0, 20);
+}
+
 /** 공변경 거래가 되는 커밋인가 */
 export function isCochangeCommit(subject: string, files: string[], meaningful: boolean): boolean {
   if (!meaningful || MERGE_SUBJECT.test(subject)) return false;
@@ -109,6 +120,9 @@ export function isCochangeCommit(subject: string, files: string[], meaningful: b
 export function addCochange(db: DB, repoId: number, commit: { subject: string; authoredAt: string; files: string[]; meaningful: boolean }): boolean {
   const files = [...new Set(commit.files)];
   if (!isCochangeCommit(commit.subject, files, commit.meaningful)) return false;
+  // 같은 변경(squash 머지 ↔ 브랜치 원본)은 한 번만 — 두 번 세면 지지도·신뢰도가 부풀어 "strong"이 남발된다
+  const seen = db.prepare("INSERT OR IGNORE INTO cochange_seen (repo_id, key) VALUES (?, ?)").run(repoId, changeKey(commit.subject, files));
+  if (seen.changes === 0) return false;
   const touch = db.prepare(
     `INSERT INTO file_touches (repo_id, path, commits) VALUES (?, ?, 1)
      ON CONFLICT (repo_id, path) DO UPDATE SET commits = commits + 1`,
@@ -131,6 +145,7 @@ export function addCochange(db: DB, repoId: number, commit: { subject: string; a
 export function rebuildCochange(db: DB, repoId: number, until?: string): number {
   db.prepare("DELETE FROM cochange WHERE repo_id = ?").run(repoId);
   db.prepare("DELETE FROM file_touches WHERE repo_id = ?").run(repoId);
+  db.prepare("DELETE FROM cochange_seen WHERE repo_id = ?").run(repoId);
   const rows = db
     .prepare(
       `SELECT sha, subject, authored_at, meaningful FROM commits
@@ -291,15 +306,48 @@ export function namedTests(db: DB, repoId: number, file: string): string[] {
 
 /* ── 파일 맥락 ──────────────────────────────────────────── */
 
-export function fileContext(db: DB, repoId: number, file: string): FileContext {
-  const recent = db
+/** CommitLine + 같은 변경으로 접힌 다른 sha들 (squash 머지 ↔ 브랜치 원본) */
+interface ChangeLine extends CommitLine {
+  shas: string[];
+}
+
+/**
+ * 커밋 줄들을 같은 변경 키로 접는다 — 순서는 그대로, 각 변경의 첫 줄(최신)이 대표, 나머지 sha는 shas에.
+ * change_key가 아직 없는 커밋(동기화 전 옛 DB)은 sha 자체를 키로 쓴다.
+ */
+function foldChanges(rows: (CommitLine & { changeKey: string | null })[]): ChangeLine[] {
+  const out: ChangeLine[] = [];
+  const index = new Map<string, number>();
+  for (const { changeKey: key, ...row } of rows) {
+    const id = key ?? row.sha;
+    const at = index.get(id);
+    if (at !== undefined) {
+      out[at].shas.push(row.sha);
+      continue;
+    }
+    index.set(id, out.length);
+    out.push({ ...row, shas: [row.sha] });
+  }
+  return out;
+}
+
+/** 한 파일을 건드린 의미 있는 커밋들을 같은 변경으로 접어 최신부터 */
+function changesTouching(db: DB, repoId: number, file: string, options: { since?: string; limit?: number } = {}): ChangeLine[] {
+  const rows = db
     .prepare(
-      `SELECT c.sha, c.authored_at AS date, c.author_name AS author, c.author_email AS authorEmail, c.subject
+      `SELECT c.sha, c.authored_at AS date, c.author_name AS author, c.author_email AS authorEmail, c.subject, c.change_key AS changeKey
          FROM commit_files f JOIN commits c ON c.repo_id = f.repo_id AND c.sha = f.sha
-        WHERE f.repo_id = ? AND f.path = ? AND c.meaningful = 1
-        ORDER BY c.authored_at DESC LIMIT ?`,
+        WHERE f.repo_id = ? AND f.path = ? AND c.meaningful = 1 ${options.since ? "AND c.authored_at >= ?" : ""}
+        ORDER BY c.authored_at DESC ${options.limit ? "LIMIT ?" : ""}`,
     )
-    .all(repoId, file, RECENT_COMMITS) as CommitLine[];
+    .all(repoId, file, ...(options.since ? [options.since] : []), ...(options.limit ? [options.limit] : [])) as (CommitLine & { changeKey: string | null })[];
+  return foldChanges(rows);
+}
+
+export function fileContext(db: DB, repoId: number, file: string): FileContext {
+  // 같은 수정이 squash 머지 커밋과 브랜치 원본으로 두 번 보이지 않게 접는다 — 접히는 만큼 넉넉히 읽는다
+  const changes = changesTouching(db, repoId, file, { limit: RECENT_COMMITS * 4 }).slice(0, RECENT_COMMITS);
+  const recent: CommitLine[] = changes.map(({ shas: _shas, ...line }) => line);
 
   const related = cochangeOf(db, repoId, file).filter((item) => !TEST_PATH.test(item.path)).slice(0, RELATED_MAX);
 
@@ -316,7 +364,7 @@ export function fileContext(db: DB, repoId: number, file: string): FileContext {
   const usedBy = importers.length >= USED_BY_MIN ? { count: importers.length, files: importers.slice(0, USED_BY_SHOWN) } : null;
 
   const fragile = fragility(db, repoId, file);
-  const why = whyOf(db, repoId, recent);
+  const why = whyOf(db, repoId, changes);
   const worth = related.length > 0 || tests.length > 0 || usedBy !== null || fragile !== null || why !== null;
   return { path: file, recent, why, related, tests, usedBy, fragile, worth };
 }
@@ -325,14 +373,8 @@ export function fileContext(db: DB, repoId: number, file: string): FileContext {
 function fragility(db: DB, repoId: number, file: string): FileContext["fragile"] {
   if (NON_CODE.test(file) || !isIndexable(file, 0)) return null;
   const since = new Date(Date.now() - FRAGILE_DAYS * 86_400_000).toISOString();
-  const rows = db
-    .prepare(
-      `SELECT c.sha, c.authored_at AS date, c.author_name AS author, c.author_email AS authorEmail, c.subject
-         FROM commit_files f JOIN commits c ON c.repo_id = f.repo_id AND c.sha = f.sha
-        WHERE f.repo_id = ? AND f.path = ? AND c.authored_at >= ? AND c.meaningful = 1
-        ORDER BY c.authored_at DESC`,
-    )
-    .all(repoId, file, since) as CommitLine[];
+  // 같은 수정은 한 번만 센다 — squash 머지 레포는 접지 않으면 fix 수와 전체 수가 모두 두 배가 된다
+  const rows = changesTouching(db, repoId, file, { since }).map(({ shas: _shas, ...line }) => line);
   if (rows.length === 0) return null;
   const fixes = rows.filter((row) => FIX_SUBJECT.test(row.subject));
   if (fixes.length < FRAGILE_MIN_FIXES || fixes.length / rows.length < FRAGILE_MIN_RATIO) return null;
@@ -343,7 +385,7 @@ function fragility(db: DB, repoId: number, file: string): FileContext["fragile"]
  * recent 커밋들에 묶인 의도 중 하나 — 검증 신호(통과한 verify·Tested 트레일러)가 있는 가장 최근 커밋을 우선,
  * 없으면 가장 최근의 의도. 그 커밋의 변경 파일이 HEAD에 하나도 없으면(이름 바꾸기·삭제) 쓰지 않는다.
  */
-function whyOf(db: DB, repoId: number, recent: CommitLine[]): Why | null {
+function whyOf(db: DB, repoId: number, recent: ChangeLine[]): Why | null {
   if (recent.length === 0) return null;
   const context = db.prepare("SELECT kind, text FROM commit_context WHERE repo_id = ? AND sha = ? ORDER BY ord");
   const alive = db.prepare(
@@ -351,7 +393,8 @@ function whyOf(db: DB, repoId: number, recent: CommitLine[]): Why | null {
   );
   let fallback: Why | null = null;
   for (const commit of recent) {
-    const rows = context.all(repoId, commit.sha) as { kind: string; text: string }[];
+    // 세션 기록은 워크트리의 브랜치 커밋에 묶이고, main에는 squash 커밋이 남는다 — 같은 변경의 모든 sha에서 찾는다
+    const rows = commit.shas.flatMap((sha) => context.all(repoId, sha) as { kind: string; text: string }[]);
     if (rows.length === 0) continue;
     if (!alive.get(repoId, commit.sha)) continue;
     const intent =

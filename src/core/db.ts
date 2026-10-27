@@ -278,6 +278,20 @@ const MIGRATIONS: string[] = [
   ALTER TABLE commits ADD COLUMN agent_signal TEXT;
   ALTER TABLE repos ADD COLUMN trailers_done INTEGER NOT NULL DEFAULT 0;
   `,
+  // 7: 같은 변경 키 — squash 머지 커밋과 브랜치 원본 커밋은 제목(PR 번호 접미 제외)과 변경 파일 집합이 같다.
+  //    공변경·취약도·최근 커밋이 같은 수정을 두 번 세지 않게(context.ts), 브랜치 커밋에 묶인 "왜"를 squash 커밋에서도
+  //    찾게(capture.ts). change_key는 동기화가 채우고, 중복으로 부풀었던 공변경 표는 비워 다음 동기화가 다시 만든다.
+  `
+  ALTER TABLE commits ADD COLUMN change_key TEXT;
+  CREATE INDEX commits_change_key ON commits(repo_id, change_key);
+  CREATE TABLE cochange_seen (
+    repo_id  INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    key      TEXT NOT NULL,
+    PRIMARY KEY (repo_id, key)
+  );
+  DELETE FROM cochange;
+  DELETE FROM file_touches;
+  `,
 ];
 
 export function openDb(file: string): DB {

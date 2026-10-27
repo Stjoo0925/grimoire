@@ -14,7 +14,7 @@ import path from "node:path";
 
 import { refreshWhy, storeTrailers } from "./capture";
 import { BLOB_BATCH_BYTES, extractSymbols, headerComment, listHeadFiles, readBlobs, splitIdentifier, type CodeSymbol, type HeadFile } from "./code";
-import { addCochange, cochangeInput, extractImportSpecs, needsCochangeBackfill, rebuildCochange, resolveImportSpecs } from "./context";
+import { addCochange, changeKey, cochangeInput, extractImportSpecs, needsCochangeBackfill, rebuildCochange, resolveImportSpecs } from "./context";
 import { deleteDoc, upsertDoc, pruneOrphanFts, type DB } from "./db";
 import {
   headTree,
@@ -296,6 +296,7 @@ async function syncRepoNow(db: DB, repo: RepoRow, signal?: AbortSignal): Promise
 
   db.transaction(() => {
     if (backfill) rebuildCochange(db, repo.id);
+    backfillChangeKeys(db, repo);
     backfillTrailers(db, repo);
 
     if (tech) {
@@ -482,6 +483,17 @@ function applyCode(db: DB, repo: RepoRow, code: CodeChanges): void {
   }
 }
 
+/** 옛 DB(마이그레이션 7 직후)의 커밋에 같은 변경 키를 채운다 — 한 번 채우면 새 커밋은 insertCommit이 넣는다 */
+function backfillChangeKeys(db: DB, repo: RepoRow): void {
+  const rows = db.prepare("SELECT sha, subject FROM commits WHERE repo_id = ? AND change_key IS NULL").all(repo.id) as { sha: string; subject: string }[];
+  if (rows.length === 0) return;
+  const filesOf = db.prepare("SELECT path FROM commit_files WHERE repo_id = ? AND sha = ?");
+  const set = db.prepare("UPDATE commits SET change_key = ? WHERE repo_id = ? AND sha = ?");
+  for (const row of rows) {
+    set.run(changeKey(row.subject, (filesOf.all(repo.id, row.sha) as { path: string }[]).map((item) => item.path)), repo.id, row.sha);
+  }
+}
+
 /**
  * 옛 DB(마이그레이션 직후)의 커밋 본문에서 트레일러를 한 번 읽어 둔다 — 훅 없이도 "왜"가 생기는 재료 (capture.ts).
  * 레포당 한 번(repos.trailers_done). 새 커밋은 insertCommit이 그때그때 읽는다.
@@ -525,8 +537,8 @@ function insertCommit(db: DB, repo: RepoRow, commit: GitCommit): boolean {
   const inserted = db.prepare(
     `INSERT OR IGNORE INTO commits
        (sha, repo_id, author_name, author_email, authored_at, subject, body,
-        files_changed, insertions, deletions, meaningful)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        files_changed, insertions, deletions, meaningful, change_key)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     commit.sha,
     repo.id,
@@ -539,6 +551,7 @@ function insertCommit(db: DB, repo: RepoRow, commit: GitCommit): boolean {
     insertions,
     deletions,
     isMeaningfulSubject(commit.subject) ? 1 : 0,
+    changeKey(commit.subject, commit.files.map((file) => file.path)),
   );
   // 이미 있던 커밋(다른 프로세스가 먼저 넣음)이면 파일·문서도 이미 같은 트랜잭션으로 들어가 있다 — 중복 행을 만들지 않는다
   if (inserted.changes === 0) return false;

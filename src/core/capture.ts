@@ -265,8 +265,41 @@ export interface CommitContextView {
   trailers: Trailer[];
 }
 
+/** 같은 변경으로 남은 다른 커밋들 (squash 머지 ↔ 브랜치 원본, commits.change_key) */
+export function sameChangeShas(db: DB, repoId: number, sha: string): string[] {
+  return (
+    db
+      .prepare(
+        `SELECT other.sha FROM commits self JOIN commits other ON other.repo_id = self.repo_id AND other.change_key = self.change_key
+          WHERE self.repo_id = ? AND self.sha = ? AND self.change_key IS NOT NULL AND other.sha <> self.sha
+          ORDER BY other.authored_at DESC`,
+      )
+      .all(repoId, sha) as { sha: string }[]
+  ).map((row) => row.sha);
+}
+
+/**
+ * 커밋에 묶인 맥락. 세션 기록(프롬프트·검증·버린 편집)은 커밋이 생긴 자리(워크트리의 브랜치 커밋)에 묶이는데,
+ * PR을 squash로 합치면 main에는 다른 sha가 남는다 — 그 커밋에 세션 기록이 없으면 같은 변경의 다른 커밋에서 가져온다.
+ * 트레일러도 자기 것이 없을 때만 빌려 온다(squash 메시지가 다시 쓰였을 수 있다).
+ */
 export function commitContextOf(db: DB, repoId: number, sha: string): CommitContextView | null {
-  const rows = db.prepare("SELECT kind, text FROM commit_context WHERE repo_id = ? AND sha = ? ORDER BY kind, ord").all(repoId, sha) as { kind: string; text: string }[];
+  const query = db.prepare("SELECT kind, text FROM commit_context WHERE repo_id = ? AND sha = ? ORDER BY kind, ord");
+  let rows = query.all(repoId, sha) as { kind: string; text: string }[];
+  const isSession = (kind: string) => kind === "prompt" || kind === "verify" || kind === "dropped";
+  const hasSession = rows.some((row) => isSession(row.kind));
+  const hasTrailers = rows.some((row) => row.kind.startsWith("trailer:"));
+  if (!hasSession || !hasTrailers) {
+    for (const other of sameChangeShas(db, repoId, sha)) {
+      const borrowed = (query.all(repoId, other) as { kind: string; text: string }[]).filter((row) =>
+        isSession(row.kind) ? !hasSession : row.kind.startsWith("trailer:") ? !hasTrailers : false,
+      );
+      if (borrowed.length > 0) {
+        rows = [...rows, ...borrowed];
+        break;
+      }
+    }
+  }
   if (rows.length === 0) return null;
   return {
     prompts: rows.filter((row) => row.kind === "prompt").map((row) => row.text),

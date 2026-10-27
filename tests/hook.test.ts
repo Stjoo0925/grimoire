@@ -154,3 +154,19 @@ test("SessionStart: 오래됐거나 공변경 이력이 빈 레포는 백그라�
   const resume = await handleHook(context, { hook_event_name: "SessionStart", session_id: "bg-1", cwd: dir, source: "resume" });
   assert.deepEqual(resume, { syncRepo: fresh.path }, "resume은 요약 없이 동기화만");
 });
+
+test("PreToolUse: 세션 파일을 못 써도(병렬 편집 중 rename 실패 등) 맥락은 그대로 주입하고 임시 파일을 남기지 않는다", async () => {
+  const db = memoryDb();
+  const repo = await addRepo(db, coupledRepo());
+  await syncRepo(db, repo);
+  const env = { GRIMOIRE_HOME: tempDir("grimoire-hook-home-") };
+  // 세션 파일 자리에 폴더가 있으면 rename이 실패한다 — Windows에서 다른 훅이 파일을 읽는 중일 때와 같은 결과
+  fs.mkdirSync(path.join(sessionsDir(env), "locked.json"), { recursive: true });
+  const out = await handleHook({ db, env, me: [] }, preToolUse(repo.path, "src/a.ts", "locked"));
+  assert.ok(out?.json?.hookSpecificOutput.additionalContext.startsWith("Grimoire: src/a.ts"), "저장 실패가 주입을 막으면 안 됩니다");
+  assert.deepEqual(
+    fs.readdirSync(sessionsDir(env)).filter((name) => name.endsWith(".tmp")),
+    [],
+    "임시 파일이 남으면 안 됩니다",
+  );
+});

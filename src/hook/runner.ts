@@ -94,13 +94,28 @@ export function loadSession(env: Env, sessionId: string): SessionState {
   }
 }
 
-export function saveSession(env: Env, sessionId: string, state: SessionState): void {
+/**
+ * 세션 파일 저장 — 실패해도 던지지 않는다(false). 세션 파일은 "이미 보여 줬다"를 기억하는 보조 장치라, 저장에 실패하면
+ * 다음에 한 번 더 보여 줄 뿐이다. 던지면 이미 만든 맥락까지 주입되지 않는다 — Windows에서는 다른 훅 프로세스가
+ * 읽는 중인 파일 위로 rename하면 EPERM/EBUSY가 난다(병렬 편집).
+ */
+export function saveSession(env: Env, sessionId: string, state: SessionState): boolean {
   const dir = sessionsDir(env);
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const file = path.join(dir, `${safeId(sessionId)}.json`);
   const temp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(temp, JSON.stringify({ ...state, updatedAt: new Date().toISOString() }), { mode: 0o600 });
-  fs.renameSync(temp, file);
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(temp, JSON.stringify({ ...state, updatedAt: new Date().toISOString() }), { mode: 0o600 });
+    fs.renameSync(temp, file);
+    return true;
+  } catch {
+    try {
+      fs.rmSync(temp, { force: true });
+    } catch {
+      // 남으면 pruneSessions가 14일 뒤 지운다
+    }
+    return false;
+  }
 }
 
 /** 오래된 세션 파일 정리 (SessionStart 때) */

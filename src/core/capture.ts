@@ -58,13 +58,40 @@ export function commitSucceeded(response: { stdout?: unknown; stderr?: unknown; 
 }
 
 /** 검증 결과 추정 — exit code가 없으므로 stderr가 비고 중단되지 않았으면 통과로 본다 */
+/**
+ * 검증 도구들이 실패했을 때 실제로 찍는 요약 꼴. Bash 응답에는 종료 코드가 없어 출력으로 짐작하는데,
+ * "error"·"FAIL" 낱말이나 stderr가 비지 않은 것만으로는 판정하지 않는다 — git의 줄바꿈 경고, npm warn, 검증 명령과 함께
+ * 돌린 다른 명령의 출력(소스 줄의 `row.error` 등)이 모두 실패로 잡혔다(도그푸딩). 실패 수는 1 이상일 때만 센다.
+ */
+const FAILURE_SUMMARY: RegExp[] = [
+  /^ℹ fail [1-9]\d*/m, // node:test
+  /^# fail [1-9]\d*/m, // node:test TAP
+  /^not ok \d+ /m, // TAP
+  // 실패 수는 요약 줄 모양일 때만 — 통과한 테스트 이름에 "2 failed attempts" 같은 말이 들어 있을 수 있다
+  /^\s*Tests?:?\s+(.*[,|]\s*)?[1-9]\d* failed\b/m, // jest "Tests:  1 failed, 2 passed" · vitest "Tests  1 failed | 2 passed"
+  /^\s*Test Files\s+[1-9]\d* failed\b/m, // vitest
+  /^\s+[1-9]\d* failing\b/m, // mocha
+  /^=+ .*\b[1-9]\d* (failed|errors?)\b.*=+\s*$/m, // pytest "==== 1 failed, 2 passed in 0.1s ===="
+  /^\s*FAIL\s+\S/m, // jest·vitest 파일 줄
+  /^(--- )?FAIL\b/m, // go test
+  /^FAILED\s+\S/m, // pytest
+  /\btest result: FAILED\b/, // cargo test
+  /\berror TS\d+:/, // tsc
+  /^\S+\.(ts|tsx|js|jsx|py|go|rs):\d+(:\d+)?: error\b/m, // 컴파일러 꼴 "file:line: error"
+  /^error(\[E\d+\])?: /m, // rustc·cargo
+  /^npm (ERR!|error) /m, // npm (10+는 "npm error")
+  /✖ [1-9]\d* problems?\b/, // eslint
+  /^Found [1-9]\d* errors?\b/m, // tsc --build·mypy
+  /\bexit(ed)? (with )?code [1-9]\d*\b/i, // 실행기가 남기는 종료 코드
+];
+
 export function verifyOutcome(response: { stdout?: unknown; stderr?: unknown; interrupted?: unknown } | undefined): { ok: boolean; tail: string } {
-  const stderr = String(response?.stderr ?? "").trim();
   const stdout = String(response?.stdout ?? "");
-  const failedWords = /\b(FAIL|failed|failing|error|Error|✗|✖|not ok)\b/.test(stdout) && !/\b0 (failed|failing)\b/.test(stdout);
-  const ok = response?.interrupted !== true && !stderr && !failedWords;
-  const tail = ok ? "" : (stderr || stdout).slice(-STDERR_TAIL).trim();
-  return { ok, tail };
+  const stderr = String(response?.stderr ?? "");
+  const text = `${stdout}\n${stderr}`;
+  const failed = response?.interrupted === true || FAILURE_SUMMARY.some((pattern) => pattern.test(text));
+  const tail = failed ? text.trim().slice(-STDERR_TAIL).trim() : "";
+  return { ok: !failed, tail };
 }
 
 /** 줄 해시 — 정확 해시와 공백 제거 해시 (Agent Blame 방식: 1.0 / 0.95) */

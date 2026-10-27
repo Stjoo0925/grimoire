@@ -69,9 +69,40 @@ test("verify·commit 판정과 줄 해시", () => {
   assert.equal(isGitCommit("git -C /x commit -m y"), true);
   assert.equal(isGitCommit("git log --oneline"), false);
   assert.deepEqual(verifyOutcome({ stdout: "ok 1\n# pass 3\n", stderr: "" }), { ok: true, tail: "" });
-  assert.equal(verifyOutcome({ stdout: "", stderr: "Error: boom" }).ok, false);
-  assert.equal(verifyOutcome({ stdout: "3 passed, 1 failed", stderr: "" }).ok, false);
   assert.equal(verifyOutcome({ stdout: "x", stderr: "", interrupted: true }).ok, false);
+  // 실패: 각 도구가 실제로 찍는 요약 꼴
+  for (const [name, stdout] of [
+    ["node:test", "ℹ tests 5\nℹ pass 3\nℹ fail 2\n"],
+    ["TAP", "not ok 3 - parses trailers\n"],
+    ["jest", "Tests:       1 failed, 4 passed, 5 total\n"],
+    ["vitest", " Test Files  1 failed | 3 passed (4)\n      Tests  2 failed | 10 passed (12)\n"],
+    ["vitest file", " FAIL  src/a.test.ts > adds\n"],
+    ["mocha", "  3 passing (20ms)\n  1 failing\n"],
+    ["pytest", "==================== 1 failed, 2 passed in 0.12s ====================\n"],
+    ["pytest FAILED", "FAILED tests/test_a.py::test_x - AssertionError\n"],
+    ["go", "--- FAIL: TestRotate (0.00s)\nFAIL\n"],
+    ["cargo", "test result: FAILED. 3 passed; 1 failed\n"],
+    ["tsc", "src/a.ts(3,5): error TS2345: Argument of type 'x'\n"],
+    ["npm", "npm ERR! code ELIFECYCLE\n"],
+    ["npm 10", "npm error code 1\n"],
+    ["eslint", "✖ 3 problems (3 errors, 0 warnings)\n"],
+    ["exit code", "Command failed. Exit code 1\n"],
+  ] as const) {
+    assert.equal(verifyOutcome({ stdout, stderr: "" }).ok, false, name);
+  }
+  assert.equal(verifyOutcome({ stdout: "", stderr: "npm error code 1\n" }).ok, false, "stderr의 실패 요약도 본다");
+  assert.match(verifyOutcome({ stdout: "ℹ fail 1\n", stderr: "" }).tail, /fail 1/);
+  // 통과: 도그푸딩에서 실패로 잘못 잡힌 꼴들
+  for (const [name, stdout, stderr] of [
+    ["git CRLF 경고(stderr)", "ℹ tests 86\nℹ pass 85\nℹ fail 0\n", "warning: in the working copy of 'a.ts', LF will be replaced by CRLF the next time Git touches it\n"],
+    ["검증 명령과 함께 출력된 소스 줄", '0\n538:   ${row.error ? `  ${row.error.slice(0, 80)}` : ""}\nconst failedWords = /FAIL|failed|error/;\n', ""],
+    ["npm warn", "ℹ fail 0\n", "npm warn deprecated foo@1.0.0\n"],
+    ["0 failed", "Tests:       0 failed, 5 passed, 5 total\n", ""],
+    ["테스트 이름에 든 실패 수", "✔ retries after 2 failed attempts (3ms)\nℹ fail 0\n", ""],
+    ["exit code 0", "Process finished with exit code 0\n", ""],
+  ] as const) {
+    assert.equal(verifyOutcome({ stdout, stderr }).ok, true, name);
+  }
   const hashes = lineHashes("const a = 1;\n  const a = 1;\n\n");
   assert.equal(hashes.length, 4);
   assert.equal(hashes[1], hashes[3], "공백 제거 해시는 들여쓰기와 무관");
@@ -209,7 +240,7 @@ test("SessionStart 요약과 막혔을 때 2단계 — 각각 600자·1200자 �
   // 편집 뒤 첫 실패한 검증 → 2단계 한 번. 두 번째 실패엔 없음
   const session = "st-2";
   await handleHook(context, event(dir, session, { hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: path.join(dir, "src/a.ts"), old_string: "2", new_string: "3" } }));
-  const fail = { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: "npm test" }, tool_response: { stdout: "", stderr: "Error: 1 failing" } } as const;
+  const fail = { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: "npm test" }, tool_response: { stdout: "ℹ tests 3\nℹ pass 2\nℹ fail 1\n", stderr: "" } } as const;
   const first = await handleHook(context, event(dir, session, fail));
   assert.ok(first?.json, "2단계 맥락이 없습니다");
   const text = first!.json!.hookSpecificOutput.additionalContext;
@@ -223,4 +254,41 @@ test("SessionStart 요약과 막혔을 때 2단계 — 각각 600자·1200자 �
   // 통과한 검증은 기록만
   assert.equal(await handleHook(context, event(dir, "st-3", { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: "npm test" }, tool_response: { stdout: "ok", stderr: "" } })), null);
   assert.equal(pendingEvents(db, "st-3", repo.id).length, 1);
+});
+
+test("막혔을 때 2단계: 꼬리표만 있는 커밋은 빈 항목으로 내지 않고, 줄 것이 없으면 아무것도 내지 않는다", async () => {
+  const noise = "\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>";
+  const db = memoryDb();
+  const dir = makeRepo(
+    [
+      { message: `feat: 시작${noise}`, files: { "src/a.ts": "export const a = 0;\n", "src/b.ts": "export const b = 0;\n" }, date: "2024-01-01T10:00:00+09:00" },
+      { message: "fix(a): 경계값\n\nRejected: 음수 금지 | 호출부가 음수를 쓴다", files: { "src/a.ts": "export const a = 1;\n" }, date: "2024-02-01T10:00:00+09:00" },
+      { message: `feat(a): 정리${noise}`, files: { "src/a.ts": "export const a = 2;\n" }, date: "2024-03-01T10:00:00+09:00" },
+      { message: `feat(b): 정리${noise}`, files: { "src/b.ts": "export const b = 1;\n" }, date: "2024-03-02T10:00:00+09:00" },
+    ],
+    "struggle",
+  );
+  const repo = await addRepo(db, dir);
+  await syncRepo(db, repo);
+  const context = { db, env: { GRIMOIRE_HOME: tempDir("grimoire-struggle-home-") }, me: ["me@example.com"] };
+  const fail = { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: "npm test" }, tool_response: { stdout: "ℹ fail 1\n", stderr: "" } } as const;
+  const edit = (file: string) => ({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: path.join(dir, file), old_string: "1", new_string: "9" } }) as const;
+
+  // a.ts: 최신 커밋(feat(a): 정리)은 Co-Authored-By뿐 → 빠지고, Rejected가 있는 fix(a)만 나온다
+  await handleHook(context, event(dir, "s-a", edit("src/a.ts")));
+  const out = await handleHook(context, event(dir, "s-a", fail));
+  const text = out?.json?.hookSpecificOutput.additionalContext ?? "";
+  assert.match(text, /rejected: 음수 금지/);
+  assert.equal(text.match(/^[0-9a-f]{10} /gm)?.length, 1, `커밋 항목은 하나여야 합니다:\n${text}`);
+  assert.ok(!/^[0-9a-f]{10} src\/a\.ts:\n(?![ ]{2})/m.test(text), `내용 없는 머리줄:\n${text}`);
+
+  // b.ts: 커밋들이 전부 꼬리표뿐 → 2단계 맥락 자체가 없다 (예전엔 "sha src/b.ts:" 머리줄만 찍혔다)
+  await handleHook(context, event(dir, "s-b", edit("src/b.ts")));
+  assert.equal(await handleHook(context, event(dir, "s-b", fail)), null);
+
+  // 오탐 없음: 통과한 검증(출력에 "error" 낱말·git 경고가 섞여도)은 2단계를 발화시키지 않는다
+  await handleHook(context, event(dir, "s-c", edit("src/a.ts")));
+  const passing = { ...fail, tool_response: { stdout: "const x = row.error;\nℹ fail 0\n", stderr: "warning: LF will be replaced by CRLF\n" } };
+  assert.equal(await handleHook(context, event(dir, "s-c", passing)), null);
+  assert.deepEqual(pendingEvents(db, "s-c", repo.id).filter((e) => e.kind === "verify").map((e) => e.text), ["npm test → pass"]);
 });

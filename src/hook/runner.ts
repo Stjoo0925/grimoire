@@ -248,15 +248,19 @@ function struggleContext(context: HookContext, repo: RepoRow, sessionId: string)
       if (seen.has(sha) || seen.size >= STRUGGLE_COMMITS) continue;
       const view = commitContextOf(context.db, repo.id, sha);
       if (!view) continue;
-      seen.add(sha);
+      // 줄 것부터 모은다 — Co-Authored-By 같은 꼬리표만 있는 커밋은 머리줄만 남는 빈 항목이 되므로 뺀다(도그푸딩).
+      // 이 커밋에 줄 것이 없으면 자리(STRUGGLE_COMMITS)도 쓰지 않고 다음 커밋을 본다
+      const details: string[] = [];
       const why = whyLine(context.db, repo.id, sha, 160);
-      lines.push(`${sha.slice(0, 10)} ${file}:`);
-      if (why) lines.push(`  why: ${why}`);
+      if (why) details.push(`  why: ${why}`);
       const verify = [...view.verify.slice(-2), ...view.trailers.filter((trailer) => trailer.key === "tested").map((trailer) => trailer.value)];
-      if (verify.length > 0) lines.push(`  verified: ${verify.join(" · ").slice(0, 200)}`);
-      if (view.dropped.length > 0) lines.push(`  dropped (edited then left out of the commit): ${view.dropped.slice(0, 4).join(", ")}`);
+      if (verify.length > 0) details.push(`  verified: ${verify.join(" · ").slice(0, 200)}`);
+      if (view.dropped.length > 0) details.push(`  dropped (edited then left out of the commit): ${view.dropped.slice(0, 4).join(", ")}`);
       const rejected = view.trailers.filter((trailer) => trailer.key === "rejected" || trailer.key === "constraint").slice(0, 2);
-      for (const trailer of rejected) lines.push(`  ${trailer.key}: ${trailer.value.slice(0, 160)}`);
+      for (const trailer of rejected) details.push(`  ${trailer.key}: ${trailer.value.slice(0, 160)}`);
+      if (details.length === 0) continue;
+      seen.add(sha);
+      lines.push(`${sha.slice(0, 10)} ${file}:`, ...details);
     }
   }
   if (lines.length === 1) return "";

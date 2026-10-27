@@ -92,3 +92,26 @@ test("옛 DB: change_key가 비어 있던 커밋도 동기화 때 채워지고 �
   assert.equal((db.prepare("SELECT COUNT(*) AS n FROM commits WHERE change_key IS NULL").get() as { n: number }).n, 0);
   assert.equal(cochangeOf(db, repo.id, "src/a.ts", { minSupport: 1 }).find((item) => item.path === "src/b.ts")?.support, 3);
 });
+
+test("squash 중복: 세션 기록과 트레일러를 서로 다른 형제 커밋에서 따로 빌려 온다", async () => {
+  const { dir, branchShas } = await squashRepo();
+  const db = memoryDb();
+  const repo = await addRepo(db, dir);
+  await syncRepo(db, repo);
+  recordPrompt(db, "s1", repo.id, "경계값 0으로 막자");
+  bindToCommit(db, { sessionId: "s1", repoId: repo.id, sha: branchShas[1], files: ["src/a.ts", "src/b.ts"], addedHashes: new Set() });
+  const squashSha = (await headSha(dir))!;
+  // 같은 변경의 세 번째 커밋(예: 다시 쓴 메시지로 cherry-pick) — 가장 최신이고 트레일러만 있다
+  const fake = "f".repeat(40);
+  db.prepare(
+    `INSERT INTO commits (sha, repo_id, author_name, author_email, authored_at, subject, body, files_changed, insertions, deletions, meaningful, change_key)
+     SELECT ?, repo_id, author_name, author_email, '2999-01-01T00:00:00Z', subject, body, files_changed, insertions, deletions, meaningful, change_key
+       FROM commits WHERE repo_id = ? AND sha = ?`,
+  ).run(fake, repo.id, squashSha);
+  db.prepare("INSERT INTO commit_context (repo_id, sha, kind, text, ord) VALUES (?, ?, 'trailer:tested', 'npm test', 0)").run(repo.id, fake);
+  assert.equal(sameChangeShas(db, repo.id, squashSha)[0], fake, "트레일러만 있는 형제가 먼저 보인다");
+
+  const view = commitContextOf(db, repo.id, squashSha);
+  assert.deepEqual(view?.prompts, ["경계값 0으로 막자"], "트레일러를 찾았다고 세션 기록 찾기를 멈추면 안 됩니다");
+  assert.deepEqual(view?.trailers.map((trailer) => trailer.value), ["npm test"]);
+});

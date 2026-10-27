@@ -217,7 +217,10 @@ async function postToolUse(context: HookContext, input: HookInput): Promise<Hook
   if (isGitCommit(command) && commitSucceeded(input.tool_response)) {
     // 커밋은 명령이 돈 작업 폴더의 HEAD다 — 워크트리에서 일하는 세션이면 본 레포 폴더의 HEAD와 다르다
     // (본 레포 폴더에서 읽으면 세션 기록이 엉뚱한 커밋에 묶인다). 커밋 저장소는 같으므로 색인은 본 레포로 한다
-    const where = commitDir(command, input.cwd ?? repo.path);
+    const cwd = input.cwd ?? repo.path;
+    const where = commitDir(command, cwd);
+    // `git -C ../다른레포 commit`이면 그 커밋은 이 세션 레포의 것이 아니다 — 세션 기록을 남의 sha에 묶지 않는다
+    if (where !== cwd && (await resolveRepoFile(context.db, where))?.repo.id !== repo.id) return null;
     const sha = await headSha(where);
     if (!sha) return null;
     // 커밋을 바로 색인해 두면(다음 동기화를 기다리지 않고) 묶을 수 있고 검색에도 바로 걸린다
@@ -247,7 +250,9 @@ function struggleContext(context: HookContext, repo: RepoRow, sessionId: string)
   const edited = [...new Set(pendingEvents(context.db, sessionId, repo.id).filter((event) => event.kind === "edit" && event.path).map((event) => event.path as string))];
   if (edited.length === 0) return "";
   const lines: string[] = [`Grimoire: first failing check in this session — what past commits on the files you're editing recorded`];
-  const seen = new Set<string>();
+  // 본 커밋은 줄 것이 없었어도 다시 보지 않는다 — 여러 파일이 같은 커밋을 공유한다
+  const checked = new Set<string>();
+  let shown = 0;
   for (const file of edited.slice(0, 5)) {
     const recent = context.db
       .prepare(
@@ -256,7 +261,8 @@ function struggleContext(context: HookContext, repo: RepoRow, sessionId: string)
       )
       .all(repo.id, file) as { sha: string }[];
     for (const { sha } of recent) {
-      if (seen.has(sha) || seen.size >= STRUGGLE_COMMITS) continue;
+      if (checked.has(sha) || shown >= STRUGGLE_COMMITS) continue;
+      checked.add(sha);
       const view = commitContextOf(context.db, repo.id, sha);
       if (!view) continue;
       // 줄 것부터 모은다 — Co-Authored-By 같은 꼬리표만 있는 커밋은 머리줄만 남는 빈 항목이 되므로 뺀다(도그푸딩).
@@ -270,7 +276,7 @@ function struggleContext(context: HookContext, repo: RepoRow, sessionId: string)
       const rejected = view.trailers.filter((trailer) => trailer.key === "rejected" || trailer.key === "constraint").slice(0, 2);
       for (const trailer of rejected) details.push(`  ${trailer.key}: ${trailer.value.slice(0, 160)}`);
       if (details.length === 0) continue;
-      seen.add(sha);
+      shown++;
       lines.push(`${sha.slice(0, 10)} ${file}:`, ...details);
     }
   }

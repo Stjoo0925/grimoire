@@ -103,7 +103,6 @@ export function runGit(
   });
 }
 
-/** 경로가 속한 작업 트리의 최상위 디렉터리. git 레포가 아니면 null. */
 /**
  * 작업 트리의 최상위(top)와, 그것이 `git worktree`로 만든 추가 작업 트리라면 본 레포의 최상위(main).
  * 추가 작업 트리는 커밋 저장소(--git-common-dir)를 본 레포와 함께 쓰므로, 기억은 본 레포 하나로 묶는다 —
@@ -133,6 +132,7 @@ export async function mainRepoRoot(dir: string, signal?: AbortSignal): Promise<s
   return (await worktreeRoots(dir, signal))?.main ?? null;
 }
 
+/** 경로가 속한 작업 트리의 최상위 디렉터리. git 레포가 아니면 null. */
 export async function repoRoot(dir: string, signal?: AbortSignal): Promise<string | null> {
   try {
     return path.resolve((await runGit(dir, ["rev-parse", "--show-toplevel"], undefined, signal)).trim());

@@ -68,7 +68,6 @@ export function commitSucceeded(response: { stdout?: unknown; stderr?: unknown; 
   return !COMMIT_FAILED.test(text);
 }
 
-/** 검증 결과 추정 — exit code가 없으므로 stderr가 비고 중단되지 않았으면 통과로 본다 */
 /**
  * 검증 도구들이 실패했을 때 실제로 찍는 요약 꼴. Bash 응답에는 종료 코드가 없어 출력으로 짐작하는데,
  * "error"·"FAIL" 낱말이나 stderr가 비지 않은 것만으로는 판정하지 않는다 — git의 줄바꿈 경고, npm warn, 검증 명령과 함께
@@ -94,6 +93,13 @@ const FAILURE_SUMMARY: RegExp[] = [
   /✖ [1-9]\d* problems?\b/, // eslint
   /^Found [1-9]\d* errors?\b/m, // tsc --build·mypy
   /\bexit(ed)? (with )?code [1-9]\d*\b/i, // 실행기가 남기는 종료 코드
+  // 요약을 찍기 전에 죽은 경우 — 러너·빌드 도구가 시작부터 실패하면 위의 요약 줄이 없다
+  /^Traceback \(most recent call last\):/m, // python
+  /^Error: Cannot find module\b/m, // node: 없는 모듈로 러너가 못 뜸
+  /^\w*Error \[ERR_[A-Z_]+\]/m, // node 내부 오류 코드 (ERR_MODULE_NOT_FOUND 등)
+  /^error during build:/m, // vite
+  /^ERROR in /m, // webpack
+  /^Build failed\b/im, // esbuild·tsup 등
 ];
 
 export function verifyOutcome(response: { stdout?: unknown; stderr?: unknown; interrupted?: unknown } | undefined): { ok: boolean; tail: string } {
@@ -309,17 +315,20 @@ export function commitContextOf(db: DB, repoId: number, sha: string): CommitCont
   const query = db.prepare("SELECT kind, text FROM commit_context WHERE repo_id = ? AND sha = ? ORDER BY kind, ord");
   let rows = query.all(repoId, sha) as { kind: string; text: string }[];
   const isSession = (kind: string) => kind === "prompt" || kind === "verify" || kind === "dropped";
-  const hasSession = rows.some((row) => isSession(row.kind));
-  const hasTrailers = rows.some((row) => row.kind.startsWith("trailer:"));
-  if (!hasSession || !hasTrailers) {
+  const isTrailer = (kind: string) => kind.startsWith("trailer:");
+  // 세션 기록과 트레일러는 따로 찾는다 — 한 형제에 트레일러만, 다른 형제에 세션 기록만 있을 수 있다.
+  // 같은 종류는 한 커밋 것만 통째로 (두 커밋 것을 섞지 않는다)
+  let needSession = !rows.some((row) => isSession(row.kind));
+  let needTrailers = !rows.some((row) => isTrailer(row.kind));
+  if (needSession || needTrailers) {
     for (const other of sameChangeShas(db, repoId, sha)) {
-      const borrowed = (query.all(repoId, other) as { kind: string; text: string }[]).filter((row) =>
-        isSession(row.kind) ? !hasSession : row.kind.startsWith("trailer:") ? !hasTrailers : false,
-      );
-      if (borrowed.length > 0) {
-        rows = [...rows, ...borrowed];
-        break;
-      }
+      const theirs = query.all(repoId, other) as { kind: string; text: string }[];
+      const session = needSession ? theirs.filter((row) => isSession(row.kind)) : [];
+      const trailers = needTrailers ? theirs.filter((row) => isTrailer(row.kind)) : [];
+      rows = [...rows, ...session, ...trailers];
+      if (session.length > 0) needSession = false;
+      if (trailers.length > 0) needTrailers = false;
+      if (!needSession && !needTrailers) break;
     }
   }
   if (rows.length === 0) return null;

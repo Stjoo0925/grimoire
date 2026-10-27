@@ -87,6 +87,13 @@ test("verify·commit 판정과 줄 해시", () => {
     ["npm 10", "npm error code 1\n"],
     ["eslint", "✖ 3 problems (3 errors, 0 warnings)\n"],
     ["exit code", "Command failed. Exit code 1\n"],
+    // 요약을 찍기 전에 죽은 경우 (stderr 규칙을 뺀 뒤 통과로 잘못 잡히던 것)
+    ["python traceback", "Traceback (most recent call last):\n  File \"x.py\", line 1\nImportError: no module\n"],
+    ["node 모듈 없음", "Error: Cannot find module './missing'\nRequire stack:\n"],
+    ["node 오류 코드", "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'x'\n"],
+    ["vite", "error during build:\n[vite]: Rollup failed to resolve import\n"],
+    ["webpack", "ERROR in ./src/a.ts 3:5\n"],
+    ["esbuild", "✘ [ERROR] Could not resolve \"x\"\nBuild failed with 1 error\n"],
   ] as const) {
     assert.equal(verifyOutcome({ stdout, stderr: "" }).ok, false, name);
   }
@@ -314,4 +321,21 @@ test("verifyRecord: 검증 명령과 실패 출력의 비밀을 저장 전에 �
   // 200자에서 잘리는 자리에 걸친 토큰도 남지 않는다 (자르기 전에 지운다)
   const long = verifyRecord(`${"x".repeat(185)} ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123 npm test`, { ok: true, tail: "" });
   assert.ok(!long.includes("ghp_ABCDEF"), long);
+});
+
+test("git -C <다른 레포> commit: 세션 기록을 남의 레포 커밋에 묶지 않는다", async () => {
+  const db = memoryDb();
+  const a = makeRepo([{ message: "feat: A 시작", files: { "src/a.ts": "1\n" } }], "own-a");
+  const b = makeRepo([{ message: "feat: B 시작", files: { "src/b.ts": "1\n" } }], "own-b");
+  const repoA = await addRepo(db, a);
+  await syncRepo(db, repoA);
+  await syncRepo(db, await addRepo(db, b));
+  const context = { db, env: { GRIMOIRE_HOME: tempDir() }, me: [] };
+  await handleHook(context, event(a, "s-other", { hook_event_name: "UserPromptSubmit", prompt: "A의 경계값을 고치자" }));
+  addCommit(b, { message: "fix(b): B 고침", files: { "src/b.ts": "2\n" } });
+  const commit = { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: `git -C "${b}" commit -am "fix(b): B 고침"` }, tool_response: { stdout: "[main 1234567] fix(b): B 고침\n", stderr: "" } } as const;
+  await handleHook(context, event(a, "s-other", commit));
+  const bHead = (await headSha(b))!;
+  assert.equal(commitContextOf(db, repoA.id, bHead), null, "A 레포에 B의 sha로 묶이면 안 됩니다");
+  assert.deepEqual(pendingEvents(db, "s-other", repoA.id).map((e) => e.kind), ["prompt"], "A의 세션 기록은 A의 다음 커밋을 기다린다");
 });

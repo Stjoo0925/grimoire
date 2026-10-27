@@ -171,7 +171,13 @@ export function rebuildCochange(db: DB, repoId: number, until?: string): number 
 export function needsCochangeBackfill(db: DB, repoId: number): boolean {
   const has = db.prepare("SELECT 1 FROM cochange WHERE repo_id = ? LIMIT 1").get(repoId);
   if (has) return false;
-  const commits = (db.prepare("SELECT COUNT(*) AS n FROM commits WHERE repo_id = ? AND files_changed BETWEEN ? AND ?").get(repoId, COCHANGE_MIN_FILES, COCHANGE_MAX_FILES) as { n: number }).n;
+  // rebuildCochange와 같은 조건이어야 한다 — 의미 없는 커밋(wip·merge 등)만 있는 레포는 다시 만들어도 비어 있어서,
+  // 조건이 다르면 영원히 "다시 계산해야 함"이 되어 세션마다 백그라운드 sync가 돌고 doctor가 계속 경고한다
+  const commits = (
+    db.prepare("SELECT COUNT(*) AS n FROM commits WHERE repo_id = ? AND meaningful = 1 AND files_changed BETWEEN ? AND ?").get(repoId, COCHANGE_MIN_FILES, COCHANGE_MAX_FILES) as {
+      n: number;
+    }
+  ).n;
   return commits > 0;
 }
 

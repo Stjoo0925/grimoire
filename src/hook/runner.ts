@@ -220,6 +220,8 @@ async function postToolUse(context: HookContext, input: HookInput): Promise<Hook
   // 백그라운드로 띄운 명령(run_in_background)은 응답이 "실행 중" 안내뿐이라 결과를 모른다 — 실패 요약이 없다고
   // 통과로 적으면 안 되고, git commit도 아직 안 끝났을 수 있다(HEAD가 그 커밋이 아니다). 둘 다 건너뛴다
   if (input.tool_input?.run_in_background === true || typeof input.tool_response?.backgroundTaskId === "string") return null;
+  // 막혔을 때 2단계 맥락은 끝에 돌려준다 — `npm test; git commit`처럼 한 명령에 커밋도 있으면 그 커밋부터 묶어야 한다
+  let struggle: HookOutput | null = null;
   if (isVerifyCommand(command)) {
     const outcome = verifyOutcome(input.tool_response);
     const text = verifyRecord(command, outcome);
@@ -232,7 +234,7 @@ async function postToolUse(context: HookContext, input: HookInput): Promise<Hook
         state.struggled = true;
         saveSession(context.env, input.session_id, state);
         const text = struggleContext(context, repo, input.session_id);
-        if (text) return { json: { hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: text } } };
+        if (text) struggle = { json: { hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: text } } };
       }
     }
   }
@@ -242,16 +244,16 @@ async function postToolUse(context: HookContext, input: HookInput): Promise<Hook
     const cwd = input.cwd ?? repo.path;
     const where = commitDir(command, cwd);
     // `git -C ../다른레포 commit`이면 그 커밋은 이 세션 레포의 것이 아니다 — 세션 기록을 남의 sha에 묶지 않는다
-    if (where !== cwd && (await resolveRepoFile(context.db, where))?.repo.id !== repo.id) return null;
+    if (where !== cwd && (await resolveRepoFile(context.db, where))?.repo.id !== repo.id) return struggle;
     const sha = await headSha(where);
-    if (!sha) return null;
+    if (!sha) return struggle;
     // git이 찍은 새 커밋 sha와 읽은 HEAD가 다르면 커밋은 다른 곳(cd로 옮겨 간 다른 레포 등)에서 만들어졌다 — 묶지 않는다
     const made = committedShas(input.tool_response);
-    if (made.length > 0 && !made.some((short) => sha.startsWith(short))) return null;
+    if (made.length > 0 && !made.some((short) => sha.startsWith(short))) return struggle;
     // 요약 줄이 없으면(-q 등) HEAD가 방금 만든 커밋인지 시각으로 본다 — 오래된 HEAD(커밋할 것 없음, 다른 곳에서 커밋)에 묶지 않는다
     if (made.length === 0) {
       const at = await commitTime(where, sha);
-      if (at !== null && Date.now() - at > FRESH_COMMIT_MS) return null;
+      if (at !== null && Date.now() - at > FRESH_COMMIT_MS) return struggle;
     }
     // 커밋을 바로 색인해 두면(다음 동기화를 기다리지 않고) 묶을 수 있고 검색에도 바로 걸린다
     const files = (await indexCommitSha(context.db, repo, sha)) ?? [];
@@ -260,7 +262,7 @@ async function postToolUse(context: HookContext, input: HookInput): Promise<Hook
     const addedHashes = new Set(lineHashes(added.join("\n")));
     bindToCommit(context.db, { sessionId: input.session_id, repoId: repo.id, sha, files, addedHashes, stillDirty });
   }
-  return null;
+  return struggle;
 }
 
 /** 편집 도구가 새로 넣는 텍스트 (Edit의 new_string, Write의 content, MultiEdit의 edits[].new_string) */

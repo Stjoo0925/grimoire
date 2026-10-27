@@ -517,3 +517,23 @@ test("git commit -q(요약 줄 없음): HEAD가 방금 만든 커밋일 때만 �
   await handleHook(context, event(dir, "s-q", quiet));
   assert.deepEqual(commitContextOf(db, repo.id, fresh)?.prompts, ["a의 경계값을 고치자"]);
 });
+
+test("검증 실패와 커밋이 한 명령에 있으면(npm test; git commit) 2단계 맥락을 내면서도 커밋에 세션 기록을 묶는다", async () => {
+  const db = memoryDb();
+  const dir = makeRepo([{ message: "fix(a): 처음 경계값", files: { "src/a.ts": "1\n", "src/b.ts": "1\n" }, date: "2024-01-01T10:00:00+09:00" }], "mixed");
+  const repo = await addRepo(db, dir);
+  await syncRepo(db, repo);
+  const context = { db, env: { GRIMOIRE_HOME: tempDir() }, me: [] };
+  // 지난 커밋에 '왜'를 남겨 두면 2단계 맥락이 생긴다
+  recordPrompt(db, "old", repo.id, "음수가 들어오면 깨져서 a의 경계값을 처음 고쳤다");
+  bindToCommit(db, { sessionId: "old", repoId: repo.id, sha: (await headSha(dir))!, files: ["src/a.ts", "src/b.ts"], addedHashes: new Set() });
+
+  await handleHook(context, event(dir, "s-mix", { hook_event_name: "UserPromptSubmit", prompt: "a의 경계값을 다시 고치자" }));
+  await handleHook(context, event(dir, "s-mix", { hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: path.join(dir, "src/a.ts"), old_string: "1", new_string: "2" } }));
+  addCommit(dir, { message: "fix(a): 경계값 다시", files: { "src/a.ts": "2\n" }, date: new Date().toISOString() });
+  const made = (await headSha(dir))!;
+  const mixed = { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: 'npm test; git commit -am "fix(a): 경계값 다시"' }, tool_response: { stdout: `ℹ tests 3\nℹ fail 1\n[main ${made.slice(0, 7)}] fix(a): 경계값 다시\n`, stderr: "" } } as const;
+  const out = await handleHook(context, event(dir, "s-mix", mixed));
+  assert.ok(out?.json?.hookSpecificOutput.additionalContext.includes("first failing check"), "2단계 맥락은 그대로 나온다");
+  assert.deepEqual(commitContextOf(db, repo.id, made)?.prompts, ["a의 경계값을 다시 고치자"], "같은 명령의 커밋에도 묶여야 합니다");
+});

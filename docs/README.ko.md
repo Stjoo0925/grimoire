@@ -218,6 +218,16 @@ grimoire update --dry-run  # 무엇을 실행할지만 보기
   민감한 레포는 등록하지 말거나 `grimoire remove <repo>`로 빼세요.
 - macOS·Linux에서는 DB를 나만 읽을 수 있게(`chmod 600`) 만듭니다. Windows에서는 chmod가 의미 없어 사용자 프로필(`%USERPROFILE%\.grimoire`)의 NTFS 권한에 기대므로, `GRIMOIRE_HOME`을 공유 폴더로 지정하지 마세요.
 
+### 보안 스캐너 경고
+
+Socket 같은 스캐너는 배포된 패키지에 공급망 경고 몇 개를 띄웁니다. 모두 취약점이 아니며, 각각의 출처는 다음과 같습니다.
+
+- **Network access** — MCP SDK(`@modelcontextprotocol/server`)에 HTTP 전송·OAuth 헬퍼가 함께 들어 있어 `fetch` 호출이 잡힙니다. Grimoire는 stdio 전송만 쓰므로 그 코드는 실행되지 않습니다.
+- **URL strings** — MCP SDK가 JSON Schema 메타스키마 ID(`json-schema.org/...`)를 식별자 문자열로 갖고 있을 뿐 요청하지 않습니다. 나머지 하나는 위에 적은 Grimoire 자체의 `api.github.com` 업데이트 확인입니다.
+- **AI-detected code anomaly** — MCP SDK가 쓰는 `zod`가 속도를 위해 `new Function`으로 객체 파서를 만듭니다. 생성되는 코드는 소스에 정의된 스키마에서 나오며 사용자 입력과 무관합니다.
+
+설치 스크립트(`postinstall`)는 없고, 이 밖에 외부로 나가는 것은 없습니다.
+
 ## 개발
 
 ```bash

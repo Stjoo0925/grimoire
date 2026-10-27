@@ -230,6 +230,16 @@ Set `GRIMOIRE_UPDATE_CHECK=0` to turn it off (run `grimoire install` again after
   Don't register sensitive repos, or take them out with `grimoire remove <repo>`.
 - The DB is created readable only by you (`chmod 600`) on macOS/Linux. On Windows chmod has no effect and the DB relies on the NTFS permissions of your user profile (`%USERPROFILE%\.grimoire`), so don't point `GRIMOIRE_HOME` at a shared folder.
 
+### Security scanner alerts
+
+Scanners such as Socket flag the published package with a few supply-chain alerts. None of them is a vulnerability, and here is where each comes from:
+
+- **Network access** — the MCP SDK (`@modelcontextprotocol/server`) bundles HTTP transport and OAuth helpers that call `fetch`. Grimoire only uses the stdio transport, so that code never runs.
+- **URL strings** — the MCP SDK carries JSON Schema meta-schema IDs (`json-schema.org/...`) as plain identifiers, never fetched. The other hit is Grimoire's own update check against `api.github.com`, described above.
+- **AI-detected code anomaly** — `zod` (a dependency of the MCP SDK) builds its object parsers with `new Function` for speed. The generated code comes from schemas defined in source, not from user input.
+
+There is no install script (`postinstall`), and nothing else leaves your machine.
+
 ## Development
 
 ```bash

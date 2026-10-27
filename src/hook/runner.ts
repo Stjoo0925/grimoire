@@ -35,7 +35,10 @@ import { isIndexable } from "../core/code";
 import { grimoireHome, type Env } from "../core/config";
 import { fileContext, formatFileContext, needsCochangeBackfill, TEST_PATH, HOOK_BUDGET } from "../core/context";
 import type { DB } from "../core/db";
-import { addedLines, dirtyFiles, headSha } from "../core/git";
+import { addedLines, commitTime, dirtyFiles, headSha } from "../core/git";
+
+/** git 요약 줄이 없을 때 "방금 만든 커밋"으로 보는 HEAD 커밋 시각의 한도 */
+const FRESH_COMMIT_MS = 2 * 60_000;
 import { indexCommitSha, resolveRepoFile, type RepoRow } from "../core/indexer";
 
 /** 훅이 돌려주는 것 — Claude Code 규약(JSON은 hookSpecificOutput, 일부 이벤트는 plain stdout) */
@@ -245,6 +248,11 @@ async function postToolUse(context: HookContext, input: HookInput): Promise<Hook
     // git이 찍은 새 커밋 sha와 읽은 HEAD가 다르면 커밋은 다른 곳(cd로 옮겨 간 다른 레포 등)에서 만들어졌다 — 묶지 않는다
     const made = committedShas(input.tool_response);
     if (made.length > 0 && !made.some((short) => sha.startsWith(short))) return null;
+    // 요약 줄이 없으면(-q 등) HEAD가 방금 만든 커밋인지 시각으로 본다 — 오래된 HEAD(커밋할 것 없음, 다른 곳에서 커밋)에 묶지 않는다
+    if (made.length === 0) {
+      const at = await commitTime(where, sha);
+      if (at !== null && Date.now() - at > FRESH_COMMIT_MS) return null;
+    }
     // 커밋을 바로 색인해 두면(다음 동기화를 기다리지 않고) 묶을 수 있고 검색에도 바로 걸린다
     const files = (await indexCommitSha(context.db, repo, sha)) ?? [];
     // 커밋 뒤에도 변경이 남은 파일 — 나눠 커밋하는 중이면 이번 커밋에 없는 편집은 "버림"이 아니라 아직 커밋 전이다

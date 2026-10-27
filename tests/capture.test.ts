@@ -496,3 +496,24 @@ test("cd ../다른레포 && git commit: git이 찍은 새 sha가 세션 폴더�
   assert.equal(commitContextOf(db, repoA.id, aHead), null, "A의 옛 HEAD에 세션 기록이 붙으면 안 됩니다");
   assert.deepEqual(pendingEvents(db, "s-cd", repoA.id).map((e) => e.kind), ["prompt"], "A의 세션 기록은 A의 다음 커밋을 기다린다");
 });
+
+test("git commit -q(요약 줄 없음): HEAD가 방금 만든 커밋일 때만 묶는다 — 오래된 HEAD면 커밋할 것이 없었거나 다른 곳에서 커밋한 것", async () => {
+  const db = memoryDb();
+  const dir = makeRepo([{ message: "feat: 시작", files: { "src/a.ts": "1\n" }, date: "2024-01-01T10:00:00+09:00" }], "quiet");
+  const repo = await addRepo(db, dir);
+  await syncRepo(db, repo);
+  const context = { db, env: { GRIMOIRE_HOME: tempDir() }, me: [] };
+  const quiet = { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: 'git commit -q -am "fix(a): 경계값"' }, tool_response: { stdout: "", stderr: "" } } as const;
+  await handleHook(context, event(dir, "s-q", { hook_event_name: "UserPromptSubmit", prompt: "a의 경계값을 고치자" }));
+
+  // 커밋이 안 만들어졌다(HEAD는 2024년 커밋 그대로) — 묶지 않는다
+  const old = (await headSha(dir))!;
+  await handleHook(context, event(dir, "s-q", quiet));
+  assert.equal(commitContextOf(db, repo.id, old), null, "오래된 HEAD에 묶으면 안 됩니다");
+
+  // 방금 커밋했다 — 묶는다
+  addCommit(dir, { message: "fix(a): 경계값", files: { "src/a.ts": "2\n" }, date: new Date().toISOString() });
+  const fresh = (await headSha(dir))!;
+  await handleHook(context, event(dir, "s-q", quiet));
+  assert.deepEqual(commitContextOf(db, repo.id, fresh)?.prompts, ["a의 경계값을 고치자"]);
+});

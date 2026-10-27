@@ -421,6 +421,16 @@ export async function dirtyFiles(dir: string): Promise<Set<string> | null> {
   return files;
 }
 
+/** 커밋의 committer 시각(ms). 못 읽으면 null */
+export async function commitTime(dir: string, sha: string): Promise<number | null> {
+  try {
+    const seconds = Number((await runGit(dir, ["log", "-1", "--format=%ct", sha])).trim());
+    return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function headSha(dir: string): Promise<string | null> {
   try {
     return (await runGit(dir, ["rev-parse", "--verify", "--quiet", "HEAD"])).trim() || null;

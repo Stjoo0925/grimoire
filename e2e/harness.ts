@@ -129,6 +129,9 @@ async function call(session: Session, name: string, args: Record<string, unknown
     isError?: boolean;
     content: { type: string; text: string }[];
   };
+  // 서버는 진행 알림이 다 나간 뒤에 응답하지만(server.ts settled), 클라이언트 SDK는 알림 콜백을 비동기로 돌려 응답 promise가
+  // 마지막 콜백보다 먼저 풀릴 수 있다 — macOS CI에서 [0,1]로 본 간헐 실패. 한 틱 기다려 콜백이 다 돌게 한다 (제품 동작이 아니라 측정 순서의 문제)
+  if (onProgress) await new Promise((resolve) => setImmediate(resolve));
   const text = result.content[0]?.text ?? "";
   let json: any = null;
   try {

@@ -15,7 +15,8 @@ The goal is to let the AI point at the right file and commit with a single searc
 - **Incremental sync**: only new commits and changed files are read. Syncs in the background when the MCP server starts
 - Korean queries reach English identifiers: common dev terms are expanded to English ("충돌" → `conflict`, "횟수 제한" → `rate limit`)
 - Responses are kept minimal, because whatever lands in the conversation context is what you pay for
-- **Before you edit** (Claude Code hooks, opt-in): the file's recent commits, the *why* bound to them, the files and tests that usually change with it, in 5 lines, once per file per session
+- **Before you edit** (Claude Code hooks, opt-in): the notes bound to the file, the *why* bound to its commits, the files and tests that usually change with it, in a few lines, once per file per session — only what history knows and the code doesn't
+- **Notes bound to files**: `record_note` with `paths` keeps a decision, constraint or lesson on the files it concerns; it shows up before those files are edited and is flagged once the file has changed since
 - **The why, bound to the commit**: commit trailers (`Constraint:`, `Rejected:`, `Tested:`, `Why:`…) and, with hooks on, the prompt you gave the agent, the checks it ran and the edits it dropped, all attached to the sha and searchable in your own words
 - No LLM, no embedding model, no GPU: search is keyword-based (SQLite FTS5) and the AI you already use does the reading
 
@@ -99,11 +100,11 @@ Indexing a whole folder can take a while, so clients that ask for progress get a
 |---|---|
 | `search_memory` | Searches current code files, commits and notes at once. Filters: `repo`, `author` (`me`), `since`, `until`, `kind` (`file`, `commit`, `note`), `limit` (default 8). `detail`: `index` (default, a compact list), `summary` (on request: the top 3 commits also carry their full message and the functions they changed), `full` (also the top commit's diff) |
 | `show_commit` | Message, changed files and diff of a commit (read straight from the local repo). The diff defaults to 120 lines; `paths` narrows it to specific files. `shas` (up to 5) returns several commits in one call, 40 diff lines each by default. Carries `why` (prompts, checks, dropped edits, trailers) when the commit has any |
-| `file_context` | What to know before editing a file: its recent commits, the `why` bound to them, files and tests that usually change with it (co-change mined from history, plus name-matched tests), who imports it, and whether it has had many fixes lately. Candidates to check, not instructions. Returns only `recent` and `worth: false` when there is nothing more to say |
+| `file_context` | What to know before editing a file: the `notes` bound to it (with `stale` when the file changed after the note), its recent commits, the `why` bound to them, files and tests that usually change with it (co-change mined from history, plus name-matched tests), who imports it, and whether it has had many fixes lately. Candidates to check, not instructions. Returns only `recent` and `worth: false` when there is nothing more to say |
 | `get_repo_overview` | Tech stack (from manifests), quarterly activity, most-touched directories, top authors, recent notable commits |
 | `list_repos` | Indexed repos |
 | `add_repo` | Register + index a repo (or, with `scan: true`, every repo under a folder). Scanning `/`, a folder right under it, your home or anything above it, or a folder with more than 50 repos goes through `grimoire scan` in the terminal |
-| `record_note` | Save something learned or decided as a note → searchable afterwards |
+| `record_note` | Save a decision, constraint or lesson as a note → searchable afterwards. `paths` binds it to the files it concerns (repo-relative or absolute; paths written in the text are picked up too): the note is shown before those files are edited, and marked stale once they change |
 
 Responses are minimal to save tokens: 10-char shas, dates to the day, `me` for your own commits, and the commit link prefix per repo (`links`) sent only once.
 Fields the answer doesn't need (local paths, scores, emails) are dropped. Tool descriptions are short English and only say *when* to use each tool, since tool definitions ride along with every request in every session where the server is on. Read-only tools carry `readOnlyHint`, and `add_repo` carries `idempotentHint`, so clients can tell which calls are safe.
@@ -120,19 +121,20 @@ grimoire install claude-code --remove-hooks   # takes them out again
 grimoire context src/core/search.ts           # the same card in the terminal
 ```
 
-What the `PreToolUse` hook injects (one fact per line, 400 chars at most, measured 247 chars / 49 ms):
+What the `PreToolUse` hook injects (one fact per line, 400 chars at most):
 
 ```
 Grimoire: src/core/search.ts
-Recent: a1b2c3d4e5 10-25 me "perf: faster rerank" · f6e5d4c3b2 10-23 me "feat(search): exact identifiers"
+Notes: #25 "decision: keep rerank synchronous" (2026-10-27) · #12 "constraint: FTS5 only, no embeddings" (2026-10-20, file changed since)
 Why (a1b2c3d4e5): "search got slow, get p95 under 20ms" · verified: npm run eval
 Co-changes: src/core/db.ts (4/5, strong, imports) · src/mcp/tools.ts (3/5)
 Tests: tests/search.test.ts
 ```
 
-- Only for files in a registered repo, only source files, **once per file per session** (again after HEAD changes). If the history has nothing beyond "recent commits" it says nothing at all — reading the file tells the agent that much already.
+- Only for files in a registered repo, only source files, **once per file per session** (again after HEAD changes). The hook says only what history knows and the code doesn't: notes bound to the file, the why bound to its commits, co-changes and tests. Recent commits, importers and fix counts are left to `file_context` and `grimoire context` — reading the file and `git log` tells the agent that much already. If there is nothing of the first kind, it says nothing at all. (A benchmark of the earlier "file card" that included those lines showed no measurable gain — see `docs/signal-design.md`.)
 - `Co-changes` are mined from history as association rules over commits (merge and >10-file commits excluded, confidence ≥ 0.5 as a filter, most recent first, incremental on every sync). Set `GRIMOIRE_COCHANGE_MAX_FILES=20` (then `grimoire sync`) for repos whose commits routinely touch more than 10 files. `Tests` are name-matched pairs first (`foo.ts` ↔ `foo.test.ts`, `test_foo.py`, `foo_test.go`), then tests that change together with the file. `Fixes(90d)` appears only when 2+ fix commits make up 30%+ of the file's recent commits, with the shas.
-- `SessionStart` (startup, clear, compact) adds a 600-char summary: your last 3 commits here with their *why*, and files edited but never committed in earlier sessions.
+- `SessionStart` (startup, clear, compact) adds one line saying the memory is there (`search_memory` for "where/how/why did I…", `record_note` with paths for decisions) plus files edited but never committed in earlier sessions. Set `GRIMOIRE_START_SUMMARY=1` to also get your last 3 commits here with their *why* (off by default: `git log` tells the agent that, and it cost context every session).
+- Edits, checks and commits made by **subagents** are recorded too and bound to the session's commits; only prompts are taken from the main agent (a subagent's words are not the user's).
 - The **first failing check** in a session (a failing `npm test`, `pytest`, …) triggers one more hook message: what past commits on the files you're editing recorded — their why, what verified them, what was edited then dropped, `Rejected:`/`Constraint:` trailers. Once per session; sessions that never get stuck pay nothing.
 - The hook is a separate light entry point (`dist/hook.js`), always exits 0, logs errors to `~/.grimoire/hook.log` (capped at 512KB), and never syncs inline — at session start it may spawn a background `grimoire sync` it doesn't wait for (see below). It waits at most 1.5s for the DB write lock, so it can't hit Claude Code's hook timeout. `GRIMOIRE_HOOKS=0` turns injection off; `grimoire doctor` checks the hook entry.
 - **Git worktrees** (Claude Code opens each session in `.claude/worktrees/<session>`) share the main repo's memory: a worktree is registered as its main repo, never as a repo of its own, and files in a worktree outside the repo folder are resolved to the same paths (by reading its `.git` file — no git process per edit). Files opened through a symlink or junction (e.g. `~/code` → another disk) resolve to the registered repo too. A commit made in a worktree is bound to that worktree's HEAD. `grimoire doctor` flags worktrees that an older version registered separately.

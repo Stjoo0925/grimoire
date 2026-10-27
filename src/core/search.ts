@@ -7,6 +7,7 @@
 import path from "node:path";
 
 import { whyLine } from "./capture";
+import { parseNotePaths } from "./note-doc";
 import { isIndexable, splitIdentifier } from "./code";
 import type { DB } from "./db";
 import { commitWebUrl } from "./git";
@@ -478,13 +479,14 @@ function toHit(
   }
 
   if (doc.kind === "note") {
-    const note = db.prepare("SELECT source FROM notes WHERE id = ?").get(Number(doc.ref)) as { source: string } | undefined;
+    const note = db.prepare("SELECT source, paths FROM notes WHERE id = ?").get(Number(doc.ref)) as { source: string; paths: string | null } | undefined;
     return {
       ...base,
       by: note?.source === "cli" ? "me" : "ai",
       author: null,
       snippet: snippet ?? doc.body.slice(0, 240),
-      files: [],
+      // 노트가 묶인 파일 (notes.ts)
+      files: parseNotePaths(note?.paths).map((item) => item.path),
       filesChanged: null,
       url: null,
     };

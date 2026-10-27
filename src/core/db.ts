@@ -9,7 +9,7 @@ import path from "node:path";
 
 import type * as NodeSqlite from "node:sqlite";
 
-import { cleanStoredPrompts, reRedactStored } from "./capture";
+import { backfillNotePaths, cleanReleaseContext, cleanStoredPrompts, reRedactStored } from "./capture";
 
 /** node:sqlite가 들어간 첫 버전(플래그 없이) — package.json engines와 맞춘다 */
 export const MIN_NODE = "22.13.0";
@@ -301,6 +301,15 @@ const MIGRATIONS: (string | ((db: DB) => void))[] = [
   // 9: 이미 저장된 프롬프트에서 Claude Code의 자동 블록(작업 완료 알림·세션 간 메시지·시스템 안내 등)을 걸러 낸다 (capture.ts) —
   //    0.8.0까지는 이것들이 사용자의 말로 저장돼 "왜"가 됐다
   cleanStoredPrompts,
+  // 10: 노트를 파일에 묶는다(notes.ts) — JSON [{path, blob}]. 그 파일을 고치기 직전에 노트가 보이고, blob이 바뀌었으면 오래됐을 수 있다고 표시한다
+  `
+  ALTER TABLE notes ADD COLUMN paths TEXT NOT NULL DEFAULT '[]';
+  `,
+  // 11: 옛 노트의 본문에 적힌 경로를 묶고(backfillNotePaths), 0.8.0 전 훅이 릴리스 커밋에 잘못 붙인 세션 기록을 지운다(cleanReleaseContext)
+  (db: DB) => {
+    backfillNotePaths(db);
+    cleanReleaseContext(db);
+  },
 ];
 
 /**

@@ -289,12 +289,15 @@ test("SessionStart 요약과 막혔을 때 2단계 — 각각 600자·1200자 �
   const env = { GRIMOIRE_HOME: tempDir("grimoire-start-home-") };
   const context = { db, env, me: ["me@example.com"] };
 
+  // 기본: 기억이 있다는 한 줄만 — 최근 커밋 요약은 git log로 알 수 있어 GRIMOIRE_START_SUMMARY=1일 때만 (docs/signal-design.md §4-4)
   const start = await handleHook(context, event(dir, "st-1", { hook_event_name: "SessionStart", source: "startup" }));
   assert.ok(start?.stdout, "요약이 없습니다");
-  assert.match(start!.stdout!, /^Grimoire: start — recent commits \(me\)\n/);
-  assert.match(start!.stdout!, /fix\(a\): 경계값 처리/);
-  assert.match(start!.stdout!, /file_context before editing/);
+  assert.match(start!.stdout!, /^Grimoire \(start\): search_memory/);
+  assert.ok(!start!.stdout!.includes("fix(a): 경계값 처리"), start!.stdout);
   assert.ok(start!.stdout!.length <= 600);
+  const summarized = await handleHook({ ...context, env: { ...env, GRIMOIRE_START_SUMMARY: "1" } }, event(dir, "st-1b", { hook_event_name: "SessionStart", source: "startup" }));
+  assert.match(summarized!.stdout!, /Recent commits \(me\):\n[0-9a-f]{10} \d{4}-\d\d-\d\d "fix\(a\): 경계값 처리"/);
+  assert.ok(summarized!.stdout!.length <= 600);
   assert.equal(await handleHook(context, event(dir, "st-1", { hook_event_name: "SessionStart", source: "resume" })), null);
   assert.equal(await handleHook(context, event(tempDir(), "st-1", { hook_event_name: "SessionStart", source: "startup" })), null, "등록 레포 밖");
 
@@ -612,4 +615,58 @@ test("promptText·addNote: Claude Code의 다른 자동 블록(셸 실행·메�
   const note = addNote(db, { text: "<system-reminder>안내</system-reminder>\n원인: 풀 고갈 — 커넥션을 반환하지 않았다", source: "mcp" });
   assert.equal(note.text, "원인: 풀 고갈 — 커넥션을 반환하지 않았다");
   assert.throws(() => addNote(db, { text: "<task-notification><status>completed</status></task-notification>", source: "mcp" }), /노트로 남길 내용이 없습니다/);
+});
+
+test("서브에이전트(agent_id)의 편집·검증·커밋도 기록하고 본 세션의 프롬프트를 그 커밋에 묶는다 — 프롬프트만 본 에이전트의 것", async () => {
+  const db = memoryDb();
+  const dir = makeRepo([{ message: "feat: 시작", files: { "src/a.ts": "export const a = 1;\n" } }], "subagent");
+  const repo = await addRepo(db, dir);
+  await syncRepo(db, repo);
+  const env = { GRIMOIRE_HOME: tempDir("grimoire-sub-home-") };
+  const context = { db, env, me: ["me@example.com"] };
+  const session = "sub-1";
+  await handleHook(context, event(dir, session, { hook_event_name: "UserPromptSubmit", prompt: "경계값이 틀려서 a를 2로 바꾸는 일을 위임해 줘" }));
+  await handleHook(context, event(dir, session, { hook_event_name: "UserPromptSubmit", prompt: "서브에이전트가 스스로 한 말", agent_id: "worker" }));
+  await handleHook(context, event(dir, session, { hook_event_name: "PostToolUse", tool_name: "Edit", agent_id: "worker", tool_input: { file_path: path.join(dir, "src/a.ts"), old_string: "1", new_string: "2" } }));
+  await handleHook(context, event(dir, session, { hook_event_name: "PostToolUse", tool_name: "Bash", agent_id: "worker", tool_input: { command: "npm test" }, tool_response: { stdout: "ok", stderr: "" } }));
+  const kinds = pendingEvents(db, session, repo.id).map((item) => `${item.kind}:${item.text.slice(0, 12)}`);
+  assert.deepEqual(kinds, ["prompt:경계값이 틀려서 a를 ", "edit:src/a.ts", "verify:npm test → p"]);
+
+  addCommit(dir, { message: "fix(a): 경계값", files: { "src/a.ts": "export const a = 2;\n" }, date: "2024-02-01T10:00:00+09:00" });
+  const made = (await headSha(dir))!.slice(0, 7);
+  await handleHook(context, event(dir, session, { hook_event_name: "PostToolUse", tool_name: "Bash", agent_id: "worker", tool_input: { command: 'git commit -am "fix(a): 경계값"' }, tool_response: { stdout: `[main ${made}] fix(a)`, stderr: "" } }));
+  const sha = (await headSha(dir))!;
+  assert.equal(whyLine(db, repo.id, sha), "경계값이 틀려서 a를 2로 바꾸는 일을 위임해 줘");
+  assert.deepEqual(commitContextOf(db, repo.id, sha)?.verify, ["npm test → pass"]);
+});
+
+test("cleanReleaseContext(마이그레이션 11): 릴리스 커밋에 잘못 붙은 세션 기록을 지우고 [why]도 고친다, 트레일러는 둔다", async () => {
+  const { cleanReleaseContext, refreshWhy } = await import("../src/core/capture.js");
+  const db = memoryDb();
+  const dir = makeRepo(
+    [
+      { message: "feat(pay): 결제", files: { "src/pay.ts": "1\n" }, date: "2024-01-01T10:00:00+09:00" },
+      { message: "chore: release v0.7.1 (#20)\n\nCo-Authored-By: bot <bot@example.com>", files: { "CHANGELOG.md": "# 0.7.1\n" }, date: "2024-01-02T10:00:00+09:00" },
+    ],
+    "release-ctx",
+  );
+  const repo = await addRepo(db, dir);
+  await syncRepo(db, repo);
+  const release = (await headSha(dir))!;
+  const feature = (db.prepare("SELECT sha FROM commits WHERE subject LIKE 'feat(pay)%'").get() as { sha: string }).sha;
+  const insert = db.prepare("INSERT INTO commit_context (repo_id, sha, kind, text, ord) VALUES (?, ?, ?, ?, ?)");
+  // 0.8.0 전 훅이 워크트리의 커밋을 main HEAD(릴리스 커밋)에 묶은 모양
+  insert.run(repo.id, release, "prompt", "결제 재시도에 멱등 키를 넣자", 0);
+  insert.run(repo.id, release, "verify", "npm test → pass", 0);
+  insert.run(repo.id, release, "dropped", "src/other.ts", 0);
+  insert.run(repo.id, feature, "prompt", "결제 모듈을 처음부터 만들자 — 카드와 계좌이체", 0);
+  refreshWhy(db, repo.id, release);
+  assert.equal(whyLine(db, repo.id, release), "결제 재시도에 멱등 키를 넣자");
+
+  assert.equal(cleanReleaseContext(db), 3);
+  assert.equal(whyLine(db, repo.id, release), undefined);
+  assert.deepEqual(commitContextOf(db, repo.id, release)?.trailers.map((item) => item.key), ["co-authored-by"], "트레일러는 남는다");
+  assert.equal(whyLine(db, repo.id, feature), "결제 모듈을 처음부터 만들자 — 카드와 계좌이체", "릴리스 커밋이 아닌 것은 건드리지 않는다");
+  assert.equal(search(db, "멱등").hits.length, 0, "검색 문서의 [why]에서도 사라진다");
+  assert.equal(cleanReleaseContext(db), 0);
 });

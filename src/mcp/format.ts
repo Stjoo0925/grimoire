@@ -69,7 +69,16 @@ export function slimSearch(result: SearchResult, me: string[], detail: Detail = 
     }
     if (hit.kind === "note") {
       // AI가 남긴 노트는 사람이 내린 결정과 구분한다 — 결과에 섞인 지시가 노트로 굳어 돌아오는 경로를 드러내게
-      return { note: Number(hit.ref), by: hit.by ?? "ai", date: day(hit.date), title: hit.title, body: snippet(hit.snippet), repo: hit.repo ?? undefined };
+      return {
+        note: Number(hit.ref),
+        by: hit.by ?? "ai",
+        date: day(hit.date),
+        title: hit.title,
+        body: snippet(hit.snippet),
+        repo: hit.repo ?? undefined,
+        // 노트가 묶인 파일 — "이 파일의 결정"을 경로로 찾은 결과에서 어느 파일인지 보이게
+        ...(hit.files.length > 0 ? { paths: hit.files.slice(0, FILES_PER_HIT) } : {}),
+      };
     }
     const prefix = linkPrefix(hit.url, hit.ref);
     if (hit.repo && prefix) links[hit.repo] = prefix;
@@ -177,6 +186,8 @@ export function slimFileContext(context: FileContext, me: string[], verbose = fa
   return {
     file: context.path,
     recent,
+    // 이 파일에 묶인 노트 — 결정·제약·교훈. 노트 뒤에 파일이 바뀌었으면 stale (notes.ts)
+    ...(context.notes.length > 0 ? { notes: context.notes.map((note) => `#${note.id} ${day(note.createdAt)} "${note.title}"${note.stale ? " (stale: file changed since)" : ""}`) } : {}),
     ...(context.why ? { why: `${context.why.sha.slice(0, SHA)} "${context.why.text}"${context.why.verify ? ` · verified: ${context.why.verify}` : ""}` } : {}),
     ...(context.related.length > 0
       ? { cochanges: context.related.map((item) => `${item.path} ${item.support}/${Math.round(item.support / item.confidence)}${item.strong ? " strong" : ""}${item.imports ? " imports" : ""}`) }

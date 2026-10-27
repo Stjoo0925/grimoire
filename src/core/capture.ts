@@ -12,7 +12,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 
 import type { DB } from "./db";
-import { noteDocFields } from "./note-doc";
+import { noteDocFields, notePathsField, pathsInText } from "./note-doc";
 import { redact } from "./redact";
 import { parseTrailers, whyLines, type Trailer } from "./trailers";
 
@@ -345,6 +345,56 @@ export function cleanStoredPrompts(db: DB): number {
     const { title, body } = noteDocFields(clean, note.tags);
     db.prepare("DELETE FROM docs_fts WHERE rowid = ?").run(doc.id);
     db.prepare("INSERT INTO docs_fts (rowid, title, body, paths, code) VALUES (?, ?, ?, ?, ?)").run(doc.id, title, body, doc.paths, doc.code ?? "");
+  }
+  return changed;
+}
+
+/** 릴리스 도구가 만드는 커밋 제목(release-please 등) — 세션에서 만든 커밋이 아니라 세션 기록이 붙을 수 없다 */
+export const RELEASE_SUBJECT = /^chore(\([^)]*\))?!?:\s*release\b/i;
+
+/**
+ * 릴리스 커밋에 잘못 붙은 세션 기록을 지운다(마이그레이션 11). 0.8.0 전의 훅은 다른 폴더(워크트리)에서 만든 커밋을
+ * 세션 폴더의 HEAD(main의 릴리스 커밋)에 묶었다 — 한 세션의 기록 수십 개가 릴리스 커밋 두 개에 쌓여 그 커밋의 "왜"가 됐다.
+ * 트레일러는 커밋 본문 그대로라 둔다. 지운 커밋은 검색 문서의 [why]도 다시 쓴다. 지운 행 수.
+ */
+export function cleanReleaseContext(db: DB): number {
+  const commits = db
+    .prepare("SELECT DISTINCT c.repo_id, c.sha, c.subject FROM commits c JOIN commit_context x ON x.repo_id = c.repo_id AND x.sha = c.sha WHERE x.kind IN ('prompt', 'verify', 'dropped')")
+    .all() as { repo_id: number; sha: string; subject: string }[];
+  let removed = 0;
+  for (const commit of commits) {
+    if (!RELEASE_SUBJECT.test(commit.subject)) continue;
+    removed += Number(db.prepare("DELETE FROM commit_context WHERE repo_id = ? AND sha = ? AND kind IN ('prompt', 'verify', 'dropped')").run(commit.repo_id, commit.sha).changes);
+    refreshWhy(db, commit.repo_id, commit.sha);
+  }
+  return removed;
+}
+
+/**
+ * 이미 저장된 노트에 본문의 경로를 묶는다(마이그레이션 11) — paths 칸이 생기기 전의 노트. 그때의 blob은 모르므로 null로 두어
+ * 오래됨 판정은 하지 않는다. 묶인 노트는 검색 문서의 paths도 다시 쓴다. 바뀐 노트 수.
+ */
+export function backfillNotePaths(db: DB): number {
+  const notes = db.prepare("SELECT id, repo_id, text FROM notes WHERE repo_id IS NOT NULL AND (paths = '' OR paths = '[]')").all() as { id: number; repo_id: number; text: string }[];
+  const knownByRepo = new Map<number, Set<string>>();
+  let changed = 0;
+  for (const note of notes) {
+    let known = knownByRepo.get(note.repo_id);
+    if (!known) {
+      known = new Set((db.prepare("SELECT path FROM code_files WHERE repo_id = ?").all(note.repo_id) as { path: string }[]).map((row) => row.path));
+      knownByRepo.set(note.repo_id, known);
+    }
+    const paths = pathsInText(note.text, known).map((path) => ({ path, blob: null }));
+    if (paths.length === 0) continue;
+    db.prepare("UPDATE notes SET paths = ? WHERE id = ?").run(JSON.stringify(paths), note.id);
+    const doc = db.prepare("SELECT d.id, f.title, f.body, f.code FROM docs d JOIN docs_fts f ON f.rowid = d.id WHERE d.kind = 'note' AND d.ref = ?").get(String(note.id)) as
+      | { id: number; title: string; body: string; code: string | null }
+      | undefined;
+    if (doc) {
+      db.prepare("DELETE FROM docs_fts WHERE rowid = ?").run(doc.id);
+      db.prepare("INSERT INTO docs_fts (rowid, title, body, paths, code) VALUES (?, ?, ?, ?, ?)").run(doc.id, doc.title, doc.body, notePathsField(paths), doc.code ?? "");
+    }
+    changed++;
   }
   return changed;
 }

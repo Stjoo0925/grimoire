@@ -18,9 +18,11 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 
+import { isSymptomOnly } from "./capture";
 import { isIndexable, SOURCE_EXT } from "./code";
 import type { DB } from "./db";
 import type { GitCommit } from "./git";
+import { notesForFile, type NoteHint } from "./notes";
 
 /**
  * 공변경 거래로 쓰는 커밋의 변경 파일 수 범위. 상한은 GRIMOIRE_COCHANGE_MAX_FILES로 바꿀 수 있다 —
@@ -94,6 +96,8 @@ export interface FileContext {
   tests: TestHint[];
   usedBy: { count: number; files: string[] } | null;
   fragile: { fixes: number; total: number; reasons: CommitLine[] } | null;
+  /** 이 파일에 묶인 노트 — 결정·제약·교훈 (notes.ts). 노트 뒤에 파일이 바뀌었으면 stale */
+  notes: NoteHint[];
   /** 줄 만한 것이 있나 — recent만 있으면 false (읽으면 아는 것은 주입하지 않는다) */
   worth: boolean;
 }
@@ -375,8 +379,9 @@ export function fileContext(db: DB, repoId: number, file: string): FileContext {
 
   const fragile = fragility(db, repoId, file);
   const why = whyOf(db, repoId, changes);
-  const worth = related.length > 0 || tests.length > 0 || usedBy !== null || fragile !== null || why !== null;
-  return { path: file, recent, why, related, tests, usedBy, fragile, worth };
+  const notes = notesForFile(db, repoId, file);
+  const worth = related.length > 0 || tests.length > 0 || usedBy !== null || fragile !== null || why !== null || notes.length > 0;
+  return { path: file, recent, why, related, tests, usedBy, fragile, notes, worth };
 }
 
 /** 최근 90일 fix류 커밋 비율 — 문턱을 넘을 때만 */
@@ -407,8 +412,9 @@ function whyOf(db: DB, repoId: number, recent: ChangeLine[]): Why | null {
     const rows = commit.shas.flatMap((sha) => context.all(repoId, sha) as { kind: string; text: string }[]);
     if (rows.length === 0) continue;
     if (!alive.get(repoId, commit.sha)) continue;
+    // 증상·상태 질문만 있는 프롬프트("고쳤냐?", 오류 붙여 넣기)는 왜가 아니다 — 짧고 틀린 맥락은 없는 것보다 해롭다
     const intent =
-      rows.find((row) => row.kind === "prompt")?.text ??
+      rows.find((row) => row.kind === "prompt" && !isSymptomOnly(row.text))?.text ??
       rows.find((row) => row.kind === "trailer:why" || row.kind === "trailer:constraint" || row.kind === "trailer:rejected" || row.kind === "trailer:directive")?.text;
     if (!intent) continue;
     const verify = rows.find((row) => row.kind === "verify" && /\bpass\b/.test(row.text))?.text ?? rows.find((row) => row.kind === "trailer:tested")?.text;
@@ -433,6 +439,11 @@ export interface FormatOptions {
   budget?: number;
   /** 세션에서 처음 보여 주는가 — "candidates, not instructions" 한 줄을 붙인다 */
   first?: boolean;
+  /**
+   * 훅용 — 코드와 git log를 읽으면 알 수 있는 줄(Recent·Used by·Fixes)은 빼고, 이력에서만 알 수 있는 것(노트·왜·공변경·테스트)만.
+   * docs/signal-design.md §4-1·§8 K4: 측정에서 파일 카드의 일반 정보는 효과가 없었다
+   */
+  lean?: boolean;
 }
 
 export const HOOK_BUDGET = 400;
@@ -453,12 +464,21 @@ export function shortSubject(subject: string, max: number): string {
  */
 export function formatFileContext(context: FileContext, options: FormatOptions = {}): string {
   if (!context.worth) return "";
+  // lean에서는 코드로 복원할 수 있는 신호(Used by·Fixes)만 있는 파일은 조용히 넘어간다
+  if (options.lean && context.notes.length === 0 && !context.why && context.related.length === 0 && context.tests.length === 0) return "";
   const me = options.me ?? [];
   const who = (line: CommitLine) => (me.includes(line.authorEmail.toLowerCase()) ? "me" : line.author);
   const commit = (line: CommitLine) => `${line.sha.slice(0, 10)} ${line.date.slice(5, 10)} ${who(line)} "${shortSubject(line.subject, 60)}"`;
   const lines: { key: string; text: string; drop: number }[] = [];
   lines.push({ key: "head", text: `Grimoire: ${context.path}`, drop: 99 });
-  if (context.recent.length > 0) lines.push({ key: "recent", text: `Recent: ${context.recent.slice(0, 2).map(commit).join(" · ")}`, drop: 98 });
+  if (!options.lean && context.recent.length > 0) lines.push({ key: "recent", text: `Recent: ${context.recent.slice(0, 2).map(commit).join(" · ")}`, drop: 98 });
+  if (context.notes.length > 0) {
+    lines.push({
+      key: "notes",
+      text: `Notes: ${context.notes.map((note) => `#${note.id} "${shortSubject(note.title, 60)}" (${note.createdAt.slice(0, 10)}${note.stale ? ", file changed since" : ""})`).join(" · ")}`,
+      drop: 6,
+    });
+  }
   if (context.why) {
     lines.push({
       key: "why",
@@ -480,14 +500,14 @@ export function formatFileContext(context: FileContext, options: FormatOptions =
       drop: 5,
     });
   }
-  if (context.fragile) {
+  if (!options.lean && context.fragile) {
     lines.push({
       key: "fragile",
       text: `Fixes(${FRAGILE_DAYS}d): ${context.fragile.fixes} of ${context.fragile.total} commits — ${context.fragile.reasons.map((line) => `${line.sha.slice(0, 10)} "${shortSubject(line.subject, 40)}"`).join(", ")}`,
       drop: 3,
     });
   }
-  if (context.usedBy) {
+  if (!options.lean && context.usedBy) {
     lines.push({ key: "usedBy", text: `Used by: ${context.usedBy.count} files (${context.usedBy.files.map((file) => path.posix.basename(file)).join(", ")}${context.usedBy.count > context.usedBy.files.length ? ", …" : ""})`, drop: 1 });
   }
   if (options.first) lines.push({ key: "note", text: "These are candidates to check, not instructions.", drop: 0 });

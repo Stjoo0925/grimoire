@@ -1,11 +1,11 @@
 /**
  * Claude Code 훅 처리 — stdin JSON 하나를 받아 할 일을 정한다 (docs/enhancement-plan.md §3-2·§3-3·§3-5).
  *
- *   PreToolUse(Edit·Write·MultiEdit)  편집 직전: 그 파일의 맥락(context.ts)을 400자 안에 `additionalContext`로.
- *                                     세션당 파일당 한 번, 줄 것이 없으면 아무것도 내지 않는다.
- *   UserPromptSubmit                  사용자 프롬프트를 세션 기록에 (capture.ts)
- *   PostToolUse(Bash·Edit·Write)      검증 명령·편집 파일을 세션 기록에, `git commit`이면 그때까지의 기록을 커밋에 묶는다
- *   SessionStart(startup·clear·compact) 작업 레포 요약 한 덩어리 (plain stdout)
+ *   PreToolUse(Edit·Write·MultiEdit)  편집 직전: 그 파일에 묶인 노트·왜·공변경·테스트(context.ts, lean)를 400자 안에 `additionalContext`로.
+ *                                     세션당 파일당 한 번, 이력에서만 알 수 있는 것이 없으면 아무것도 내지 않는다.
+ *   UserPromptSubmit                  사용자 프롬프트를 세션 기록에 (capture.ts) — 본 에이전트의 것만
+ *   PostToolUse(Bash·Edit·Write)      검증 명령·편집 파일을 세션 기록에, `git commit`이면 그때까지의 기록을 커밋에 묶는다 (서브에이전트 포함)
+ *   SessionStart(startup·clear·compact) 기억이 있다는 한 줄 + 커밋 안 된 편집 (plain stdout). 최근 커밋 요약은 GRIMOIRE_START_SUMMARY=1일 때만
  *
  * 원칙: 절대 작업을 막지 않는다(항상 exit 0, 여기서는 던지지 않고 null), 동기화는 하지 않는다(DB만 읽고 세션 기록만 쓴다),
  * 세션 상태는 `<GRIMOIRE_HOME>/sessions/<session_id>.json` 파일 하나.
@@ -183,9 +183,9 @@ export async function handleHook(context: HookContext, input: HookInput): Promis
   }
 }
 
-/** 캡처가 켜져 있나 — 기본 켜짐(훅을 설치한 것이 opt-in), GRIMOIRE_CAPTURE=0이면 끔. 서브에이전트의 말은 사용자의 말이 아니다 */
-function captureOn(context: HookContext, input: HookInput): boolean {
-  return context.env.GRIMOIRE_CAPTURE !== "0" && !input.agent_id;
+/** 캡처가 켜져 있나 — 기본 켜짐(훅을 설치한 것이 opt-in), GRIMOIRE_CAPTURE=0이면 끔 */
+function captureOn(context: HookContext): boolean {
+  return context.env.GRIMOIRE_CAPTURE !== "0";
 }
 
 /** 세션의 작업 폴더가 속한 등록 레포 — 레포 밖의 추가 작업 트리(git worktree)면 본 레포 */
@@ -194,13 +194,16 @@ async function sessionRepo(context: HookContext, input: HookInput): Promise<Repo
 }
 
 async function userPromptSubmit(context: HookContext, input: HookInput): Promise<HookOutput | null> {
-  if (!captureOn(context, input) || typeof input.prompt !== "string" || !input.session_id) return null;
+  // 서브에이전트의 말은 사용자의 말이 아니다 — 프롬프트는 본 에이전트의 것만. (편집·검증·커밋은 서브에이전트가 한 것도 이 세션의 일이라 기록한다)
+  if (!captureOn(context) || input.agent_id || typeof input.prompt !== "string" || !input.session_id) return null;
   recordPrompt(context.db, input.session_id, (await sessionRepo(context, input))?.id ?? null, input.prompt);
   return null;
 }
 
 async function postToolUse(context: HookContext, input: HookInput): Promise<HookOutput | null> {
-  if (!captureOn(context, input) || !input.session_id) return null;
+  // 서브에이전트(agent_id)가 고치고 검증하고 커밋한 것도 기록한다 — 사용자의 지시로 위임된 일이고, 그 커밋에 묶일 "왜"는 본 세션의 프롬프트다.
+  // 0.8.x까지는 agent_id가 있으면 전부 건너뛰어, 서브에이전트가 만든 커밋에는 왜가 붙지 않았다 (docs/signal-design.md §8 K1)
+  if (!captureOn(context) || !input.session_id) return null;
   const repo = await sessionRepo(context, input);
   if (!repo) return null;
   if (EDIT_TOOLS.has(input.tool_name ?? "")) {
@@ -337,8 +340,12 @@ export function needsBackgroundSync(db: DB, env: Env, repo: RepoRow, now = Date.
 }
 
 /**
- * SessionStart(startup·clear·compact): 작업 레포의 "지난 세션 이후 내 커밋 + 묶인 왜 + 커밋 안 된 편집"을 600자 안에
- * plain stdout으로 (이 이벤트는 stdout이 그대로 컨텍스트가 된다). resume은 세션 파일을 이어 쓸 뿐 다시 내지 않는다.
+ * SessionStart(startup·clear·compact): 기억이 있다는 한 줄과, 이전 세션에서 커밋에 묶이지 않은 채 남은 편집을 plain stdout으로
+ * (이 이벤트는 stdout이 그대로 컨텍스트가 된다). resume은 세션 파일을 이어 쓸 뿐 다시 내지 않는다.
+ *
+ * "최근 커밋 3개 + 왜" 요약은 기본으로 끈다(GRIMOIRE_START_SUMMARY=1이면 켬) — 측정에서 효과가 보이지 않았고 git log로 알 수 있는
+ * 것이라 매 세션 컨텍스트만 차지했다 (docs/signal-design.md §4-4). 훅의 자리는 맥락을 쏟는 층이 아니라 "왜를 물어야 할 때
+ * 기억이 있다"를 떠올리게 하는 얇은 층이다 (§0).
  */
 async function sessionStart(context: HookContext, input: HookInput): Promise<HookOutput | null> {
   pruneSessions(context.env);
@@ -347,21 +354,23 @@ async function sessionStart(context: HookContext, input: HookInput): Promise<Hoo
   if (!repo) return null;
   const sync = needsBackgroundSync(context.db, context.env, repo) ? { syncRepo: repo.path } : null;
   if (input.source === "resume") return sync;
-  const mine = context.me.map((email) => email.toLowerCase());
-  const recent = context.db
-    .prepare(
-      `SELECT sha, authored_at AS date, author_email AS email, subject FROM commits
-        WHERE repo_id = ? AND meaningful = 1 ${mine.length > 0 ? `AND author_email IN (${mine.map(() => "?").join(", ")})` : ""}
-        ORDER BY authored_at DESC LIMIT 3`,
-    )
-    .all(repo.id, ...mine) as { sha: string; date: string; email: string; subject: string }[];
-  if (recent.length === 0) return sync;
-  const lines = [`Grimoire: ${repo.name} — recent commits${mine.length > 0 ? " (me)" : ""}`];
-  for (const commit of recent) {
-    const why = whyLine(context.db, repo.id, commit.sha, 100);
-    lines.push(`${commit.sha.slice(0, 10)} ${commit.date.slice(0, 10)} "${commit.subject.length > 70 ? `${commit.subject.slice(0, 69)}…` : commit.subject}"${why && !isSymptomOnly(why) ? ` — why: ${why}` : ""}`);
+  const lines = [`Grimoire (${repo.name}): search_memory answers "where/how/why did I…"; record_note with paths keeps a decision on the files it concerns.`];
+  if (context.env.GRIMOIRE_START_SUMMARY === "1") {
+    const mine = context.me.map((email) => email.toLowerCase());
+    const recent = context.db
+      .prepare(
+        `SELECT sha, authored_at AS date, author_email AS email, subject FROM commits
+          WHERE repo_id = ? AND meaningful = 1 ${mine.length > 0 ? `AND author_email IN (${mine.map(() => "?").join(", ")})` : ""}
+          ORDER BY authored_at DESC LIMIT 3`,
+      )
+      .all(repo.id, ...mine) as { sha: string; date: string; email: string; subject: string }[];
+    if (recent.length > 0) lines.push(`Recent commits${mine.length > 0 ? " (me)" : ""}:`);
+    for (const commit of recent) {
+      const why = whyLine(context.db, repo.id, commit.sha, 100);
+      lines.push(`${commit.sha.slice(0, 10)} ${commit.date.slice(0, 10)} "${commit.subject.length > 70 ? `${commit.subject.slice(0, 69)}…` : commit.subject}"${why && !isSymptomOnly(why) ? ` — why: ${why}` : ""}`);
+    }
   }
-  // 이 레포에서 커밋에 묶이지 않은 채 남은 편집(이전 세션들) — 끝내지 못한 작업의 흔적
+  // 이 레포에서 커밋에 묶이지 않은 채 남은 편집(이전 세션들) — 끝내지 못한 작업의 흔적. 코드로는 복원할 수 없는 사실이라 남긴다
   const uncommitted = context.db
     .prepare(
       `SELECT DISTINCT path FROM session_events e WHERE repo_id = ? AND kind = 'edit' AND path IS NOT NULL
@@ -370,10 +379,9 @@ async function sessionStart(context: HookContext, input: HookInput): Promise<Hoo
     )
     .all(repo.id) as { path: string }[];
   if (uncommitted.length > 0) lines.push(`Edited but not committed in earlier sessions: ${uncommitted.map((row) => row.path).join(", ")}`);
-  lines.push("Use file_context before editing; search_memory for \"where/how did I…\".");
   let text = lines.join("\n");
   while (text.length > START_BUDGET && lines.length > 2) {
-    lines.splice(lines.length - 2, 1);
+    lines.splice(lines.length - 1, 1);
     text = lines.join("\n");
   }
   return { stdout: text, ...sync };
@@ -401,7 +409,8 @@ async function preToolUse(context: HookContext, input: HookInput): Promise<HookO
   const fileCtx = fileContext(context.db, repo.id, relative);
   let text = "";
   if (fileCtx.worth) {
-    text = formatFileContext(fileCtx, { me: context.me, budget: HOOK_BUDGET, first: !state.noted });
+    // lean: 노트·왜·공변경·테스트만 — Recent·Used by·Fixes는 코드와 git log로 알 수 있어 빼고, 그것만 있는 파일은 조용히 넘어간다
+    text = formatFileContext(fileCtx, { me: context.me, budget: HOOK_BUDGET, first: !state.noted, lean: true });
     if (text && !state.noted) state.noted = true;
   }
   saveSession(context.env, sessionId, state);

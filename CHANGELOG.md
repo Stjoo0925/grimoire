@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.0](https://github.com/Stjoo0925/grimoire/compare/v0.7.1...v0.8.0) (2026-10-27)
+
+
+### 기능
+
+* 훅·세션 캡처·공변경 보강, Codex 설치, MCP roots — 워크트리, squash 중복, 비밀 지우기, 업그레이드 안전 ([#21](https://github.com/Stjoo0925/grimoire/issues/21)) ([dbd2652](https://github.com/Stjoo0925/grimoire/commit/dbd26524a58291d035ab2276bf9160d416544c5d))
+
+
+### 버그 수정
+
+* **mcp:** 보낸 진행 알림이 다 나간 뒤에 도구 응답을 돌려준다 ([#23](https://github.com/Stjoo0925/grimoire/issues/23)) ([5cfeefe](https://github.com/Stjoo0925/grimoire/commit/5cfeefe7e29b4ad8764aada5c9f48b3358a72641))
+
 ## [0.7.1](https://github.com/Stjoo0925/grimoire/compare/v0.7.0...v0.7.1) (2026-10-27)
 
 

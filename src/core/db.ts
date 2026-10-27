@@ -294,13 +294,17 @@ const MIGRATIONS: string[] = [
   `,
 ];
 
-export function openDb(file: string): DB {
+/**
+ * busyTimeoutMs: 다른 프로세스가 쓰기 잠금을 쥐었을 때 기다리는 시간. SQLite의 대기는 동기라 그동안 타이머도 안 돈다 —
+ * 훅(hook.ts)은 Claude Code의 훅 timeout(5초) 안에 끝나야 해서 짧게 준다.
+ */
+export function openDb(file: string, options: { busyTimeoutMs?: number } = {}): DB {
   if (file !== ":memory:") makePrivate(file);
   const { DatabaseSync } = loadSqlite();
   const db = new DB(new DatabaseSync(file));
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
-  db.pragma("busy_timeout = 5000");
+  db.pragma(`busy_timeout = ${Math.max(0, Math.floor(options.busyTimeoutMs ?? 5000))}`);
   migrate(db);
   return db;
 }

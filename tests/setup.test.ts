@@ -404,3 +404,21 @@ test("doctor: 업그레이드로 비워진 공변경 이력을 sync 전까지 �
   checks = await doctor({ cliPath: fakeCli(), env, home, fetchImpl: offline });
   assert.ok(!checks.some((c) => c.title.includes(title)), formatChecks(checks));
 });
+
+test("openDb busyTimeoutMs: 다른 연결이 쓰기 잠금을 쥐면 그만큼만 기다리고 실패한다 (훅이 5초 timeout에 걸리지 않게)", async () => {
+  const { isBusyError } = await import("../src/core/db.js");
+  const file = path.join(tempDir(), "busy.db");
+  const holder = openDb(file);
+  holder.exec("BEGIN IMMEDIATE");
+  try {
+    const hook = openDb(file, { busyTimeoutMs: 200 });
+    const started = Date.now();
+    assert.throws(() => hook.exec("CREATE TABLE t (x)"), (error: unknown) => isBusyError(error));
+    const waited = Date.now() - started;
+    assert.ok(waited >= 150 && waited < 2_000, `대기 ${waited}ms`);
+    hook.close();
+  } finally {
+    holder.exec("ROLLBACK");
+    holder.close();
+  }
+});

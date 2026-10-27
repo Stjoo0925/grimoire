@@ -19,6 +19,8 @@ import { handleHook, type HookInput } from "./hook/runner";
 /** 자체 타임아웃 — Claude Code의 timeout보다 짧게, 느린 디스크에서도 편집을 붙잡지 않게 */
 const SELF_TIMEOUT_MS = 3_000;
 const STDIN_MAX = 2 * 1024 * 1024;
+/** 다른 grimoire 프로세스(sync·MCP)가 쓰기 잠금을 쥐었을 때 훅이 기다리는 최대 시간 — 넘으면 그 기록은 버리고 hook.log에 남긴다 */
+const HOOK_BUSY_TIMEOUT_MS = 1_500;
 
 function parseEnvArgs(argv: string[]): Env {
   const env: Env = { ...process.env };
@@ -137,7 +139,8 @@ async function main(): Promise<void> {
   const me = await myEmails(env);
   let db;
   try {
-    db = openDb(dbPath(env));
+    // 잠금 대기는 동기라 SELF_TIMEOUT도 못 끊는다 — Claude Code의 훅 timeout(5초)보다 한참 짧게
+    db = openDb(dbPath(env), { busyTimeoutMs: HOOK_BUSY_TIMEOUT_MS });
   } catch (error) {
     log(env, `db: ${error instanceof Error ? error.message : error}`);
     return;

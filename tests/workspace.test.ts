@@ -200,3 +200,21 @@ test("waitForWorkspace: 한 번 시간을 넘기면 첫 인덱싱이 끝날 때�
   await pending;
   assert.equal(await waitForWorkspace(workspace, 5_000), repo);
 });
+
+test("progressOf: 보낸 진행 알림이 다 나간 뒤에야 settled가 끝난다 (응답보다 마지막 알림이 늦게 가지 않게)", async () => {
+  const { progressOf } = await import("../src/mcp/server.js");
+  const sent: number[] = [];
+  // 알림 전송이 늦게 끝나는 전송 계층 — 마지막 알림이 가장 늦다
+  const notify = (notification: { method: string; params?: Record<string, unknown> }) =>
+    new Promise<void>((resolve) => setTimeout(() => {
+      sent.push(notification.params?.progress as number);
+      resolve();
+    }, notification.params?.progress === 2 ? 30 : 5));
+  assert.equal(progressOf({ notify }), undefined, "progressToken이 없으면 알리지 않는다");
+  const progress = progressOf({ _meta: { progressToken: "t" }, notify })!;
+  progress.report(0, 2, "a");
+  progress.report(1, 2, "b");
+  progress.report(2, 2, "완료");
+  await progress.settled();
+  assert.deepEqual([...sent].sort(), [0, 1, 2], "settled 뒤에는 세 알림이 모두 나가 있어야 합니다");
+});

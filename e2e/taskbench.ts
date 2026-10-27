@@ -239,13 +239,19 @@ export function worktree(repo: string, sha: string, links: string[] = []): { dir
   };
 }
 
+/** --under 값을 레포 기준 폴더 접두로 — 구분자는 /, 끝에 / 하나 (빈 값은 그대로) */
+export function underPrefix(under: string | undefined): string {
+  const trimmed = (under ?? "").trim().replace(/\\/g, "/");
+  return trimmed ? trimmed.replace(/\/*$/, "/") : "";
+}
+
 /**
  * 테스트 명령의 {tests} 자리에 그 사례의 테스트 파일을 넣는다 — 전체 스위트가 무거운 레포용.
  * under(예: backend/)가 있으면 명령이 그 폴더에서 돈다는 뜻이라 경로도 그 폴더 기준으로 바꾼다
  * (`cd backend && vitest run backend/src/x.spec.ts`는 "No test files found"로 늘 실패한다).
  */
 export function testCommand(test: string, testFiles: string[], under = ""): string {
-  const prefix = under && !under.endsWith("/") ? `${under}/` : under;
+  const prefix = underPrefix(under);
   const local = testFiles.map((file) => (prefix && file.startsWith(prefix) ? file.slice(prefix.length) : file));
   return test.replace(/\{tests\}/g, local.map((file) => `"${file}"`).join(" "));
 }
@@ -579,7 +585,7 @@ async function main(): Promise<number> {
     const repo = path.resolve(expandHome(values.repo));
     const out = path.resolve(values.out ?? "bench/tasks.local.json");
     const existing: TaskFile = fs.existsSync(out) ? (JSON.parse(fs.readFileSync(out, "utf8")) as TaskFile) : { tasks: [] };
-    const tasks = mine(repo, values.test, Number.parseInt(values.limit ?? "40", 10) || 40, existing.tasks, values.all === true, (values.link ?? "").split(",").map((item) => item.trim()).filter(Boolean), values.under ? values.under.replace(/\\/g, "/").replace(/\/?$/, "/") : "");
+    const tasks = mine(repo, values.test, Number.parseInt(values.limit ?? "40", 10) || 40, existing.tasks, values.all === true, (values.link ?? "").split(",").map((item) => item.trim()).filter(Boolean), underPrefix(values.under));
     fs.mkdirSync(path.dirname(out), { recursive: true });
     fs.writeFileSync(out, JSON.stringify({ tasks }, null, 2) + "\n");
     process.stdout.write(`${out}: 사례 ${tasks.length}개. 각 사례의 "prompt"를 증상 서술로 다듬으세요(비면 커밋 제목을 씁니다 — 수정 힌트가 샐 수 있습니다).\n`);

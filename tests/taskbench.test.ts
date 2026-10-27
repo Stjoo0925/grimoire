@@ -73,7 +73,7 @@ test("testCommand: {tests}를 그 사례의 테스트 파일로 바꾼다", asyn
   assert.equal(testCommand("cd backend && npx vitest run {tests}", ["backend/src/a.spec.ts", "backend/src/b c.spec.ts"]), 'cd backend && npx vitest run "backend/src/a.spec.ts" "backend/src/b c.spec.ts"');
   assert.equal(testCommand("npm test", ["x.test.ts"]), "npm test");
   // --under: 명령이 그 폴더에서 도니 경로도 그 폴더 기준 (끝 / 유무 무관)
-  for (const under of ["backend/", "backend"]) {
+  for (const under of ["backend/", "backend", "backend\\", "backend//"]) {
     assert.equal(testCommand("cd backend && npx vitest run {tests}", ["backend/src/a.spec.ts"], under), 'cd backend && npx vitest run "src/a.spec.ts"');
   }
 });

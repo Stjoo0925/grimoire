@@ -2,6 +2,7 @@
  * 노트 — 대화 중 배운 것·결정 사항을 남긴다. 커밋과 같은 색인으로 검색된다.
  */
 import { upsertDoc, type DB } from "./db";
+import { redact } from "./redact";
 
 export interface NoteInput {
   text: string;
@@ -25,9 +26,15 @@ const TITLE_MAX = 120;
 export const TAGS_MAX = 20;
 export const TAG_CHARS = 40;
 
-export function addNote(db: DB, input: NoteInput): NoteRow {
-  const text = input.text.trim().slice(0, NOTE_MAX);
-  if (!text) throw new Error("노트 내용이 비어 있습니다");
+/**
+ * redacted: 비밀로 보이는 값을 지우고 저장했는가 — 노트는 검색 결과로 다시 모델에게 건네지므로, 원인 분석에 섞여 든
+ * 연결 문자열·토큰도 세션 캡처와 같은 규칙(redact.ts)으로 지운다.
+ */
+export function addNote(db: DB, input: NoteInput): NoteRow & { redacted: boolean } {
+  const raw = input.text.trim().slice(0, NOTE_MAX);
+  if (!raw) throw new Error("노트 내용이 비어 있습니다");
+  const text = redact(raw);
+  const redacted = text !== raw;
   // 넘치면 오류 대신 자른다 (앞의 TAGS_MAX개, 각 TAG_CHARS자)
   const tags = (input.tags ?? [])
     .map((tag) => tag.trim().toLowerCase().slice(0, TAG_CHARS).trim())
@@ -52,6 +59,6 @@ export function addNote(db: DB, input: NoteInput): NoteRow {
       body: [firstLine.length > TITLE_MAX ? firstLine : "", ...rest, tags].filter(Boolean).join("\n"),
       paths: "",
     });
-    return db.prepare("SELECT * FROM notes WHERE id = ?").get(id) as NoteRow;
+    return { ...(db.prepare("SELECT * FROM notes WHERE id = ?").get(id) as NoteRow), redacted };
   })();
 }

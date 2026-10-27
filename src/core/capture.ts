@@ -316,6 +316,21 @@ export function reRedactStored(db: DB): number {
     if (row.kind === "prompt") touched.set(`${row.repo_id}\0${row.sha}`, { repoId: row.repo_id, sha: row.sha });
   }
   for (const { repoId, sha } of touched.values()) refreshWhy(db, repoId, sha);
+
+  // 노트 — 검색 문서(제목 = 첫 줄, 본문 = 나머지 + 태그)도 같은 규칙으로 고친다. 비밀은 한 줄 안에 있으므로 칸마다 지워도 같다
+  const notes = db.prepare("SELECT id, text FROM notes").all() as { id: number; text: string }[];
+  const setNote = db.prepare("UPDATE notes SET text = ? WHERE id = ?");
+  const noteDoc = db.prepare("SELECT d.id, f.title, f.body, f.paths, f.code FROM docs d JOIN docs_fts f ON f.rowid = d.id WHERE d.kind = 'note' AND d.ref = ?");
+  for (const note of notes) {
+    const clean = redact(note.text);
+    if (clean === note.text) continue;
+    setNote.run(clean, note.id);
+    changed++;
+    const doc = noteDoc.get(String(note.id)) as { id: number; title: string; body: string; paths: string; code: string | null } | undefined;
+    if (!doc) continue;
+    db.prepare("DELETE FROM docs_fts WHERE rowid = ?").run(doc.id);
+    db.prepare("INSERT INTO docs_fts (rowid, title, body, paths, code) VALUES (?, ?, ?, ?, ?)").run(doc.id, redact(doc.title), redact(doc.body), doc.paths, doc.code ?? "");
+  }
   return changed;
 }
 

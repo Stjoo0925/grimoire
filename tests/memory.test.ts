@@ -431,3 +431,25 @@ test("blobBatches: blob 크기 합계가 상한을 넘지 않게 나눈다", () 
   assert.deepEqual(batches.map((batch) => batch.map((item) => item.size)), [[60, 30], [20], [100], [5]]);
   assert.deepEqual(blobBatches([]), []);
 });
+
+test("addNote: 노트의 비밀(연결 문자열·토큰)을 저장 전에 지우고 그렇게 했다고 알린다, 옛 노트는 마이그레이션 8이 고친다", async () => {
+  const { reRedactStored } = await import("../src/core/capture.js");
+  const db = memoryDb();
+  const note = addNote(db, { text: "원인: DATABASE_URL=postgres://app:s3cretpw@db/x 로 붙어 풀 고갈\n다음엔 풀 크기부터 확인", tags: ["db"], source: "mcp" });
+  assert.equal(note.redacted, true);
+  assert.ok(!note.text.includes("s3cretpw"), note.text);
+  assert.equal(search(db, "s3cretpw").hits.length, 0);
+  assert.ok(search(db, "풀 고갈").hits.length > 0, "나머지 말은 검색된다");
+  assert.equal(addNote(db, { text: "평범한 결정 메모", source: "cli" }).redacted, false);
+
+  // 0.7.x가 그대로 저장한 노트
+  const old = addNote(db, { text: "임시 메모", source: "cli" });
+  db.prepare("UPDATE notes SET text = ? WHERE id = ?").run("스테이징 GITHUB_TOKEN=ghsecret123 로 배포", old.id);
+  const docId = (db.prepare("SELECT id FROM docs WHERE kind = 'note' AND ref = ?").get(String(old.id)) as { id: number }).id;
+  db.prepare("DELETE FROM docs_fts WHERE rowid = ?").run(docId);
+  db.prepare("INSERT INTO docs_fts (rowid, title, body, paths, code) VALUES (?, ?, '', '', '')").run(docId, "스테이징 GITHUB_TOKEN=ghsecret123 로 배포");
+  assert.ok(search(db, "ghsecret123").hits.length > 0, "준비: 새어 있어야 합니다");
+  assert.equal(reRedactStored(db), 1);
+  assert.equal(search(db, "ghsecret123").hits.length, 0);
+  assert.ok(search(db, "스테이징 배포").hits.length > 0);
+});

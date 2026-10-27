@@ -180,7 +180,7 @@ async function main(argv: string[]): Promise<number> {
           tags: values.tag,
           source: "cli",
         });
-        print(`노트 #${note.id} 저장`);
+        print(`노트 #${note.id} 저장${note.redacted ? " (비밀로 보이는 값은 [redacted]로 바꿨습니다)" : ""}`);
         return 0;
       }
       case "remove": {

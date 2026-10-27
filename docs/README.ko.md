@@ -127,7 +127,7 @@ Tests: tests/search.test.ts
 1. **커밋 트레일러, 훅 없이.** 커밋 메시지 마지막 문단의 `Key: value` 줄을 `git interpret-trailers`와 같은 규칙으로 읽습니다. Lore(`Constraint`, `Rejected: 대안 | 이유`, `Directive`, `Tested`, `Not-tested` …), QAC(`Agent`, `Mode`, `What`, `Why`), 플랫폼 꼬리표(`Claude-Session`, `Agent-Logs-Url`, `Co-Authored-By` …). 값은 자유 문자열이고 모르는 키도 저장합니다. `Co-Authored-By: Claude…`·`Claude-Session`·`Agent-Logs-Url`·`Agent:`가 있으면 에이전트가 만든 커밋으로 표시합니다. 옛 DB는 다음 동기화 때 레포당 한 번 백필됩니다.
 2. **세션 캡처, 훅이 있을 때.** `UserPromptSubmit`은 프롬프트(슬래시 명령·서브에이전트 제외), `PostToolUse`는 테스트·린트·타입체크 명령과 결과, 편집한 줄의 해시를 모읍니다. `git commit`이 성공하면 직전 커밋 이후의 것을 새 sha에 묶습니다: 프롬프트(최대 10건, 각 1,000자), 검증(최대 20건), 그리고 *dropped* — 세션에서 고쳤지만 그 줄이 커밋에 하나도 없는 파일. 커밋은 그 자리에서 색인되므로 다음 동기화를 기다리지 않습니다.
 
-프라이버시: 캡처는 훅을 설치했을 때만 켜집니다(`GRIMOIRE_CAPTURE=0`이면 주입은 두고 캡처만 끔). 저장 전에 `<private>…</private>` 구간, 붙여 넣은 블록, API 토큰·키·JWT, `password=…` 류 값은 `[redacted]`로 바뀝니다. 도구 출력은 실패한 검증의 마지막 300자 말고는 저장하지 않습니다. 커밋에 묶이지 않은 기록은 14일 뒤 지웁니다. 전부 로컬 SQLite 파일 안에 있고 git에는 아무것도 쓰지 않습니다.
+프라이버시: 캡처는 훅을 설치했을 때만 켜집니다(`GRIMOIRE_CAPTURE=0`이면 주입은 두고 캡처만 끔). 저장 전에 `<private>…</private>` 구간, 붙여 넣은 블록, API 토큰·키·JWT, `password=…` 류 값(`OPENAI_API_KEY=…`처럼 접두 붙은 이름 포함), 연결 문자열의 비밀번호는 `[redacted]`로 바뀝니다 — 노트에도 같은 규칙이 적용되고, 옛 버전이 저장한 기록은 업그레이드 때 한 번 정리됩니다. 도구 출력은 실패한 검증의 마지막 300자 말고는 저장하지 않습니다. 커밋에 묶이지 않은 기록은 14일 뒤 지웁니다. 전부 로컬 SQLite 파일 안에 있고 git에는 아무것도 쓰지 않습니다.
 
 ### 현재 코드 색인
 

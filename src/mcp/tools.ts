@@ -407,7 +407,12 @@ async function runTool(context: ToolContext, name: string, args: Args, signal: A
       for (let attempt = 0; ; attempt++) {
         try {
           const note = addNote(db, { text, repoId, tags, source: "mcp" });
-          return { recorded: true, id: note.id, createdAt: note.created_at };
+          return {
+            recorded: true,
+            id: note.id,
+            createdAt: note.created_at,
+            ...(note.redacted ? { redacted: "비밀로 보이는 값(토큰·비밀번호 등)을 [redacted]로 바꿔 저장했습니다" } : {}),
+          };
         } catch (error) {
           if (!isBusyError(error) || attempt >= NOTE_RETRIES) throw error;
           await sleep(NOTE_RETRY_MS);

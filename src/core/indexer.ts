@@ -12,7 +12,9 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { refreshWhy, storeTrailers } from "./capture";
 import { BLOB_BATCH_BYTES, extractSymbols, headerComment, listHeadFiles, readBlobs, splitIdentifier, type CodeSymbol, type HeadFile } from "./code";
+import { addCochange, cochangeInput, extractImportSpecs, needsCochangeBackfill, rebuildCochange, resolveImportSpecs } from "./context";
 import { deleteDoc, upsertDoc, pruneOrphanFts, type DB } from "./db";
 import {
   headTree,
@@ -30,6 +32,7 @@ import {
 import { isMeaningfulSubject } from "./meaningful";
 import { canonicalTech, techCategory } from "./tech/canonical";
 import { parseManifest } from "./tech/manifests";
+import { agentSignal } from "./trailers";
 
 /** 한 번에 git에서 읽어 올 커밋 수 */
 const READ_BATCH = 500;
@@ -117,6 +120,24 @@ export function matchRepos(db: DB, query: string): RepoRow[] {
   );
 }
 
+/** 절대경로가 속한 등록 레포 (가장 긴 경로가 이기게). 상대경로나 레포 밖이면 undefined. */
+export function repoOfPath(db: DB, target: string): RepoRow | undefined {
+  if (!path.isAbsolute(target)) return undefined;
+  const resolved = path.resolve(target);
+  return listRepos(db)
+    .filter((repo) => resolved === repo.path || resolved.startsWith(repo.path + path.sep))
+    .sort((a, b) => b.path.length - a.path.length)[0];
+}
+
+/** 레포 폴더 안에 사는 git worktree — Claude Code가 세션마다 만드는 자리. 그 안의 파일은 레포 기준 경로로 색인돼 있다 */
+const NESTED_WORKTREE = /^\.claude\/worktrees\/[^/]+\//;
+
+/** 레포 안 경로를 색인과 같은 꼴(레포 기준, POSIX 구분자)로 */
+export function relativeToRepo(repoPath: string, target: string): string {
+  const relative = path.isAbsolute(target) ? path.relative(repoPath, path.resolve(target)) : target;
+  return relative.split(path.sep).join("/").replace(/^\.\//, "").replace(NESTED_WORKTREE, "");
+}
+
 /** 이름·경로·원격 URL 일부로 레포 하나를 찾는다. 정확한 일치가 우선이고, 부분 일치가 여럿이면(모호) null. */
 export function findRepo(db: DB, query: string): RepoRow | null {
   const matches = matchRepos(db, query);
@@ -188,13 +209,16 @@ async function syncRepoNow(db: DB, repo: RepoRow, signal?: AbortSignal): Promise
 
   // 커밋은 읽은 묶음마다 따로 쓴다 — 쓰기 잠금을 짧게 쥐고, 전 커밋을 메모리에 모아 두지 않는다.
   // 트랜잭션은 동기라 아래 기술 스택·코드 읽기와 겹쳐 돌아도 서로 섞이지 않는다
-  const writeFresh = async () => {
+  const writeFresh = async (backfill: boolean) => {
     let added = 0;
     for (let start = 0; start < fresh.length; start += READ_BATCH) {
       const batch = await readCommits(repo.path, fresh.slice(start, start + READ_BATCH), signal);
       throwIfCancelled(signal);
       db.transaction(() => {
-        for (const commit of batch) insertCommit(db, repo, commit);
+        for (const commit of batch) {
+          // 공변경은 새로 들어간 커밋만 더한다 — 옛 DB는 끝에 전체를 다시 만들므로 여기서는 건너뛴다
+          if (insertCommit(db, repo, commit) && !backfill) addCochange(db, repo.id, cochangeInput(commit, isMeaningfulSubject(commit.subject)));
+        }
       })();
       added += batch.length;
     }
@@ -202,15 +226,20 @@ async function syncRepoNow(db: DB, repo: RepoRow, signal?: AbortSignal): Promise
   };
   // HEAD 트리가 그대로면 현재 코드·기술 스택도 그대로다. 커밋·기술 스택·코드 읽기는 서로 독립이라 함께 돌린다
   const treeChanged = tree === null || tree !== saved?.head_tree;
+  // 옛 DB(마이그레이션 직후)면 있는 커밋으로 공변경 표를 끝에 다시 만들고, 아니면 새 커밋을 하나씩 더한다 (context.ts)
+  const backfill = needsCochangeBackfill(db, repo.id);
   const [added, tech, code] = await Promise.all([
-    writeFresh(),
+    writeFresh(backfill),
     treeChanged ? readTechStack(repo.path, signal) : null,
-    treeChanged ? readChangedCode(db, repo, signal) : { changed: [], removed: [] },
+    treeChanged ? readChangedCode(db, repo, signal) : { changed: [], removed: [], present: new Set<string>() },
   ]);
   // git 실패를 기본값으로 삼키는 함수들이 있어, 취소됐으면 그 기본값을 쓰기 전에 멈춘다
   throwIfCancelled(signal);
 
   db.transaction(() => {
+    if (backfill) rebuildCochange(db, repo.id);
+    backfillTrailers(db, repo);
+
     if (tech) {
       db.prepare("DELETE FROM repo_tech WHERE repo_id = ?").run(repo.id);
       const insertTech = db.prepare(
@@ -294,11 +323,15 @@ interface ChangedFile {
   lines: number;
   symbols: CodeSymbol[];
   header: string;
+  /** import 지정자(원문) — 경로는 트랜잭션 안에서 HEAD 파일 집합으로 푼다 (context.ts) */
+  imports: string[];
 }
 
 interface CodeChanges {
   changed: ChangedFile[];
   removed: string[];
+  /** HEAD의 색인 대상 경로 전부 — import 대상을 푸는 데 쓴다 */
+  present: Set<string>;
 }
 
 /** blob 크기 합계가 BLOB_BATCH_BYTES를 넘지 않게 나눈다 (cat-file 출력이 버퍼 하나에 올라오므로) */
@@ -342,14 +375,16 @@ async function readChangedCode(db: DB, repo: RepoRow, signal?: AbortSignal): Pro
         lines: content.split("\n").length,
         symbols: extractSymbols(content),
         header: headerComment(content),
+        imports: extractImportSpecs(file.path, content),
       });
     }
   }
   const present = new Set(head.map((file) => file.path));
-  const empty = { lines: 1, symbols: [], header: "" };
+  const empty = { lines: 1, symbols: [], header: "", imports: [] };
   return {
     changed: stale.map((file) => ({ path: file.path, blob: file.blob, ...(extracted.get(file.blob) ?? empty) })),
     removed: [...known.keys()].filter((file) => !present.has(file)),
+    present,
   };
 }
 
@@ -359,10 +394,15 @@ function applyCode(db: DB, repo: RepoRow, code: CodeChanges): void {
      ON CONFLICT (repo_id, path) DO UPDATE SET blob = excluded.blob, lines = excluded.lines,
        symbols = excluded.symbols, header = excluded.header`,
   );
+  const clearImports = db.prepare("DELETE FROM file_imports WHERE repo_id = ? AND path = ?");
+  const insertImport = db.prepare("INSERT OR IGNORE INTO file_imports (repo_id, path, target) VALUES (?, ?, ?)");
   const now = new Date().toISOString();
   for (const file of code.changed) {
     const { symbols, header } = file;
     upsert.run(repo.id, file.path, file.blob, file.lines, JSON.stringify(symbols), header);
+    // 레포 안 import만 — "누가 나를 쓰나"(usedBy)와 공변경의 import 이웃 신호 (context.ts)
+    clearImports.run(repo.id, file.path);
+    for (const target of resolveImportSpecs(file.path, file.imports, code.present)) insertImport.run(repo.id, file.path, target);
     upsertDoc(db, {
       kind: "file",
       ref: file.path,
@@ -379,11 +419,49 @@ function applyCode(db: DB, repo: RepoRow, code: CodeChanges): void {
   const remove = db.prepare("DELETE FROM code_files WHERE repo_id = ? AND path = ?");
   for (const file of code.removed) {
     remove.run(repo.id, file);
+    clearImports.run(repo.id, file);
     deleteDoc(db, "file", file, repo.id);
   }
 }
 
-function insertCommit(db: DB, repo: RepoRow, commit: GitCommit): void {
+/**
+ * 옛 DB(마이그레이션 직후)의 커밋 본문에서 트레일러를 한 번 읽어 둔다 — 훅 없이도 "왜"가 생기는 재료 (capture.ts).
+ * 레포당 한 번(repos.trailers_done). 새 커밋은 insertCommit이 그때그때 읽는다.
+ */
+function backfillTrailers(db: DB, repo: RepoRow): void {
+  const done = (db.prepare("SELECT trailers_done FROM repos WHERE id = ?").get(repo.id) as { trailers_done: number } | undefined)?.trailers_done;
+  if (done) return;
+  const rows = db.prepare("SELECT sha, body FROM commits WHERE repo_id = ? AND body LIKE '%:%'").all(repo.id) as { sha: string; body: string }[];
+  const mark = db.prepare("UPDATE commits SET agent_signal = ? WHERE repo_id = ? AND sha = ?");
+  for (const row of rows) {
+    const trailers = storeTrailers(db, repo.id, row.sha, row.body);
+    if (trailers.length === 0) continue;
+    const signal = agentSignal(trailers);
+    if (signal) mark.run(signal, repo.id, row.sha);
+    refreshWhy(db, repo.id, row.sha);
+  }
+  db.prepare("UPDATE repos SET trailers_done = 1 WHERE id = ?").run(repo.id);
+}
+
+/**
+ * sha 하나를 git에서 읽어 넣는다 — 훅이 `git commit`을 감지했을 때, 다음 동기화를 기다리지 않고 바로 묶을 수 있게.
+ * 이미 있으면 그대로. 돌려주는 값은 커밋의 변경 파일 경로.
+ */
+export async function indexCommitSha(db: DB, repo: RepoRow, sha: string): Promise<string[] | null> {
+  const known = db.prepare("SELECT 1 FROM commits WHERE repo_id = ? AND sha = ?").get(repo.id, sha);
+  if (known) {
+    return (db.prepare("SELECT path FROM commit_files WHERE repo_id = ? AND sha = ?").all(repo.id, sha) as { path: string }[]).map((row) => row.path);
+  }
+  const [commit] = await readCommits(repo.path, [sha]);
+  if (!commit) return null;
+  db.transaction(() => {
+    if (insertCommit(db, repo, commit)) addCochange(db, repo.id, cochangeInput(commit, isMeaningfulSubject(commit.subject)));
+  })();
+  return commit.files.map((file) => file.path);
+}
+
+/** 커밋을 넣는다. 이미 있던 커밋이면 false (공변경을 두 번 세지 않게). */
+function insertCommit(db: DB, repo: RepoRow, commit: GitCommit): boolean {
   const insertions = commit.files.reduce((sum, file) => sum + (file.insertions ?? 0), 0);
   const deletions = commit.files.reduce((sum, file) => sum + (file.deletions ?? 0), 0);
   const inserted = db.prepare(
@@ -405,7 +483,7 @@ function insertCommit(db: DB, repo: RepoRow, commit: GitCommit): void {
     isMeaningfulSubject(commit.subject) ? 1 : 0,
   );
   // 이미 있던 커밋(다른 프로세스가 먼저 넣음)이면 파일·문서도 이미 같은 트랜잭션으로 들어가 있다 — 중복 행을 만들지 않는다
-  if (inserted.changes === 0) return;
+  if (inserted.changes === 0) return false;
 
   const insertFile = db.prepare(
     "INSERT INTO commit_files (repo_id, sha, path, insertions, deletions) VALUES (?, ?, ?, ?, ?)",
@@ -426,6 +504,14 @@ function insertCommit(db: DB, repo: RepoRow, commit: GitCommit): void {
       .map((file) => file.path)
       .join(" "),
   });
+  // 트레일러(Lore·QAC·플랫폼 꼬리표) → 커밋에 묶인 "왜"와 에이전트 커밋 판정 (capture.ts)
+  const trailers = storeTrailers(db, repo.id, commit.sha, commit.body);
+  if (trailers.length > 0) {
+    const signal = agentSignal(trailers);
+    if (signal) db.prepare("UPDATE commits SET agent_signal = ? WHERE repo_id = ? AND sha = ?").run(signal, repo.id, commit.sha);
+    refreshWhy(db, repo.id, commit.sha);
+  }
+  return true;
 }
 
 interface TechItem {

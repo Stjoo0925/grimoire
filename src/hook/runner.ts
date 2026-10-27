@@ -1,0 +1,339 @@
+/**
+ * Claude Code 훅 처리 — stdin JSON 하나를 받아 할 일을 정한다 (docs/enhancement-plan.md §3-2·§3-3·§3-5).
+ *
+ *   PreToolUse(Edit·Write·MultiEdit)  편집 직전: 그 파일의 맥락(context.ts)을 400자 안에 `additionalContext`로.
+ *                                     세션당 파일당 한 번, 줄 것이 없으면 아무것도 내지 않는다.
+ *   UserPromptSubmit                  사용자 프롬프트를 세션 기록에 (capture.ts)
+ *   PostToolUse(Bash·Edit·Write)      검증 명령·편집 파일을 세션 기록에, `git commit`이면 그때까지의 기록을 커밋에 묶는다
+ *   SessionStart(startup·clear·compact) 작업 레포 요약 한 덩어리 (plain stdout)
+ *
+ * 원칙: 절대 작업을 막지 않는다(항상 exit 0, 여기서는 던지지 않고 null), 동기화는 하지 않는다(DB만 읽고 세션 기록만 쓴다),
+ * 세션 상태는 `<GRIMOIRE_HOME>/sessions/<session_id>.json` 파일 하나.
+ */
+import fs from "node:fs";
+import path from "node:path";
+
+import {
+  bindToCommit,
+  commitContextOf,
+  commitSucceeded,
+  isGitCommit,
+  isSymptomOnly,
+  isVerifyCommand,
+  lineHashes,
+  pendingEvents,
+  pruneEvents,
+  recordEvent,
+  recordPrompt,
+  verifyOutcome,
+  whyLine,
+} from "../core/capture";
+import { isIndexable } from "../core/code";
+import { grimoireHome, type Env } from "../core/config";
+import { fileContext, formatFileContext, TEST_PATH, HOOK_BUDGET } from "../core/context";
+import type { DB } from "../core/db";
+import { addedLines, headSha } from "../core/git";
+import { indexCommitSha, relativeToRepo, repoOfPath, type RepoRow } from "../core/indexer";
+
+/** 훅이 돌려주는 것 — Claude Code 규약(JSON은 hookSpecificOutput, 일부 이벤트는 plain stdout) */
+export interface HookOutput {
+  json?: { hookSpecificOutput: { hookEventName: string; additionalContext: string } };
+  stdout?: string;
+}
+
+export interface HookInput {
+  hook_event_name?: string;
+  session_id?: string;
+  cwd?: string;
+  tool_name?: string;
+  tool_input?: Record<string, unknown>;
+  tool_response?: Record<string, unknown>;
+  prompt?: string;
+  source?: string;
+  agent_id?: string;
+  [key: string]: unknown;
+}
+
+/** 세션 파일 — 이 세션에서 이미 보여 준 파일과 상태 */
+export interface SessionState {
+  startedAt: string;
+  updatedAt: string;
+  /** "repoId:path" → 그때의 HEAD 트리 (바뀌면 다시 보여 준다) */
+  shown: Record<string, string>;
+  /** "candidates, not instructions" 한 줄을 이미 붙였나 */
+  noted: boolean;
+  /** 이 세션에서 첫 번째 실패한 검증이 지나갔나 (막혔을 때 2단계, §3-5) */
+  struggled: boolean;
+}
+
+const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+/** 세션 파일 보존 기간 */
+export const SESSION_TTL_DAYS = 14;
+
+export function sessionsDir(env: Env): string {
+  return path.join(grimoireHome(env), "sessions");
+}
+
+export function loadSession(env: Env, sessionId: string): SessionState {
+  const file = path.join(sessionsDir(env), `${safeId(sessionId)}.json`);
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<SessionState>;
+    return {
+      startedAt: parsed.startedAt ?? new Date().toISOString(),
+      updatedAt: parsed.updatedAt ?? new Date().toISOString(),
+      shown: parsed.shown ?? {},
+      noted: parsed.noted ?? false,
+      struggled: parsed.struggled ?? false,
+    };
+  } catch {
+    return { startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), shown: {}, noted: false, struggled: false };
+  }
+}
+
+export function saveSession(env: Env, sessionId: string, state: SessionState): void {
+  const dir = sessionsDir(env);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const file = path.join(dir, `${safeId(sessionId)}.json`);
+  const temp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(temp, JSON.stringify({ ...state, updatedAt: new Date().toISOString() }), { mode: 0o600 });
+  fs.renameSync(temp, file);
+}
+
+/** 오래된 세션 파일 정리 (SessionStart 때) */
+export function pruneSessions(env: Env, now = Date.now()): number {
+  const dir = sessionsDir(env);
+  let removed = 0;
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return 0;
+  }
+  for (const name of entries) {
+    const file = path.join(dir, name);
+    try {
+      if (now - fs.statSync(file).mtimeMs > SESSION_TTL_DAYS * 86_400_000) {
+        fs.rmSync(file, { force: true });
+        removed++;
+      }
+    } catch {
+      // 이미 지워짐
+    }
+  }
+  return removed;
+}
+
+function safeId(id: string): string {
+  return id.replace(/[^\w.-]/g, "_").slice(0, 120) || "unknown";
+}
+
+/** 편집 대상 파일의 절대경로 (도구별 인자 이름이 같다) */
+function editedPath(input: HookInput): string | null {
+  const value = input.tool_input?.file_path ?? input.tool_input?.notebook_path;
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+export interface HookContext {
+  db: DB;
+  env: Env;
+  me: string[];
+  /** 레포 HEAD 트리를 읽는다 — 테스트에서 바꿔 끼운다 */
+  headOf?: (repo: RepoRow) => string;
+}
+
+/**
+ * 훅 입력 하나를 처리한다. 돌려줄 것이 없으면 null. 던질 수 있다 — 호출부(hook.ts)가 로그로 남기고 exit 0.
+ */
+export async function handleHook(context: HookContext, input: HookInput): Promise<HookOutput | null> {
+  if (context.env.GRIMOIRE_HOOKS === "0") return null;
+  switch (input.hook_event_name) {
+    case "PreToolUse":
+      return preToolUse(context, input);
+    case "UserPromptSubmit":
+      return userPromptSubmit(context, input);
+    case "PostToolUse":
+      return postToolUse(context, input);
+    case "SessionStart":
+      return sessionStart(context, input);
+    default:
+      return null;
+  }
+}
+
+/** 캡처가 켜져 있나 — 기본 켜짐(훅을 설치한 것이 opt-in), GRIMOIRE_CAPTURE=0이면 끔. 서브에이전트의 말은 사용자의 말이 아니다 */
+function captureOn(context: HookContext, input: HookInput): boolean {
+  return context.env.GRIMOIRE_CAPTURE !== "0" && !input.agent_id;
+}
+
+function sessionRepo(context: HookContext, input: HookInput): RepoRow | undefined {
+  return input.cwd ? repoOfPath(context.db, input.cwd) : undefined;
+}
+
+function userPromptSubmit(context: HookContext, input: HookInput): HookOutput | null {
+  if (!captureOn(context, input) || typeof input.prompt !== "string" || !input.session_id) return null;
+  recordPrompt(context.db, input.session_id, sessionRepo(context, input)?.id ?? null, input.prompt);
+  return null;
+}
+
+async function postToolUse(context: HookContext, input: HookInput): Promise<HookOutput | null> {
+  if (!captureOn(context, input) || !input.session_id) return null;
+  const repo = sessionRepo(context, input);
+  if (!repo) return null;
+  if (EDIT_TOOLS.has(input.tool_name ?? "")) {
+    const file = editedPath(input);
+    if (!file) return null;
+    const relative = relativeToRepo(repo.path, file);
+    const added = newText(input.tool_input ?? {});
+    recordEvent(context.db, { sessionId: input.session_id, repoId: repo.id, kind: "edit", text: relative, path: relative, lineHashes: lineHashes(added) });
+    return null;
+  }
+  if (input.tool_name !== "Bash") return null;
+  const command = typeof input.tool_input?.command === "string" ? input.tool_input.command : "";
+  if (!command) return null;
+  if (isVerifyCommand(command)) {
+    const outcome = verifyOutcome(input.tool_response);
+    const text = `${command.trim().slice(0, 200)} → ${outcome.ok ? "pass" : "fail"}${outcome.tail ? ` :: ${outcome.tail}` : ""}`;
+    recordEvent(context.db, { sessionId: input.session_id, repoId: repo.id, kind: "verify", text });
+    if (!outcome.ok) {
+      // 막혔을 때 2단계(§3-5): 이 세션의 첫 번째 실패한 검증 뒤 한 번만, 편집 중인 파일들의 왜·검증·버린 편집을 건넨다.
+      // 막히지 않은 세션에는 비용이 없다. (REM: "막혔을 때 한 번" > "첫 편집 때 바로" > "항상 고정")
+      const state = loadSession(context.env, input.session_id);
+      if (!state.struggled) {
+        state.struggled = true;
+        saveSession(context.env, input.session_id, state);
+        const text = struggleContext(context, repo, input.session_id);
+        if (text) return { json: { hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: text } } };
+      }
+    }
+  }
+  if (isGitCommit(command) && commitSucceeded(input.tool_response)) {
+    const sha = await headSha(repo.path);
+    if (!sha) return null;
+    // 커밋을 바로 색인해 두면(다음 동기화를 기다리지 않고) 묶을 수 있고 검색에도 바로 걸린다
+    const files = (await indexCommitSha(context.db, repo, sha)) ?? [];
+    const addedHashes = new Set(lineHashes((await addedLines(repo.path, sha)).join("\n")));
+    bindToCommit(context.db, { sessionId: input.session_id, repoId: repo.id, sha, files, addedHashes });
+  }
+  return null;
+}
+
+/** 편집 도구가 새로 넣는 텍스트 (Edit의 new_string, Write의 content, MultiEdit의 edits[].new_string) */
+function newText(toolInput: Record<string, unknown>): string {
+  if (typeof toolInput.new_string === "string") return toolInput.new_string;
+  if (typeof toolInput.content === "string") return toolInput.content;
+  if (Array.isArray(toolInput.edits)) {
+    return toolInput.edits.map((edit) => (edit && typeof edit === "object" && typeof (edit as { new_string?: unknown }).new_string === "string" ? (edit as { new_string: string }).new_string : "")).join("\n");
+  }
+  if (typeof toolInput.new_source === "string") return toolInput.new_source;
+  return "";
+}
+
+/** 막혔을 때 2단계의 글자 예산과 커밋 수 */
+const STRUGGLE_BUDGET = 1_200;
+const STRUGGLE_COMMITS = 3;
+
+function struggleContext(context: HookContext, repo: RepoRow, sessionId: string): string {
+  const edited = [...new Set(pendingEvents(context.db, sessionId, repo.id).filter((event) => event.kind === "edit" && event.path).map((event) => event.path as string))];
+  if (edited.length === 0) return "";
+  const lines: string[] = [`Grimoire: first failing check in this session — what past commits on the files you're editing recorded`];
+  const seen = new Set<string>();
+  for (const file of edited.slice(0, 5)) {
+    const recent = context.db
+      .prepare(
+        `SELECT c.sha FROM commit_files f JOIN commits c ON c.repo_id = f.repo_id AND c.sha = f.sha
+          WHERE f.repo_id = ? AND f.path = ? AND c.meaningful = 1 ORDER BY c.authored_at DESC LIMIT 5`,
+      )
+      .all(repo.id, file) as { sha: string }[];
+    for (const { sha } of recent) {
+      if (seen.has(sha) || seen.size >= STRUGGLE_COMMITS) continue;
+      const view = commitContextOf(context.db, repo.id, sha);
+      if (!view) continue;
+      seen.add(sha);
+      const why = whyLine(context.db, repo.id, sha, 160);
+      lines.push(`${sha.slice(0, 10)} ${file}:`);
+      if (why) lines.push(`  why: ${why}`);
+      const verify = [...view.verify.slice(-2), ...view.trailers.filter((trailer) => trailer.key === "tested").map((trailer) => trailer.value)];
+      if (verify.length > 0) lines.push(`  verified: ${verify.join(" · ").slice(0, 200)}`);
+      if (view.dropped.length > 0) lines.push(`  dropped (edited then left out of the commit): ${view.dropped.slice(0, 4).join(", ")}`);
+      const rejected = view.trailers.filter((trailer) => trailer.key === "rejected" || trailer.key === "constraint").slice(0, 2);
+      for (const trailer of rejected) lines.push(`  ${trailer.key}: ${trailer.value.slice(0, 160)}`);
+    }
+  }
+  if (lines.length === 1) return "";
+  const text = lines.join("\n");
+  return text.length > STRUGGLE_BUDGET ? `${text.slice(0, STRUGGLE_BUDGET - 1)}…` : text;
+}
+
+/** 세션 시작 요약의 글자 예산 */
+const START_BUDGET = 600;
+
+/**
+ * SessionStart(startup·clear·compact): 작업 레포의 "지난 세션 이후 내 커밋 + 묶인 왜 + 커밋 안 된 편집"을 600자 안에
+ * plain stdout으로 (이 이벤트는 stdout이 그대로 컨텍스트가 된다). resume은 세션 파일을 이어 쓸 뿐 다시 내지 않는다.
+ */
+function sessionStart(context: HookContext, input: HookInput): HookOutput | null {
+  pruneSessions(context.env);
+  pruneEvents(context.db);
+  if (input.source === "resume") return null;
+  const repo = sessionRepo(context, input);
+  if (!repo) return null;
+  const mine = context.me.map((email) => email.toLowerCase());
+  const recent = context.db
+    .prepare(
+      `SELECT sha, authored_at AS date, author_email AS email, subject FROM commits
+        WHERE repo_id = ? AND meaningful = 1 ${mine.length > 0 ? `AND author_email IN (${mine.map(() => "?").join(", ")})` : ""}
+        ORDER BY authored_at DESC LIMIT 3`,
+    )
+    .all(repo.id, ...mine) as { sha: string; date: string; email: string; subject: string }[];
+  if (recent.length === 0) return null;
+  const lines = [`Grimoire: ${repo.name} — recent commits${mine.length > 0 ? " (me)" : ""}`];
+  for (const commit of recent) {
+    const why = whyLine(context.db, repo.id, commit.sha, 100);
+    lines.push(`${commit.sha.slice(0, 10)} ${commit.date.slice(0, 10)} "${commit.subject.length > 70 ? `${commit.subject.slice(0, 69)}…` : commit.subject}"${why && !isSymptomOnly(why) ? ` — why: ${why}` : ""}`);
+  }
+  // 이 레포에서 커밋에 묶이지 않은 채 남은 편집(이전 세션들) — 끝내지 못한 작업의 흔적
+  const uncommitted = context.db
+    .prepare(
+      `SELECT DISTINCT path FROM session_events e WHERE repo_id = ? AND kind = 'edit' AND path IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM session_events c WHERE c.session_id = e.session_id AND c.repo_id = e.repo_id AND c.kind = 'commit' AND c.at > e.at)
+        ORDER BY at DESC LIMIT 5`,
+    )
+    .all(repo.id) as { path: string }[];
+  if (uncommitted.length > 0) lines.push(`Edited but not committed in earlier sessions: ${uncommitted.map((row) => row.path).join(", ")}`);
+  lines.push("Use file_context before editing; search_memory for \"where/how did I…\".");
+  let text = lines.join("\n");
+  while (text.length > START_BUDGET && lines.length > 2) {
+    lines.splice(lines.length - 2, 1);
+    text = lines.join("\n");
+  }
+  return { stdout: text };
+}
+
+function preToolUse(context: HookContext, input: HookInput): HookOutput | null {
+  if (!input.tool_name || !EDIT_TOOLS.has(input.tool_name)) return null;
+  const file = editedPath(input);
+  if (!file) return null;
+  const repo = repoOfPath(context.db, file);
+  if (!repo) return null;
+  const relative = relativeToRepo(repo.path, file);
+  // 테스트·생성·비소스 파일은 건너뛴다 — 맥락을 줄 가치가 낮고 매 편집마다 글자를 쓴다
+  if (TEST_PATH.test(relative) || !isIndexable(relative, 0)) return null;
+
+  const sessionId = input.session_id ?? "unknown";
+  const state = loadSession(context.env, sessionId);
+  const head = context.headOf ? context.headOf(repo) : (repo.head_tree ?? "");
+  const key = `${repo.id}:${relative}`;
+  // 같은 세션에서 같은 파일은 한 번만 — HEAD가 바뀌었으면(커밋 뒤) 다시 (§10-1: 고정 노출 < 한 번 노출)
+  if (state.shown[key] === head) return null;
+  state.shown[key] = head;
+
+  const fileCtx = fileContext(context.db, repo.id, relative);
+  let text = "";
+  if (fileCtx.worth) {
+    text = formatFileContext(fileCtx, { me: context.me, budget: HOOK_BUDGET, first: !state.noted });
+    if (text && !state.noted) state.noted = true;
+  }
+  saveSession(context.env, sessionId, state);
+  if (!text) return null;
+  return { json: { hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: text } } };
+}

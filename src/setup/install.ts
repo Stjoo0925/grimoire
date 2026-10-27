@@ -22,8 +22,8 @@ export const SERVER_NAME = "grimoire";
 export const CLIENTS = ["claude-code", "claude-desktop", "cursor"] as const;
 export type ClientName = (typeof CLIENTS)[number];
 
-/** 설정에 함께 옮겨 적는 환경 변수 — CLI와 MCP가 같은 DB·같은 "나"·같은 자동 등록·기동 동기화·업데이트 설정을 보게 한다. */
-const FORWARDED_ENV = ["GRIMOIRE_HOME", "GRIMOIRE_ME", "GRIMOIRE_AUTO_ADD", "GRIMOIRE_SYNC_ON_START", "GRIMOIRE_UPDATE_CHECK"] as const;
+/** 설정에 함께 옮겨 적는 환경 변수 — CLI와 MCP·훅이 같은 DB·같은 "나"·같은 자동 등록·기동 동기화·업데이트·캡처 설정을 보게 한다. */
+export const FORWARDED_ENV = ["GRIMOIRE_HOME", "GRIMOIRE_ME", "GRIMOIRE_AUTO_ADD", "GRIMOIRE_SYNC_ON_START", "GRIMOIRE_UPDATE_CHECK", "GRIMOIRE_CAPTURE", "GRIMOIRE_COCHANGE_MAX_FILES"] as const;
 
 export interface ServerSpec {
   command: string;
@@ -247,7 +247,7 @@ export async function install(client: ClientName, options: InstallOptions): Prom
   return { client, file, backup: writeJson(plan), unchanged: false, next, spec };
 }
 
-interface JsonPlan {
+export interface JsonPlan {
   file: string;
   /** 지금 파일 내용 (없으면 null) */
   raw: string | null;
@@ -257,7 +257,7 @@ interface JsonPlan {
 }
 
 /** 설정 JSON을 읽어 바꿀 내용을 만든다. 깨진 JSON이면 건드리지 않고 멈춘다. */
-function planJson(file: string, merge: (existing: unknown) => Record<string, unknown>): JsonPlan {
+export function planJson(file: string, merge: (existing: unknown) => Record<string, unknown>): JsonPlan {
   let existing: unknown = {};
   let raw: string | null = null;
   if (fs.existsSync(file)) {
@@ -276,7 +276,7 @@ function planJson(file: string, merge: (existing: unknown) => Record<string, unk
 }
 
 /** 계획대로 쓴다. 기존 파일이 있으면 `.bak`을 남기고 그 경로를 돌려준다. */
-function writeJson({ file, raw, text }: JsonPlan): string | null {
+export function writeJson({ file, raw, text }: JsonPlan): string | null {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   // rename은 새 파일을 만드는 것이라 권한을 따로 옮겨야 한다 (설정 파일은 보통 600)
   const mode = raw !== null ? fs.statSync(file).mode & 0o777 : 0o600;

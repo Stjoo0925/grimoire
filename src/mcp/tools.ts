@@ -15,16 +15,18 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { commitContextOf } from "../core/capture";
 import { isIndexable } from "../core/code";
+import { fileContext } from "../core/context";
 import { isBusyError, type DB } from "../core/db";
 import { resolveAuthors } from "../core/identity";
 import { indexCommitCode } from "../core/diffs";
 import { CancelledError } from "../core/git";
-import { addRepo, discoverRepos, listRepos, matchRepos, syncRepo } from "../core/indexer";
+import { addRepo, discoverRepos, listRepos, matchRepos, relativeToRepo, repoOfPath, syncRepo } from "../core/indexer";
 import { addNote, TAG_CHARS, TAGS_MAX } from "../core/notes";
 import { commitDetail, repoOverview, repoSummaries } from "../core/overview";
 import { search, type SearchHit } from "../core/search";
-import { slimCommit, slimOverview, slimRepos, slimSearch, type Detail } from "./format";
+import { slimCommit, slimFileContext, slimOverview, slimRepos, slimSearch, type Detail } from "./format";
 import { waitForWorkspace, type Background, type Workspace } from "./workspace";
 
 export interface ToolContext {
@@ -106,6 +108,16 @@ export const TOOLS = [
         paths: { type: "array", items: { type: "string" } },
         max_diff_lines: { type: "number", description: "120; 40 per sha" },
       },
+    },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: "file_context",
+    description: "Before editing a file: recent commits, why, co-changed files/tests, importers.",
+    inputSchema: {
+      type: "object",
+      properties: { path: { type: "string" }, repo: { type: "string" }, verbose: { type: "boolean" } },
+      required: ["path"],
     },
     annotations: { readOnlyHint: true },
   },
@@ -316,19 +328,30 @@ async function runTool(context: ToolContext, name: string, args: Args, signal: A
           ? [args.paths]
           : [];
       const repoId = repoFilter(args.repo)?.id;
+      const contextOf = (detail: { repoId: number; sha: string }) => commitContextOf(db, detail.repoId, detail.sha);
       if (shas.length === 0) {
         const detail = await commitDetail(db, sha!, { repoId, maxDiffLines: num(args.max_diff_lines), paths, signal });
         if ("error" in detail) throw new ToolError([detail.error, ...(detail.candidates ?? [])].join("\n"));
-        return slimCommit(detail, me);
+        return slimCommit(detail, me, contextOf(detail));
       }
       // 여러 커밋 한 번에 — 검색 결과 상위 몇 개를 왕복 없이 비교할 때. 응답이 커지지 않게 커밋당 diff를 줄인다
       const commits = await Promise.all(
         shas.map(async (item) => {
           const detail = await commitDetail(db, item, { repoId, maxDiffLines: num(args.max_diff_lines) ?? MULTI_DIFF_LINES, paths, signal });
-          return "error" in detail ? { sha: item, error: [detail.error, ...(detail.candidates ?? [])].join("\n") } : slimCommit(detail, me);
+          return "error" in detail ? { sha: item, error: [detail.error, ...(detail.candidates ?? [])].join("\n") } : slimCommit(detail, me, contextOf(detail));
         }),
       );
       return { commits };
+    }
+    case "file_context": {
+      const target = str(args.path);
+      if (!target) throw new ToolError("path가 필요합니다");
+      // 레포를 안 주면 작업 레포, 그것도 없으면 경로가 속한 등록 레포(절대경로일 때)
+      const repo = repoFilter(args.repo) ?? current ?? repoOfPath(db, target);
+      if (!repo) throw new ToolError("repo가 필요합니다 (어느 레포의 파일인지 알 수 없습니다)");
+      const relative = relativeToRepo(repo.path, target);
+      if (current) await context.workspace?.refresh?.(current, REFRESH_WAIT_MS);
+      return slimFileContext(fileContext(db, repo.id, relative), me, args.verbose === true);
     }
     case "get_repo_overview": {
       const repo = repoFilter(args.repo);

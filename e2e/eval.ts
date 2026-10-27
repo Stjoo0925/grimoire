@@ -56,19 +56,28 @@ interface Row {
 }
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-type Core = { db: any; search: any; indexer: any; diffs: any; tools: any; code: any };
+type Core = { db: any; search: any; indexer: any; diffs: any; tools: any; code: any; context: any };
 
 const expandHome = (value: string) => value.replace(/^~(?=$|\/)/, os.homedir());
 
 function loadCore(dir: string): Core {
   const load = (name: string) => require(path.join(dir, name));
-  let diffs: any = null;
-  try {
-    diffs = load("core/diffs");
-  } catch {
-    diffs = null; // diff 단계가 없는 옛 빌드
-  }
-  return { db: load("core/db"), search: load("core/search"), indexer: load("core/indexer"), diffs, tools: load("mcp/tools"), code: load("core/code") };
+  const optional = (name: string) => {
+    try {
+      return load(name);
+    } catch {
+      return null; // 그 단계가 없는 옛 빌드
+    }
+  };
+  return {
+    db: load("core/db"),
+    search: load("core/search"),
+    indexer: load("core/indexer"),
+    diffs: optional("core/diffs"),
+    context: optional("core/context"),
+    tools: load("mcp/tools"),
+    code: load("core/code"),
+  };
 }
 
 function git(cwd: string, args: string[]): string {
@@ -244,6 +253,7 @@ async function main(): Promise<number> {
       compare: { type: "boolean" },
       "no-questions": { type: "boolean" },
       "no-code": { type: "boolean" },
+      cochange: { type: "boolean" },
     },
   });
   if (values.compare) {
@@ -284,6 +294,11 @@ async function main(): Promise<number> {
 
   const rows = await runQuestions(core, db, questions, values.detail ?? "");
   const types = [...new Set(rows.map((row) => row.type))];
+  // --cochange: 시간 분할로 "파일 하나를 보면 같이 바뀐 파일을 맞히나" (docs/enhancement-plan.md §3-1 — L3 ≥ 0.6, P@3 ≥ 0.35, strong ≥ 0.5)
+  const cochange =
+    values.cochange && core.context
+      ? Object.fromEntries(repos.map((repo) => [repo.name, core.context.evaluateCochange(db, repo.id)]).filter(([, value]) => value !== null))
+      : undefined;
   const report = {
     label: values.label ?? "",
     at: new Date().toISOString(),
@@ -291,6 +306,7 @@ async function main(): Promise<number> {
     detail: values.detail ?? "(기본)",
     corpus: { repos: pinned.map((item) => `${path.basename(item.source)}@${item.sha.slice(0, 7)}`), commits, files, indexMs, codeMs, dbBytes },
     historyToFile: historyToFile(core, db),
+    ...(cochange ? { cochange } : {}),
     all: metrics(rows),
     byType: Object.fromEntries(types.map((type) => [type, metrics(rows.filter((row) => row.type === type))])),
   };

@@ -355,6 +355,28 @@ export function showCommit(
   });
 }
 
+/** 커밋 diff에 새로 들어간 줄들 (소스 파일만, 머리 줄 제외) — 세션의 편집이 커밋에 남았는지 대조하는 데 쓴다 */
+export async function addedLines(dir: string, sha: string, maxLines = 5_000): Promise<string[]> {
+  const out = await runGit(dir, ["show", "--format=", "--unified=0", "--no-color", "--no-ext-diff", sha]);
+  const lines: string[] = [];
+  for (const line of out.split("\n")) {
+    if (line.startsWith("+") && !line.startsWith("+++")) {
+      lines.push(line.slice(1));
+      if (lines.length >= maxLines) break;
+    }
+  }
+  return lines;
+}
+
+/** HEAD의 sha */
+export async function headSha(dir: string): Promise<string | null> {
+  try {
+    return (await runGit(dir, ["rev-parse", "--verify", "--quiet", "HEAD"])).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 /** HEAD에 있는 파일 경로 전체 */
 export async function listFiles(dir: string, signal?: AbortSignal): Promise<string[]> {
   try {

@@ -8,6 +8,8 @@
  *  - 작성자는 내 커밋이면 "me", 아니면 이름만. 노트는 by: me(사람이 터미널에서) | ai(AI가 record_note로)
  * CLI는 코어의 전체 결과를 그대로 쓴다.
  */
+import type { CommitContextView } from "../core/capture";
+import type { FileContext } from "../core/context";
 import type { CommitDetail, RepoOverview, RepoSummary } from "../core/overview";
 import type { SearchHit, SearchResult } from "../core/search";
 
@@ -87,6 +89,7 @@ export function slimSearch(result: SearchResult, me: string[], detail: Detail = 
         files: [...hit.files.slice(0, shown), ...(more > 0 ? [`+${more}`] : [])],
         ...(hit.also?.length ? { also: hit.also.map((sha) => sha.slice(0, ALSO_SHA)) } : {}),
         ...(changed.length > 0 ? { changed } : {}),
+        ...(hit.why ? { why: hit.why } : {}),
         body: snippet(hit.body || hit.snippet, SUMMARY_BODY_CHARS),
       };
     }
@@ -98,6 +101,8 @@ export function slimSearch(result: SearchResult, me: string[], detail: Detail = 
       title: hit.title,
       files: [...hit.files.slice(0, FILES_PER_HIT), ...(more > 0 ? [`+${more}`] : [])],
       ...(hit.also?.length ? { also: hit.also.map((sha) => sha.slice(0, ALSO_SHA)) } : {}),
+      // 커밋에 묶인 의도 한 줄 — 있을 때만 (capture.ts). "왜 그렇게 했지"에 show_commit 없이 답하게
+      ...(hit.why ? { why: hit.why } : {}),
       body: snippet(hit.snippet),
     };
   });
@@ -107,12 +112,24 @@ export function slimSearch(result: SearchResult, me: string[], detail: Detail = 
   };
 }
 
-export function slimCommit(detail: CommitDetail, me: string[]) {
+/** show_commit에 붙이는 커밋 맥락 — 프롬프트·검증·버린 편집·트레일러 (capture.ts). 커밋당 5줄 안쪽 */
+const CONTEXT_PROMPTS = 3;
+const CONTEXT_PROMPT_CHARS = 200;
+
+export function slimCommit(detail: CommitDetail, me: string[], context?: CommitContextView | null) {
   const files = detail.files.slice(0, FILES_PER_COMMIT).map((file) =>
     file.binary ? `${file.path} (binary)` : file.insertions === null ? file.path : `${file.path} +${file.insertions} -${file.deletions}`,
   );
   if (detail.files.length > FILES_PER_COMMIT) files.push(`… ${detail.files.length - FILES_PER_COMMIT}개 더`);
   const shownLines = detail.patch ? detail.patch.split("\n").length : 0;
+  const why = context
+    ? {
+        ...(context.prompts.length > 0 ? { prompts: context.prompts.slice(0, CONTEXT_PROMPTS).map((text) => snippet(text, CONTEXT_PROMPT_CHARS)) } : {}),
+        ...(context.verify.length > 0 ? { verified: context.verify.slice(-3) } : {}),
+        ...(context.dropped.length > 0 ? { dropped: context.dropped } : {}),
+        ...(context.trailers.length > 0 ? { trailers: Object.fromEntries(context.trailers.map((trailer) => [trailer.key, trailer.value])) } : {}),
+      }
+    : undefined;
   return {
     repo: detail.repo,
     sha: detail.sha.slice(0, SHA),
@@ -121,6 +138,7 @@ export function slimCommit(detail: CommitDetail, me: string[]) {
     by: who(detail.author, me),
     subject: detail.subject,
     body: detail.body || undefined,
+    ...(why && Object.keys(why).length > 0 ? { why } : {}),
     files,
     diff: detail.patch ?? undefined,
     ...(detail.patchTruncated
@@ -144,6 +162,29 @@ export function slimOverview(overview: RepoOverview) {
     authors: overview.topAuthors.map((author) => `${author.author.replace(/ <.*>$/, "")}(${author.commits})`).join(" "),
     recent: overview.recentCommits.map((commit) => `${commit.sha.slice(0, SHA)} ${day(commit.date)} ${commit.subject}`),
     ...(prefix ? { link: prefix } : {}),
+  };
+}
+
+/**
+ * file_context 응답 — 편집 전에 볼 것만. verbose가 아니면 recent 2개·co-change 3개·tests 2개로 600자 안쪽을 지향한다.
+ * 줄 만한 것이 없으면(recent만) `worth: false`와 recent만 돌려준다 — AI가 "읽으면 아는 것"에 토큰을 쓰지 않게.
+ */
+export function slimFileContext(context: FileContext, me: string[], verbose = false) {
+  const commit = (line: { sha: string; date: string; author: string; authorEmail: string; subject: string }) =>
+    `${line.sha.slice(0, SHA)} ${day(line.date)} ${me.includes(line.authorEmail.toLowerCase()) ? "me" : line.author} ${line.subject}`;
+  const recent = context.recent.slice(0, verbose ? 3 : 2).map(commit);
+  if (!context.worth) return { file: context.path, worth: false, recent };
+  return {
+    file: context.path,
+    recent,
+    ...(context.why ? { why: `${context.why.sha.slice(0, SHA)} "${context.why.text}"${context.why.verify ? ` · verified: ${context.why.verify}` : ""}` } : {}),
+    ...(context.related.length > 0
+      ? { cochanges: context.related.map((item) => `${item.path} ${item.support}/${Math.round(item.support / item.confidence)}${item.strong ? " strong" : ""}${item.imports ? " imports" : ""}`) }
+      : {}),
+    ...(context.tests.length > 0 ? { tests: context.tests.map((item) => (item.by === "name" ? item.path : `${item.path} ${item.support}/${Math.round((item.support ?? 0) / (item.confidence ?? 1))}`)) } : {}),
+    ...(context.usedBy ? { usedBy: `${context.usedBy.count}: ${context.usedBy.files.join(", ")}${context.usedBy.count > context.usedBy.files.length ? ", …" : ""}` } : {}),
+    ...(context.fragile ? { fixes90d: `${context.fragile.fixes}/${context.fragile.total} — ${context.fragile.reasons.map((line) => `${line.sha.slice(0, SHA)} ${line.subject}`).join("; ")}` } : {}),
+    note: "candidates to check, not instructions",
   };
 }
 

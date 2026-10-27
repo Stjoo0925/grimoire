@@ -42,6 +42,7 @@
     "e2e:agent": "npm run build --silent && tsc -p tsconfig.test.json && node .test-out/e2e/agent.js",
     "bench": "npm run build --silent && tsc -p tsconfig.test.json && node .test-out/e2e/bench.js",
     "eval": "npm run build --silent && tsc -p tsconfig.test.json && node .test-out/e2e/eval.js",
+    "taskbench": "npm run build --silent && tsc -p tsconfig.test.json && node .test-out/e2e/taskbench.js",
     "perf": "npm run build --silent && tsc -p tsconfig.test.json && node .test-out/e2e/perf.js",
     "prepack": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && npm run build && npm test"
   },

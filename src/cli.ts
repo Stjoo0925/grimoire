@@ -20,16 +20,18 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 
 import { dbPath } from "./core/config";
+import { fileContext, formatFileContext } from "./core/context";
 import { openDb, type DB } from "./core/db";
 import { myEmails, resolveAuthors } from "./core/identity";
 import { indexCommitCode } from "./core/diffs";
-import { addRepo, discoverRepos, listRepos, matchRepos, removeRepo, syncRepo, type RepoRow } from "./core/indexer";
+import { addRepo, discoverRepos, listRepos, matchRepos, relativeToRepo, removeRepo, repoOfPath, syncRepo, type RepoRow } from "./core/indexer";
 import { addNote } from "./core/notes";
 import { commitDetail, repoOverview, repoSummaries } from "./core/overview";
 import { search } from "./core/search";
 import { pendingUpdate, refreshUpdateCache, VERSION } from "./core/update";
 import { runMcpServer } from "./mcp/server";
 import { doctor, formatChecks } from "./setup/doctor";
+import { installHooks } from "./setup/hooks";
 import { CLIENTS, install, InstallError, type ClientName } from "./setup/install";
 import { runUpdate } from "./setup/update";
 
@@ -43,12 +45,15 @@ const HELP = `grimoire — 로컬 git 이력을 AI 코딩 도구의 기억으로
   grimoire search <query>         검색  [--repo r] [--author me|email] [--since d] [--until d] [--limit n] [--json]
   grimoire show <sha>             커밋 상세 + diff  [--repo r] [--lines n] [--path p ...]
   grimoire overview <repo>        레포 개요  [--json]
+  grimoire context <file>         파일을 고치기 전에 볼 것 — 최근 커밋·왜·같이 바뀌는 파일/테스트  [--repo r] [--json]
   grimoire note <text>            노트 남기기  [--repo r] [--tag t ...]
   grimoire remove <repo>          레포와 색인 삭제
 
 MCP 연결:
   grimoire install <client>       설정 자동 작성  client: ${CLIENTS.join(" | ")}
                                   [--project <dir>] 프로젝트 범위  [--dry-run] 쓰지 않고 보기
+                                  [--hooks] claude-code: 편집 직전 맥락 주입·세션 캡처 훅을 ~/.claude/settings.json에
+                                  [--remove-hooks] 그 훅만 뺀다
   grimoire doctor                 연결 문제 진단
   grimoire mcp                    MCP 서버 (stdio) — 보통 클라이언트가 직접 띄웁니다
 
@@ -88,6 +93,8 @@ async function main(argv: string[]): Promise<number> {
       project: { type: "string" },
       "dry-run": { type: "boolean" },
       check: { type: "boolean" },
+      hooks: { type: "boolean" },
+      "remove-hooks": { type: "boolean" },
     },
   });
 
@@ -98,7 +105,13 @@ async function main(argv: string[]): Promise<number> {
     return checks.some((check) => check.level === "fail") ? 1 : 0;
   }
   if (command === "install") {
+    if (values.hooks || values["remove-hooks"]) return cmdInstallHooks(positionals[0], values["dry-run"], values["remove-hooks"]);
     return cmdInstall(positionals[0], values.project, values["dry-run"]);
+  }
+  if (command === "hook") {
+    // 설치 명령은 dist/hook.js를 직접 가리킨다(가벼운 진입점). 여기는 수동 확인용 — 같은 코드를 돌린다.
+    require("./hook");
+    return -1;
   }
   if (command === "update") {
     return runUpdate({ check: values.check, dryRun: values["dry-run"] });
@@ -147,6 +160,15 @@ async function main(argv: string[]): Promise<number> {
         print("많이 건드린 곳: " + overview.topDirectories.map((dir) => `${dir.path}(${dir.commits})`).join(", "));
         print("최근 주요 커밋:");
         for (const commit of overview.recentCommits) print(`  ${day(commit.date)} ${commit.sha.slice(0, 8)} ${commit.subject}`);
+        return 0;
+      }
+      case "context": {
+        const target = need(positionals[0], "파일 경로");
+        const repo = values.repo ? requireRepo(db, values.repo) : repoOfPath(db, path.resolve(target)) ?? repoOfPath(db, path.resolve(process.cwd()));
+        if (!repo) throw new UsageError("어느 레포의 파일인지 알 수 없습니다 — --repo로 지정하세요");
+        const context = fileContext(db, repo.id, relativeToRepo(repo.path, path.isAbsolute(target) ? target : path.resolve(target)));
+        if (values.json) return printJson(context);
+        print(formatFileContext(context, { me: await myEmails(), budget: 2000 }) || `${context.path}: 이력에서 더 알려 줄 것이 없습니다`);
         return 0;
       }
       case "note": {
@@ -208,6 +230,35 @@ async function cmdInstall(client: string | undefined, project: string | undefine
     }
     print(`  node: ${result.spec.command}`);
     print(`  다음: ${result.next}`);
+    print("  확인: grimoire doctor");
+    return 0;
+  } catch (error) {
+    if (error instanceof InstallError) {
+      console.error(error.message);
+      return 1;
+    }
+    throw error;
+  }
+}
+
+async function cmdInstallHooks(client: string | undefined, dryRun: boolean | undefined, remove: boolean | undefined): Promise<number> {
+  if (client !== "claude-code") throw new UsageError("훅은 claude-code에만 설치합니다: grimoire install claude-code --hooks");
+  try {
+    const result = await installHooks({ hookPath: path.join(path.dirname(__filename), "hook.js"), dryRun, remove });
+    if (dryRun) {
+      print(`[dry-run] ${result.file}의 hooks.${result.events.join("/")}에 ${remove ? "서 뺍니다" : "다음 명령을 넣습니다"}:`);
+      if (!remove) print(`  ${result.command}`);
+      return 0;
+    }
+    if (result.unchanged) print(`이미 같은 설정입니다: ${result.file}`);
+    else if (remove) print(`✓ 훅을 뺐습니다: ${result.file}`);
+    else {
+      print(`✓ Claude Code 훅을 넣었습니다: ${result.file}`);
+      print(`  이벤트: ${result.events.join(", ")}`);
+      print(`  명령: ${result.command}`);
+      print("  편집 직전에 그 파일의 최근 커밋·왜·같이 바뀌는 파일/테스트를 400자 안에 건넵니다. 끄려면 GRIMOIRE_HOOKS=0, 캡처만 끄려면 GRIMOIRE_CAPTURE=0.");
+    }
+    if (result.backup) print(`  이전 설정 백업: ${result.backup}`);
     print("  확인: grimoire doctor");
     return 0;
   } catch (error) {

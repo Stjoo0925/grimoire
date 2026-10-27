@@ -6,8 +6,10 @@
  *   npm run e2e:agent -- --case recall    사례 하나
  *   npm run e2e:agent -- --repeat 3       사례마다 3번 (모델 응답은 흔들리므로)
  *   npm run e2e:agent -- --model sonnet
+ *   npm run e2e:agent -- --case cochange [--no-hooks]   편집 직전 훅 사례 — --no-hooks는 훅 없는 대조군
  *
- * - Claude Code가 설치·로그인돼 있어야 한다. 실행마다 API 사용량이 든다(사례당 상한 --max-budget-usd).
+ * - Claude Code가 설치·로그인돼 있어야 한다. 기본은 구독 로그인으로 돌아 추가 요금 없이 구독 사용량을 쓴다
+ *   (--bare를 주면 API 키로 돌아 토큰당 과금). 사례당 상한 --max-budget-usd.
  * - 내장 도구는 모두 끈다(`--tools ""`). 에이전트가 git으로 픽스처를 직접 읽어 "커닝"하지 못하게 —
  *   답의 근거는 Grimoire MCP를 거친 것뿐이다.
  * - DB는 임시 폴더, MCP 설정은 --strict-mcp-config로 이 하네스의 것만 쓴다(사용자 설정 무시).
@@ -17,7 +19,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 
-import { tempDir } from "../tests/helpers";
+import { addCommit, tempDir } from "../tests/helpers";
 import { runClaude, type AgentRun } from "./claude";
 import { makeFixture, ME, type Fixture } from "./fixture";
 
@@ -34,6 +36,10 @@ interface Case {
   name: string;
   /** 이 사례 전에 DB에 레포를 미리 넣어 둘지 */
   preindex: boolean;
+  /** 픽스처를 더 손본다 (등록 전) */
+  setup?: (fixture: Fixture) => void;
+  /** 내장 도구를 켜고 레포 안에서 돌린다 (편집 사례) — 훅도 이때 설치된다 */
+  inRepo?: boolean;
   prompt: (fixture: Fixture) => string;
   /** 통과하지 못한 이유 목록 (비면 통과) */
   judge: (run: AgentRun, shas: Shas) => string[];
@@ -84,6 +90,34 @@ const CASES: Case[] = [
       return problems;
     },
   },
+  {
+    // 편집 직전 훅(docs/enhancement-plan.md §3-2): refresh.ts와 session.ts가 늘 같이 바뀌는 레포에서 refresh.ts만 고치라고
+    // 하면, 훅이 건넨 Co-changes를 보고 session.ts를 언급하거나 확인하는가. 훅 있음/없음을 --repeat로 비교한다.
+    name: "cochange",
+    preindex: true,
+    inRepo: true,
+    setup: (fixture) => {
+      for (let i = 1; i <= 3; i++) {
+        addCommit(fixture.api, {
+          message: `feat(auth): 세션 TTL과 토큰 회전을 함께 ${i}`,
+          files: {
+            "src/auth/refresh.ts": `import { TTL } from "./session";\nexport function rotate() {\n  return 'rotated' + TTL + ${i};\n}\n`,
+            "src/auth/session.ts": `export const TTL = ${i * 10};\n`,
+          },
+          email: ME,
+          date: `2024-08-0${i}T10:00:00+09:00`,
+        });
+      }
+    },
+    prompt: () => "src/auth/refresh.ts의 rotate()가 'rotated'와 TTL 대신 고정 문자열 'fresh'를 돌려주게 바꿔줘. 고치기 전에 같이 봐야 할 파일이 있으면 말해줘.",
+    judge: (run) => {
+      const problems: string[] = [];
+      const edited = run.calls.filter((call) => /^(Edit|Write|MultiEdit)$/.test(call.name)).map((call) => String((call.input as { file_path?: string }).file_path ?? ""));
+      if (!edited.some((file) => file.replace(/\\/g, "/").endsWith("src/auth/refresh.ts"))) problems.push("refresh.ts를 고치지 않았습니다");
+      if (!/session\.ts/.test(run.answer) && !edited.some((file) => file.endsWith("session.ts"))) problems.push("같이 바뀌는 session.ts를 언급·확인하지 않았습니다 (훅 맥락을 못 받았거나 무시)");
+      return problems;
+    },
+  },
 ];
 
 function fixtureShas(fixture: Fixture): Shas {
@@ -111,6 +145,8 @@ async function main(): Promise<number> {
       repeat: { type: "string" },
       model: { type: "string" },
       json: { type: "boolean" },
+      "no-hooks": { type: "boolean" },
+      bare: { type: "boolean" },
     },
   });
   const cases = values.case ? CASES.filter((item) => item.name === values.case) : CASES;
@@ -122,6 +158,7 @@ async function main(): Promise<number> {
   for (const item of cases) {
     for (let attempt = 1; attempt <= repeat; attempt++) {
       const fixture = makeFixture();
+      item.setup?.(fixture);
       const shas = fixtureShas(fixture);
       const data = tempDir("grimoire-agent-data-");
       const workdir = tempDir("grimoire-agent-cwd-");
@@ -134,17 +171,30 @@ async function main(): Promise<number> {
         mcpConfig,
         JSON.stringify({ mcpServers: { grimoire: { command: process.execPath, args: [cli, "mcp"], env } } }),
       );
+      // 편집 사례: 훅을 --settings 파일로 넣는다 (사용자 settings.json은 건드리지 않는다). --hooks 없이 돌리면 훅 없는 대조군
+      let settings: string | undefined;
+      if (item.inRepo && !values["no-hooks"]) {
+        const hook = path.join(path.dirname(cli), "hook.js");
+        const command = `"${process.execPath.split(path.sep).join("/")}" "${hook.split(path.sep).join("/")}" --env "GRIMOIRE_HOME=${data.split(path.sep).join("/")}" --env "GRIMOIRE_ME=${ME}" --env "GRIMOIRE_HOOKS=1"`;
+        settings = path.join(workdir, "settings.json");
+        fs.writeFileSync(settings, JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Edit|Write|MultiEdit", hooks: [{ type: "command", command, timeout: 5 }] }] } }));
+      }
 
-      if (!values.json) process.stdout.write(`… ${item.name}${repeat > 1 ? ` #${attempt}` : ""}\n`);
+      if (!values.json) process.stdout.write(`… ${item.name}${repeat > 1 ? ` #${attempt}` : ""}${item.inRepo ? (settings ? " (훅 있음)" : " (훅 없음)") : ""}\n`);
       const run = await runClaude({
         prompt: item.prompt(fixture),
-        cwd: workdir,
+        cwd: item.inRepo ? fixture.api : workdir,
         mcpConfig,
-        tools: "",
-        allowedTools: ["mcp__grimoire"],
+        tools: item.inRepo ? "Read,Edit,Write,MultiEdit,Grep,Glob" : "",
+        allowedTools: item.inRepo ? ["Read", "Edit", "Write", "MultiEdit", "Grep", "Glob", "mcp__grimoire"] : ["mcp__grimoire"],
         model: values.model,
         budgetUsd: BUDGET_USD,
         timeoutMs: CASE_TIMEOUT_MS,
+        settings,
+        // 기본은 구독 로그인(--bare는 API 키·토큰당 과금). 사용자 전역 grimoire 훅은 끄고 이 실행의 훅만 켠다
+        bare: values.bare === true,
+        env: { GRIMOIRE_HOOKS: "0" },
+        permissionMode: item.inRepo ? "acceptEdits" : undefined,
       });
       const problems = run.error ? [run.error] : item.judge(run, shas);
       report.push({ case: item.name, attempt, ok: problems.length === 0, problems, run });

@@ -100,6 +100,14 @@ test("verify·commit 판정과 줄 해시", () => {
   assert.equal(isVerifyCommand("npm run e2e -- --json"), true);
   assert.equal(isVerifyCommand("pytest tests/"), true);
   assert.equal(isVerifyCommand("ls -la"), false);
+  // 흔한 검증 명령 — 전엔 놓쳤다
+  for (const command of ["node --test tests/a.test.js", "pnpm vitest run", "pnpm exec jest", "yarn vitest", "bunx vitest", "tsc --noEmit", "vitest run", "jest --ci", "deno test", "./gradlew test", "cd backend && npx vitest run src/a.spec.ts", "CI=1 npm test", "uv run pytest -q", "php artisan test", "cargo nextest run", "npm run test:unit 2>&1 | tail -20"]) {
+    assert.equal(isVerifyCommand(command), true, command);
+  }
+  // 명령 맨 앞이 아닌 낱말 — 전엔 검증으로 잡혀 커밋에 가짜 "verified … → pass"가 붙었다
+  for (const command of ['git commit -m "fix vitest config"', 'git commit -m "pytest 경고 정리"', "echo npm test", 'grep -r "npm test" README.md', "git log --grep=pytest", "cat docs/npm-test.md", "npm install vitest"]) {
+    assert.equal(isVerifyCommand(command), false, command);
+  }
   assert.equal(isGitCommit('git commit -m "x"'), true);
   assert.equal(isGitCommit("git add -A && git commit -q -F -"), true);
   assert.equal(isGitCommit("git -C /x commit -m y"), true);

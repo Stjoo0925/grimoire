@@ -38,14 +38,48 @@ const STDERR_TAIL = 300;
 const HASHES_PER_EDIT = 200;
 export const SESSION_TTL_DAYS = 14;
 
-/** 검증 명령 — 테스트·린트·타입체크·빌드 */
-export const VERIFY_COMMAND =
-  /\b(npm (test|run (test|e2e|typecheck|lint|check|build)\w*)|npx (vitest|jest|tsc|eslint|playwright)|pnpm (test|run (test|lint|typecheck)\w*)|yarn (test|lint|typecheck)|bun test|pytest|python -m (pytest|unittest)|go (test|vet)|cargo (test|check|clippy)|gradle(w)? (test|check)|mvn (test|verify)|make (test|check)|dotnet test|mix test|rspec|bundle exec rspec|phpunit|swift test|ruff|mypy|flake8)\b/;
+/**
+ * 검증 명령 — 테스트·린트·타입체크·빌드. 명령 조각(&&·;·| 로 나눈 것)의 **맨 앞**에서만 본다 —
+ * 어디서든 낱말만 맞으면 `git commit -m "pytest 경고 정리"`·`echo npm test`·`grep "npm test"`까지 검증으로 잡혀
+ * 커밋에 가짜 "verified … → pass"가 붙었다.
+ */
+const TEST_TOOLS = "vitest|jest|tsc|eslint|playwright|mocha|ava";
+export const VERIFY_COMMAND = new RegExp(
+  "^(?:" +
+    [
+      "npm (?:test|t|run (?:test|e2e|typecheck|lint|check|build)[\\w:-]*)",
+      `npx (?:${TEST_TOOLS})`,
+      `pnpm (?:test|run (?:test|e2e|lint|typecheck|check|build)[\\w:-]*|exec (?:${TEST_TOOLS})|${TEST_TOOLS})`,
+      `yarn (?:test|lint|typecheck|run (?:test|lint|typecheck)[\\w:-]*|${TEST_TOOLS})`,
+      `bunx? (?:test|${TEST_TOOLS})`,
+      "node --test",
+      "deno (?:test|check|lint)",
+      `(?:${TEST_TOOLS}|pytest|ruff|mypy|flake8|rspec|phpunit)`,
+      "python3? -m (?:pytest|unittest|mypy)",
+      "(?:uv|poetry|pipenv) run (?:pytest|ruff|mypy)",
+      "go (?:test|vet)",
+      "cargo (?:test|check|clippy|nextest)",
+      "(?:\\./)?gradlew? (?:test|check)",
+      "mvn (?:test|verify)",
+      "make (?:test|check)",
+      "dotnet test",
+      "mix test",
+      "bundle exec (?:rspec|rails test)",
+      "rails test",
+      "php artisan test",
+      "swift test",
+    ].join("|") +
+    ")\\b",
+);
+/** 명령 조각 앞의 `CI=1 FOO=bar ` 같은 환경 변수 */
+const LEADING_ENV = /^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+)+/;
 const GIT_COMMIT = /(^|[;&|]\s*)git\s+(-C\s+("[^"]+"|'[^']+'|\S+)\s+)?commit\b/;
 const COMMIT_FAILED = /nothing to commit|nothing added to commit|error:|fatal:|Aborting commit/i;
 
 export function isVerifyCommand(command: string): boolean {
-  return VERIFY_COMMAND.test(command);
+  return command
+    .split(/&&|\|\|?|;|\n/)
+    .some((segment) => VERIFY_COMMAND.test(segment.trim().replace(LEADING_ENV, "")));
 }
 
 export function isGitCommit(command: string): boolean {

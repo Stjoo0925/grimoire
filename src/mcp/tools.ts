@@ -43,6 +43,9 @@ export interface ToolContext {
   background?: Background;
 }
 
+/** 긴 호출(add_repo)의 진행 — done/total과 지금 하는 일. 클라이언트가 원할 때만 서버가 넘긴다 */
+export type Progress = (done: number, total: number, message: string) => void;
+
 /** 새 작업 레포의 첫 인덱싱을 검색이 기다려 주는 상한 */
 const WORKSPACE_WAIT_MS = 15_000;
 /** 검색 전 작업 레포 재동기화를 기다려 주는 상한 (새 커밋 몇 개면 이 안에 끝난다) */
@@ -256,9 +259,15 @@ const SEARCH_LIMIT = 8;
  * signal은 이 요청의 취소 신호다 — 이 요청을 위해 부르는 git에만 넘기고, 뒤에서 계속 도는 작업에는 넘기지 않는다.
  * DB 잠금(다른 grimoire 프로세스가 쓰는 중)과 취소는 ToolError로 바꿔 알린다.
  */
-export async function callTool(context: ToolContext, name: string, args: Args = {}, signal?: AbortSignal): Promise<unknown> {
+export async function callTool(
+  context: ToolContext,
+  name: string,
+  args: Args = {},
+  signal?: AbortSignal,
+  progress?: Progress,
+): Promise<unknown> {
   try {
-    return await runTool(context, name, args, signal);
+    return await runTool(context, name, args, signal, progress);
   } catch (error) {
     if (error instanceof ToolError) throw error;
     if (isCancelled(error)) throw new ToolError(CANCELLED_MESSAGE, { cause: error });
@@ -267,7 +276,13 @@ export async function callTool(context: ToolContext, name: string, args: Args = 
   }
 }
 
-async function runTool(context: ToolContext, name: string, args: Args, signal: AbortSignal | undefined): Promise<unknown> {
+async function runTool(
+  context: ToolContext,
+  name: string,
+  args: Args,
+  signal: AbortSignal | undefined,
+  progress: Progress | undefined,
+): Promise<unknown> {
   const { db, me } = context;
   // 새 작업 레포가 첫 인덱싱 중이면 (상한 안에서) 기다렸다가 답한다
   const current = await waitForWorkspace(context.workspace, WORKSPACE_WAIT_MS);
@@ -377,7 +392,9 @@ async function runTool(context: ToolContext, name: string, args: Args, signal: A
       }
       const added: unknown[] = [];
       const failed: { path: string; error: string }[] = [];
-      for (const repoDir of dirs) {
+      for (const [index, repoDir] of dirs.entries()) {
+        // 레포 단위로 알린다 — scan으로 여러 개거나 큰 레포의 첫 인덱싱이면 오래 걸린다
+        progress?.(index, dirs.length, `${path.basename(repoDir)} 인덱싱 중 (${index + 1}/${dirs.length})`);
         try {
           const repo = await addRepo(db, repoDir, signal);
           added.push(await syncRepo(db, repo, signal));
@@ -391,6 +408,7 @@ async function runTool(context: ToolContext, name: string, args: Args, signal: A
           failed.push({ path: repoDir, error: error instanceof Error ? error.message : String(error) });
         }
       }
+      progress?.(dirs.length, dirs.length, "인덱싱 완료");
       if (added.length === 0) throw new ToolError(failed.map((item) => item.error).join("\n"));
       return { added, failed };
     }

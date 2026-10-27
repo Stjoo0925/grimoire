@@ -79,12 +79,13 @@ registered yet, Grimoire **registers it on startup and syncs it before any other
 - Results from the current repo are **ranked first** (other repos still show up), and responses include `current: "<repo>"`.
 - Set `GRIMOIRE_AUTO_ADD=0` to turn this off. Then, if the current repo isn't registered, the `hint` says so instead of staying silent.
 - Skipped when the repo root is your home directory or `/` (dotfile repos and the like).
-- Claude Desktop has no project folder (it starts the server in `/`), so register repos there as described below.
+- When the server isn't started in a repo (a global config launched from `/` or your home folder), Grimoire asks the client for its workspace folders (MCP roots) and uses the first one that is a git repo. Clients that don't support roots, like Claude Desktop, need repos registered as described below.
 
 ### Registering repos mid-conversation
 
 With no repos yet, results carry a `hint`, so the AI suggests registering first.
 The `add_repo` tool registers right from the conversation ("remember every repo under ~/work-dir" → `scan: true`).
+Indexing a whole folder can take a while, so clients that ask for progress get an update per repo.
 
 ### Tools
 

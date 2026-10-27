@@ -11,6 +11,7 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
 import { Client } from "@modelcontextprotocol/client";
@@ -80,6 +81,8 @@ async function connect(
   extraEnv: Record<string, string> = {},
   /** 서버를 띄울 폴더 — Claude Desktop은 "/", Claude Code·Cursor는 열린 프로젝트 폴더 */
   cwd = "/",
+  /** 클라이언트가 알려 줄 작업 폴더(MCP roots) — 주면 roots를 지원하는 클라이언트로 붙는다 */
+  roots?: string[],
 ): Promise<Session> {
   let stderr = "";
   const transport = new StdioClientTransport({
@@ -109,7 +112,8 @@ async function connect(
     stderr: "pipe",
   });
   transport.stderr?.on("data", (chunk) => (stderr += String(chunk)));
-  const client = new Client({ name: "grimoire-e2e", version: "1" });
+  const client = new Client({ name: "grimoire-e2e", version: "1" }, roots ? { capabilities: { roots: {} } } : undefined);
+  if (roots) client.setRequestHandler("roots/list", async () => ({ roots: roots.map((dir) => ({ uri: pathToFileURL(dir).href })) }));
   try {
     await client.connect(transport);
   } catch (error) {
@@ -118,8 +122,10 @@ async function connect(
   return { client, stderr: () => stderr, close: () => client.close() };
 }
 
-async function call(session: Session, name: string, args: Record<string, unknown> = {}) {
-  const result = (await session.client.callTool({ name, arguments: args })) as {
+async function call(session: Session, name: string, args: Record<string, unknown> = {}, onProgress?: (progress: number) => void) {
+  // onProgress를 주면 클라이언트가 progressToken을 실어 보낸다
+  const options = onProgress ? { onprogress: (event: { progress: number }) => onProgress(event.progress) } : undefined;
+  const result = (await session.client.callTool({ name, arguments: args }, options)) as {
     isError?: boolean;
     content: { type: string; text: string }[];
   };
@@ -200,9 +206,11 @@ async function runScenario(spec: ServerSpec): Promise<StepResult[]> {
     expect(listed.json.me?.[0] === ME, `내 이메일 인식 실패: ${JSON.stringify(listed.json.me)}`);
   });
 
-  await step("add_repo scan: 폴더 아래 레포 전부 등록", async () => {
-    const added = await call(live(), "add_repo", { path: fixture.root, scan: true });
+  await step("add_repo scan: 폴더 아래 레포 전부 등록 (진행 알림 포함)", async () => {
+    const progress: number[] = [];
+    const added = await call(live(), "add_repo", { path: fixture.root, scan: true }, (value) => progress.push(value));
     expect(!added.isError, added.text);
+    expect(JSON.stringify(progress) === JSON.stringify([0, 1, 2]), `진행 알림: ${JSON.stringify(progress)}`);
     const names = added.json.added.map((item: { repo: string }) => item.repo).sort();
     expect(JSON.stringify(names) === JSON.stringify(["shop-api", "shop-web"]), `등록된 레포: ${names}`);
     const listed = await call(live(), "list_repos");
@@ -363,6 +371,33 @@ async function runScenario(spec: ServerSpec): Promise<StepResult[]> {
       }
     } finally {
       for (const dir of [fresh.data, off.data]) fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await step("cwd가 레포가 아니면 클라이언트의 roots에서 작업 레포를 찾음", async () => {
+    // 전역 설정으로 "/"에서 뜬 서버에, roots를 지원하는 클라이언트가 프로젝트 폴더를 알려 준다
+    const fresh = { home: sandbox.home, data: tempDir("grimoire-e2e-roots-") };
+    const bare = { home: sandbox.home, data: tempDir("grimoire-e2e-noroots-") };
+    try {
+      const session = await connect(spec, fresh, { GRIMOIRE_AUTO_ADD: "1" }, "/", [path.join(fixture.web, "src")]);
+      try {
+        const found = await call(session, "search_memory", { query: "장바구니" });
+        expect(found.json.current === "shop-web", `current: ${found.json.current}`);
+        expect(found.json.hits.length > 0, `roots로 등록 안 됨: ${found.text}`);
+        expect(session.stderr().includes("클라이언트가 알려 준 작업 폴더"), "roots 로그가 없습니다");
+      } finally {
+        await session.close();
+      }
+      // roots를 모르는 클라이언트는 예전처럼 작업 레포 없이 간다
+      const plain = await connect(spec, bare, { GRIMOIRE_AUTO_ADD: "1" });
+      try {
+        const listed = await call(plain, "list_repos");
+        expect(listed.json.current === undefined && listed.json.repos.length === 0, `등록되면 안 됨: ${listed.text}`);
+      } finally {
+        await plain.close();
+      }
+    } finally {
+      for (const dir of [fresh.data, bare.data]) fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 

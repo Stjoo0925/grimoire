@@ -8,11 +8,13 @@
  *    실제 기억에 쌓이지 않게.
  *  - 바로 시작하지 않는다(begin). `claude mcp list` 같은 연결 확인은 서버를 띄웠다가 곧 끄는데,
  *    그때 등록만 되고 동기화는 못 끝난 빈 레포가 남기 때문이다. 첫 도구 호출이나 잠깐 뒤(server.ts)에 시작한다.
- * Claude Desktop은 cwd가 `/`라 해당이 없다 — add_repo나 `grimoire scan`으로 등록한다.
+ * cwd가 레포가 아니면(전역 설정으로 홈·`/`에서 뜬 경우) 클라이언트가 roots를 지원할 때 그 작업 폴더를 대신 쓴다(server.ts).
+ * 둘 다 없으면 add_repo나 `grimoire scan`으로 등록한다.
  */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type { Env } from "../core/config";
 import type { DB } from "../core/db";
@@ -21,8 +23,8 @@ import { indexCommitCode } from "../core/diffs";
 import { addRepo, syncRepo, type RepoRow } from "../core/indexer";
 
 export interface Workspace {
-  /** cwd가 속한 레포의 최상위 경로 (해당 없으면 null) */
-  root: string | null;
+  /** 작업 레포의 최상위 경로 (해당 없으면 null). roots로 정할 때는 begin()이 풀린 뒤에 채워진다 */
+  readonly root: string | null;
   /** 자동 등록이 꺼져 있는가 */
   disabled: boolean;
   /**
@@ -84,14 +86,39 @@ export async function resolveWorkspaceRoot(cwd: string, env: Env = process.env):
   return resolved;
 }
 
+/**
+ * 클라이언트가 알려 준 작업 폴더(roots의 file:// URI) 중 처음으로 등록할 만한 레포.
+ * 레포가 아니거나 홈·루트·임시 폴더면 건너뛴다 — cwd와 같은 기준(resolveWorkspaceRoot)이다.
+ */
+export async function rootFromRoots(uris: readonly string[], env: Env = process.env): Promise<string | null> {
+  for (const uri of uris) {
+    if (!uri.startsWith("file:")) continue;
+    let dir: string;
+    try {
+      dir = fileURLToPath(uri);
+    } catch {
+      continue;
+    }
+    const root = await resolveWorkspaceRoot(dir, env);
+    if (root) return root;
+  }
+  return null;
+}
+
+/**
+ * root는 정해진 경로, 또는 begin() 때 한 번 부를 찾기 함수(roots 조회처럼 연결 뒤에야 알 수 있는 것)다.
+ * 자동 등록이 꺼져 있으면 찾기 함수도 부르지 않는다.
+ */
 export function startWorkspace(
   db: DB,
-  root: string | null,
+  root: string | null | (() => Promise<string | null>),
   env: Env,
   log: (line: string) => void,
   background: Background = {},
 ): Workspace {
   const disabled = env.GRIMOIRE_AUTO_ADD === "0";
+  const lookup = typeof root === "function" ? root : null;
+  let current = typeof root === "function" ? null : root;
   let started: Promise<RepoRow | null> | null = null;
   let lastSync = 0;
   const { signal, track } = background;
@@ -119,16 +146,19 @@ export function startWorkspace(
     return job;
   };
 
-  const run = (): Promise<RepoRow | null> => {
-    if (!root || disabled) return Promise.resolve(null);
-    const known = db.prepare("SELECT * FROM repos WHERE path = ?").get(root) as RepoRow | undefined;
+  const run = async (): Promise<RepoRow | null> => {
+    if (disabled) return null;
+    if (lookup) current = await lookup().catch(() => null);
+    const dir = current;
+    if (!dir) return null;
+    const known = db.prepare("SELECT * FROM repos WHERE path = ?").get(dir) as RepoRow | undefined;
     if (known) {
       void sync(known);
-      return Promise.resolve(known);
+      return known;
     }
-    return addRepo(db, root, signal).then(
+    return addRepo(db, dir, signal).then(
       (repo) => {
-        log(`작업 중인 프로젝트를 등록합니다: ${repo.name} (${root})`);
+        log(`작업 중인 프로젝트를 등록합니다: ${repo.name} (${dir})`);
         return sync(repo);
       },
       (error) => {
@@ -139,11 +169,13 @@ export function startWorkspace(
   };
 
   return {
-    root,
+    get root() {
+      return current;
+    },
     disabled,
     begin: () => (started ??= run()),
     refresh: async (repo, maxWaitMs) => {
-      if (disabled || repo.path !== root || Date.now() - lastSync < REFRESH_INTERVAL_MS) return;
+      if (disabled || repo.path !== current || Date.now() - lastSync < REFRESH_INTERVAL_MS) return;
       let timer: NodeJS.Timeout | undefined;
       const timeout = new Promise<void>((resolve) => {
         timer = setTimeout(resolve, maxWaitMs);

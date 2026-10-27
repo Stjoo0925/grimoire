@@ -32,6 +32,8 @@ export interface DoctorOptions {
   home?: string;
   /** 업데이트 확인에 쓰는 fetch (테스트 주입용) */
   fetchImpl?: typeof fetch;
+  /** 외부 명령 실행 (테스트에서 claude CLI 대신) */
+  runCommand?: typeof run;
 }
 
 export async function doctor(options: DoctorOptions): Promise<Check[]> {
@@ -195,9 +197,10 @@ async function clientChecks(options: DoctorOptions, env: Env): Promise<Check[]> 
     checks.push(specCheck(client, file, spec, options.cliPath, env));
   }
 
-  if (await hasCommand("claude")) {
+  const exec = options.runCommand ?? run;
+  if (await hasCommand("claude", exec)) {
     try {
-      const listed = await run("claude", ["mcp", "get", SERVER_NAME]);
+      const listed = await exec("claude", ["mcp", "get", SERVER_NAME]);
       anyInstalled = true;
       const wrongNode = !listed.includes(process.execPath);
       // `claude mcp get`의 "Environment:" 아래 "GRIMOIRE_HOME=…" 줄 — 없으면 기본 폴더

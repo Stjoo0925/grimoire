@@ -14,12 +14,16 @@ import {
   mergePermissions,
   mergeServer,
   readOnlyPermissions,
+  run,
   serverSpec,
   staleDesktopConfigs,
 } from "../src/setup/install";
 import { makeRepo, memoryDb, tempDir } from "./helpers";
 
 /** 설치 대상이 될 가짜 CLI 파일 */
+/** 테스트는 개발 머신의 진짜 claude CLI를 부르지 않는다 — 느리고(호출마다 수 초) 내 등록 상태에 따라 결과가 달라진다 */
+const noClaude: typeof run = () => Promise.reject(new Error("not installed"));
+
 function fakeCli(): string {
   const file = path.join(tempDir(), "dist", "cli.js");
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -117,11 +121,11 @@ test("doctor: 앱이 읽지 않는 옛 Desktop 설정에만 등록돼 있으면 
     throw new Error("down");
   }) as unknown as typeof fetch;
   const env = { GRIMOIRE_HOME: path.join(home, ".grimoire"), GRIMOIRE_ME: "me@example.com" };
-  const checks = await doctor({ cliPath, env, home, fetchImpl: offline });
+  const checks = await doctor({ cliPath, env, home, fetchImpl: offline, runCommand: noClaude });
   assert.ok(checks.some((c) => c.level === "warn" && c.title.includes("옛 설정 파일")), formatChecks(checks));
 
   await install("claude-desktop", { cliPath, env, home });
-  const fixed = await doctor({ cliPath, env, home, fetchImpl: offline });
+  const fixed = await doctor({ cliPath, env, home, fetchImpl: offline, runCommand: noClaude });
   assert.ok(fixed.some((c) => c.level === "ok" && c.title === "claude-desktop: 등록됨"), formatChecks(fixed));
   assert.ok(!fixed.some((c) => c.title.includes("옛 설정 파일")));
 });
@@ -293,7 +297,7 @@ test("doctor: README식 'node' 설정과 빈 DB를 짚어 낸다", async () => {
     throw new Error("down");
   }) as unknown as typeof fetch;
   const env = { GRIMOIRE_HOME: path.join(home, ".grimoire"), GRIMOIRE_ME: "me@example.com" };
-  const checks = await doctor({ cliPath, env, home, fetchImpl: offline });
+  const checks = await doctor({ cliPath, env, home, fetchImpl: offline, runCommand: noClaude });
   const text = formatChecks(checks);
 
   assert.ok(checks.some((c) => c.level === "fail" && c.title.includes("실행 파일을 찾을 수 없습니다")), text);
@@ -303,7 +307,7 @@ test("doctor: README식 'node' 설정과 빈 DB를 짚어 낸다", async () => {
 
   // install로 고치면 실패가 사라진다
   await install("claude-desktop", { cliPath, env, home });
-  const fixed = await doctor({ cliPath, env, home, fetchImpl: offline });
+  const fixed = await doctor({ cliPath, env, home, fetchImpl: offline, runCommand: noClaude });
   assert.ok(!fixed.some((c) => c.level === "fail"), formatChecks(fixed));
   assert.ok(fixed.some((c) => c.level === "ok" && c.title === "claude-desktop: 등록됨"));
 });
@@ -386,14 +390,14 @@ test("doctor: 업그레이드로 비워진 공변경 이력을 sync 전까지 �
   await syncRepo(db, repo);
   const title = "공변경 이력을 다시 계산해야 하는 레포";
   db.close();
-  let checks = await doctor({ cliPath: fakeCli(), env, home, fetchImpl: offline });
+  let checks = await doctor({ cliPath: fakeCli(), env, home, fetchImpl: offline, runCommand: noClaude });
   assert.ok(!checks.some((c) => c.title.includes(title)), "sync 직후에는 조용해야 합니다");
 
   // 마이그레이션 7처럼 표를 비운다 → 경고, sync로 다시 채우면 사라진다
   const again = openDb(path.join(env.GRIMOIRE_HOME, "grimoire.db"));
   again.exec("DELETE FROM cochange; DELETE FROM file_touches;");
   again.close();
-  checks = await doctor({ cliPath: fakeCli(), env, home, fetchImpl: offline });
+  checks = await doctor({ cliPath: fakeCli(), env, home, fetchImpl: offline, runCommand: noClaude });
   const warn = checks.find((c) => c.title.includes(title));
   assert.equal(warn?.level, "warn", formatChecks(checks));
   assert.equal(warn?.detail, "cochange-doctor");
@@ -401,7 +405,7 @@ test("doctor: 업그레이드로 비워진 공변경 이력을 sync 전까지 �
   const fixDb = openDb(path.join(env.GRIMOIRE_HOME, "grimoire.db"));
   await syncRepo(fixDb, fixDb.prepare("SELECT * FROM repos").get() as never);
   fixDb.close();
-  checks = await doctor({ cliPath: fakeCli(), env, home, fetchImpl: offline });
+  checks = await doctor({ cliPath: fakeCli(), env, home, fetchImpl: offline, runCommand: noClaude });
   assert.ok(!checks.some((c) => c.title.includes(title)), formatChecks(checks));
 });
 
@@ -438,16 +442,16 @@ test("doctor: 훅이 CLI와 다른 데이터 폴더를 보면 알리고, hook.lo
     throw new Error("down");
   }) as unknown as typeof fetch;
 
-  const other = await doctor({ cliPath, env: { GRIMOIRE_HOME: path.join(home, "cli-home"), GRIMOIRE_ME: "me@example.com" }, home, fetchImpl: offline });
+  const other = await doctor({ cliPath, env: { GRIMOIRE_HOME: path.join(home, "cli-home"), GRIMOIRE_ME: "me@example.com" }, home, fetchImpl: offline, runCommand: noClaude });
   assert.ok(other.some((c) => c.level === "warn" && c.title === "claude-code 훅: CLI와 다른 데이터 폴더를 봅니다"), formatChecks(other));
   assert.ok(other.some((c) => c.title.includes("오류 1건")), "CLI 폴더가 아니라 훅 폴더의 hook.log를 읽어야 합니다");
 
   // 같은 폴더(설정엔 /로 적혀도)면 조용하다
-  const same = await doctor({ cliPath, env: { GRIMOIRE_HOME: hookHome, GRIMOIRE_ME: "me@example.com" }, home, fetchImpl: offline });
+  const same = await doctor({ cliPath, env: { GRIMOIRE_HOME: hookHome, GRIMOIRE_ME: "me@example.com" }, home, fetchImpl: offline, runCommand: noClaude });
   assert.ok(!same.some((c) => c.title === "claude-code 훅: CLI와 다른 데이터 폴더를 봅니다"), formatChecks(same));
 
   // 다른 설치(개발 중 워크트리 빌드 등)의 hook.js를 가리키면 — 업데이트가 훅에 닿지 않는다
-  const elsewhere = await doctor({ cliPath: fakeCli(), env: { GRIMOIRE_HOME: hookHome, GRIMOIRE_ME: "me@example.com" }, home, fetchImpl: offline });
+  const elsewhere = await doctor({ cliPath: fakeCli(), env: { GRIMOIRE_HOME: hookHome, GRIMOIRE_ME: "me@example.com" }, home, fetchImpl: offline, runCommand: noClaude });
   assert.ok(elsewhere.some((c) => c.level === "warn" && c.title.startsWith("claude-code 훅: 지금 CLI와 다른 위치의 grimoire")), formatChecks(elsewhere));
   assert.deepEqual(hookCommandEnv('"n" "h" --env "GRIMOIRE_HOME=C:/x y" --env "GRIMOIRE_ME=a@b"'), { GRIMOIRE_HOME: "C:/x y", GRIMOIRE_ME: "a@b" });
 });

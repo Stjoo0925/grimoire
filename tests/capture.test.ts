@@ -537,3 +537,58 @@ test("검증 실패와 커밋이 한 명령에 있으면(npm test; git commit) 2
   assert.ok(out?.json?.hookSpecificOutput.additionalContext.includes("first failing check"), "2단계 맥락은 그대로 나온다");
   assert.deepEqual(commitContextOf(db, repo.id, made)?.prompts, ["a의 경계값을 다시 고치자"], "같은 명령의 커밋에도 묶여야 합니다");
 });
+
+test("promptText: Claude Code의 자동 블록(작업 알림·세션 메시지·시스템 안내·CI 알림)은 사용자의 말이 아니다", async () => {
+  const { promptText, stripSystemBlocks } = await import("../src/core/capture.js");
+  const notification = '<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n<summary>Background command "npm test" completed</summary>\n</task-notification>';
+  // 블록뿐이면 기록하지 않는다
+  for (const raw of [
+    notification,
+    "<system-reminder>\n[SYSTEM NOTIFICATION - NOT USER INPUT]\n</system-reminder>",
+    '<cross-session-message from="uds:x">다른 세션의 갱신입니다</cross-session-message>',
+    "<ci-monitor-event>Auto-fix was enabled</ci-monitor-event>",
+    "<side-sessions-event>세션이 끝났습니다</side-sessions-event>",
+    "<local-command-caveat>Caveat</local-command-caveat><local-command-stdout>Goal cleared</local-command-stdout>",
+  ]) {
+    assert.equal(promptText(raw), null, raw.slice(0, 40));
+  }
+  // 블록과 사용자의 말이 섞이면 말만 남는다
+  assert.equal(promptText(`<system-reminder>안내</system-reminder>\n결제 재시도 로직을 고쳐 줘`), "결제 재시도 로직을 고쳐 줘");
+  assert.equal(promptText(`${notification}\n한글로 말해라`), "한글로 말해라");
+  // 슬래시 명령 실행 기록은 /명령 인자 꼴로 — 인자에 사용자의 말이 있으면 그 말만, 없으면 기록 안 함
+  assert.equal(promptText("<command-name>/goal</command-name>\n<command-message>goal</command-message>\n<command-args>완성도를 계속 올려라</command-args>"), "완성도를 계속 올려라");
+  assert.equal(promptText("<command-name>/goal</command-name>\n<command-message>goal</command-message>\n<command-args>clear</command-args>\n<local-command-stdout>Goal cleared</local-command-stdout>\n하던 남은건 계속 진행해"), "하던 남은건 계속 진행해");
+  assert.equal(promptText("<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>"), null);
+  // 옛 버전이 1000자에서 잘라 닫는 태그가 없는 블록도 (실제 DB에서 남던 것)
+  assert.equal(promptText(`<cross-session-message from="uds:x">${"갱신 내용 ".repeat(200)}`), null);
+  assert.equal(promptText(`배포해 줘\n<system-reminder>안내가 잘린 채`), "배포해 줘");
+  // 여는 태그만 잔뜩(훅 stdin 상한 2MB)이어도 선형 — 정규식으로 지우면 제곱 시간이 된다
+  const started = Date.now();
+  promptText("<task-notification>".repeat(100_000));
+  assert.ok(Date.now() - started < 200, `${Date.now() - started}ms`);
+  // 사용자가 직접 쓴 태그·코드는 그대로
+  assert.equal(stripSystemBlocks("이 <div class=\"x\">버튼</div> 정렬 고쳐"), '이 <div class="x">버튼</div> 정렬 고쳐');
+  assert.equal(promptText("<summary> 태그가 안 닫혀서 깨져"), "<summary> 태그가 안 닫혀서 깨져");
+});
+
+test("cleanStoredPrompts(마이그레이션 9): 저장된 자동 블록 프롬프트를 지우거나 사용자의 말만 남기고, 커밋의 [why]도 고친다", async () => {
+  const { cleanStoredPrompts, refreshWhy } = await import("../src/core/capture.js");
+  const db = memoryDb();
+  const dir = makeRepo([{ message: "fix(pay): 결제 재시도", files: { "src/pay.ts": "1\n" } }], "clean-prompts");
+  const repo = await addRepo(db, dir);
+  await syncRepo(db, repo);
+  const sha = (await headSha(dir))!;
+  // 0.8.0까지 저장된 그대로 — 자동 블록이 프롬프트로 들어가 있다
+  const insert = db.prepare("INSERT INTO commit_context (repo_id, sha, kind, text, ord) VALUES (?, ?, 'prompt', ?, ?)");
+  insert.run(repo.id, sha, "<task-notification><task-id>b1</task-id><status>completed</status></task-notification>", 0);
+  insert.run(repo.id, sha, "<system-reminder>안내</system-reminder>\n결제가 두 번 나가서 재시도에 멱등 키를 넣자", 1);
+  db.prepare("INSERT INTO session_events (session_id, repo_id, at, kind, text) VALUES ('old', ?, ?, 'prompt', ?)").run(repo.id, new Date().toISOString(), "<cross-session-message>갱신</cross-session-message>");
+  refreshWhy(db, repo.id, sha);
+
+  assert.equal(cleanStoredPrompts(db), 3);
+  assert.deepEqual(commitContextOf(db, repo.id, sha)?.prompts, ["결제가 두 번 나가서 재시도에 멱등 키를 넣자"]);
+  assert.equal(whyLine(db, repo.id, sha), "결제가 두 번 나가서 재시도에 멱등 키를 넣자");
+  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM session_events WHERE kind = 'prompt'").get() as { n: number }).n, 0);
+  assert.equal(search(db, "task-notification").hits.length, 0, "검색 문서에서도 사라져야 합니다");
+  assert.equal(cleanStoredPrompts(db), 0, "두 번째는 바꿀 것이 없다");
+});

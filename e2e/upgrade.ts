@@ -18,6 +18,7 @@ import { tempDir } from "../tests/helpers";
 
 const SECRET_URL_PASSWORD = "upgradepw123";
 const SECRET_KEY = "upgrade_key_value99";
+const NOTIFICATION_ID = "bupgrade01";
 
 interface Check {
   name: string;
@@ -46,6 +47,8 @@ async function main(): Promise<number> {
     await old.indexer.syncRepo(db, repo);
     old.notes.addNote(db, { text: `원인: DATABASE_URL=postgres://app:${SECRET_URL_PASSWORD}@db/x 로 풀 고갈`, tags: ["auth", "token"], source: "mcp" });
     old.capture.recordPrompt(db, "upgrade-session", repo.id, `OPENAI_API_KEY=${SECRET_KEY} 로 결제 재시도 고쳐`);
+    // 옛 버전은 Claude Code의 자동 블록(작업 완료 알림)도 사용자의 말로 저장했다
+    old.capture.recordPrompt(db, "upgrade-session", repo.id, `<task-notification><task-id>${NOTIFICATION_ID}</task-id><status>completed</status></task-notification>`);
     oldVersion = db.pragma("user_version") as number;
     db.close();
   }
@@ -68,6 +71,8 @@ async function main(): Promise<number> {
   check("저장된 비밀 지움", !stored.includes(SECRET_URL_PASSWORD) && !stored.includes(SECRET_KEY), stored.includes(SECRET_KEY) || stored.includes(SECRET_URL_PASSWORD) ? "남아 있음" : "없음");
   const tags = (db.prepare("SELECT tags FROM notes").get() as { tags: string }).tags;
   check("노트 태그 보존", tags === "auth token", tags);
+  const prompts = (db.prepare("SELECT text FROM session_events WHERE kind = 'prompt'").all() as { text: string }[]).map((row) => row.text);
+  check("자동 블록 프롬프트 정리", !prompts.some((text) => text.includes(NOTIFICATION_ID)) && prompts.some((text) => text.includes("결제 재시도")), `프롬프트 ${prompts.length}개`);
   check("검색에서 비밀 사라짐", now.search.search(db, SECRET_URL_PASSWORD).hits.length === 0, `${now.search.search(db, SECRET_URL_PASSWORD).hits.length}건`);
   check("나머지 말은 검색됨", now.search.search(db, "풀 고갈").hits.length > 0, `${now.search.search(db, "풀 고갈").hits.length}건`);
   db.close();

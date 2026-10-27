@@ -77,3 +77,39 @@ test("testCommand: {tests}를 그 사례의 테스트 파일로 바꾼다", asyn
     assert.equal(testCommand("cd backend && npx vitest run {tests}", ["backend/src/a.spec.ts"], under), 'cd backend && npx vitest run "src/a.spec.ts"');
   }
 });
+
+test("cacheWriteCost: 모델별 총액을 가격 비율로 나눠 캐시 쓰기 몫만 뗀다", async () => {
+  const { cacheWriteCost } = await import("../e2e/claude.js");
+  // 입력 단가 $1/토큰으로 두면: 입력 10 + 쓰기 100×1.25 + 읽기 1000×0.1 + 출력 20×5 = 335
+  assert.equal(cacheWriteCost([{ usage: { input: 10, cacheWrite: 100, cacheRead: 1000, output: 20 }, costUsd: 335 }]), 125);
+  // 모델마다 단가가 달라도 각자 나눠 더한다
+  assert.equal(
+    cacheWriteCost([
+      { usage: { input: 0, cacheWrite: 100, cacheRead: 0, output: 0 }, costUsd: 3 },
+      { usage: { input: 100, cacheWrite: 0, cacheRead: 0, output: 0 }, costUsd: 1 },
+    ]),
+    3,
+  );
+  assert.equal(cacheWriteCost([{ usage: { input: 0, cacheWrite: 0, cacheRead: 0, output: 0 }, costUsd: 0 }]), 0);
+  assert.equal(cacheWriteCost([]), null);
+});
+
+test("summarize: 캐시 쓰기를 뺀 비용과 짝 비용비를 따로 내 — 콜드 캐시 한 회가 비용비를 뒤집지 않게", async () => {
+  const { summarize, costNoWrite, hookStats: stats } = await import("../e2e/taskbench.js");
+  const hook = { ...stats(""), injections: 1 };
+  const row = (task: string, mode: "bare" | "grimoire", costUsd: number, cacheWriteUsd: number) => ({
+    task, mode, seed: 1, pass: true, p2pBroken: false, costUsd, cacheWriteUsd, turns: 4, toolCalls: 3, stray: 0, missed: 0,
+    revertedEdits: 0, churnRatio: 1, subtype: "success", seconds: 1, usage: null, grimoireToolCalls: 0, grimoireTools: {}, hook,
+  });
+  // 0.8.1 파일럿 모양: grimoire 첫 실행이 콜드 캐시라 두 배, 나머지는 같다
+  const summary = summarize([
+    row("a", "grimoire", 0.16, 0.1), row("a", "bare", 0.08, 0.02),
+    row("b", "grimoire", 0.09, 0.02), row("b", "bare", 0.09, 0.02),
+  ]);
+  assert.equal(summary.paired.costRatioOk, 1.414);
+  assert.equal(summary.paired.costRatioNoWriteOk, 1);
+  assert.equal(summary.modes.grimoire.costNoWrite, 0.13);
+  assert.equal(summary.modes.bare.costNoWritePerSolved, 0.065);
+  assert.equal(costNoWrite({ costUsd: 0.1, cacheWriteUsd: null }), null);
+  assert.equal(costNoWrite({ costUsd: 0.1, cacheWriteUsd: 0.2 }), 0);
+});

@@ -18,6 +18,10 @@
  *      모드 bare = 내장 도구만 (--bare 플래그와는 별개)
  *      grimoire  내장 도구 + Grimoire MCP + 편집 직전 훅 — 임시 DB는 부모 커밋까지만 색인(시간 마스킹)
  *    채점: pass(F2P), p2p_broken, cost_billed·modelUsage, turns, stray/missed, reverted_edits, churn_ratio, subtype.
+ *    --warmup N(기본 1): 측정 전에 모드마다 짧은 준비 실행을 N번 돌리고 채점에서 뺀다. 프롬프트 캐시의 공통 머리말(도구·
+ *      시스템 프롬프트)은 모드마다 다르고 실행 사이에 공유된다 — 준비 없이 돌면 맨 처음 도는 모드 하나가 그 머리말의 캐시
+ *      쓰기를 혼자 떠안아(파일럿에서 다른 실행의 약 두 배 비용) 비용비가 순서에 따라 뒤집힌다. 0이면 끈다.
+ *    cost_no_write: 청구 비용에서 캐시 쓰기 몫(추정)을 뺀 값 — 실행 중 캐시가 만료돼 다시 쓰는 흔들림도 걸러 본다.
  *    결과: bench/results/taskbench-<시각>.json + 짝지은 요약(_ok 변형, cost_per_solved).
  *
  * 구독으로 돌면 추가 요금은 없지만 사용량 한도(5시간·주간)를 먹는다 — 실행마다 결과의 $는 API 환산 추정치다.
@@ -70,6 +74,8 @@ interface RunRow {
   pass: boolean;
   p2pBroken: boolean;
   costUsd: number | null;
+  /** costUsd 중 캐시 쓰기 몫 (추정) */
+  cacheWriteUsd: number | null;
   turns: number | null;
   toolCalls: number;
   stray: number;
@@ -374,7 +380,19 @@ function editChurn(run: AgentRun): number {
   return lines;
 }
 
-async function runTask(task: Task, mode: Mode, seed: number, options: { cli: string; model?: string; bare: boolean; budget: string; maxTurns: number }): Promise<RunRow> {
+interface RunOptions {
+  cli: string;
+  model?: string;
+  bare: boolean;
+  budget: string;
+  maxTurns: number;
+  /** 준비 실행 — 같은 설정(도구·MCP·훅)으로 짧은 프롬프트만 보내 캐시 머리말을 데우고, 채점은 하지 않는다 */
+  warmup?: boolean;
+}
+
+const WARMUP_PROMPT = "준비 실행이다. 도구를 쓰지 말고 OK라고만 답해.";
+
+async function runTask(task: Task, mode: Mode, seed: number, options: RunOptions): Promise<RunRow> {
   const wt = worktree(task.repo, task.parent, task.links ?? []);
   const test = testCommand(task.test, task.testFiles, task.under);
   const data = tempDir("grimoire-taskbench-data-");
@@ -412,7 +430,7 @@ async function runTask(task: Task, mode: Mode, seed: number, options: { cli: str
     // 훅이 무엇을 넣었는지 — 두 모드 모두 기록한다. bare에서는 사용자 전역 훅이 꺼진 채(enabled: false) 불리는지,
     // 그래도 무언가 넣었는지(leaked)를 본다
     const traceFile = path.join(data, "hook-trace.jsonl");
-    const prompt = `${task.prompt || task.subject}\n\n고친 뒤에는 \`${test}\`로 확인해 줘. 작업 폴더 밖은 건드리지 마.`;
+    const prompt = options.warmup ? WARMUP_PROMPT : `${task.prompt || task.subject}\n\n고친 뒤에는 \`${test}\`로 확인해 줘. 작업 폴더 밖은 건드리지 마.`;
     const run = await runClaude({
       prompt,
       cwd: wt.dir,
@@ -420,7 +438,7 @@ async function runTask(task: Task, mode: Mode, seed: number, options: { cli: str
       allowedTools: ["Bash", "Read", "Edit", "Write", "MultiEdit", "Grep", "Glob", ...(mode === "grimoire" ? ["mcp__grimoire"] : [])],
       model: options.model,
       budgetUsd: options.budget,
-      maxTurns: options.maxTurns,
+      maxTurns: options.warmup ? 1 : options.maxTurns,
       settings,
       bare: options.bare,
       // 사용자가 전역에 설치한 grimoire 훅은 끈다 — 대조군(bare 모드)에 맥락이 새거나(실제 DB는 미래 커밋까지 안다),
@@ -431,6 +449,23 @@ async function runTask(task: Task, mode: Mode, seed: number, options: { cli: str
     });
     const hook = hookStats(fs.existsSync(traceFile) ? fs.readFileSync(traceFile, "utf8") : "", wt.dir);
     const tools = grimoireToolStats(run.calls);
+    const measured = {
+      task: task.id,
+      mode,
+      seed,
+      costUsd: run.costUsd,
+      cacheWriteUsd: run.cacheWriteUsd,
+      turns: run.turns,
+      toolCalls: run.calls.length,
+      subtype: run.subtype,
+      seconds: +((Date.now() - started) / 1000).toFixed(1),
+      usage: run.modelUsage,
+      grimoireToolCalls: tools.total,
+      grimoireTools: tools.byTool,
+      hook,
+      ...(run.error ? { error: run.error } : {}),
+    };
+    if (options.warmup) return { ...measured, pass: false, p2pBroken: false, stray: 0, missed: 0, revertedEdits: 0, churnRatio: null };
     // 채점: 실제 fix의 테스트 패치를 얹고 돌린다 (에이전트가 테스트를 고쳐 통과시킨 경우를 막는다)
     for (const file of task.testFiles) git(wt.dir, ["checkout", "-q", task.sha, "--", file]);
     const pass = runShell(test, wt.dir).ok;
@@ -444,25 +479,15 @@ async function runTask(task: Task, mode: Mode, seed: number, options: { cli: str
     const reverted = edited.filter((file) => !changedAtEnd.has(file)).length;
     const churn = editChurn(run);
     return {
-      task: task.id,
-      mode,
-      seed,
+      ...measured,
       pass,
       p2pBroken,
-      costUsd: run.costUsd,
-      turns: run.turns,
-      toolCalls: run.calls.length,
       stray: edited.filter((file) => !task.files.includes(file)).length,
       missed: task.files.filter((file) => !edited.includes(file)).length,
       revertedEdits: reverted,
       churnRatio: pass && finalLines > 0 ? +(churn / finalLines).toFixed(2) : null,
-      subtype: run.subtype,
+      // 채점(테스트 실행)까지 든 시간
       seconds: +((Date.now() - started) / 1000).toFixed(1),
-      usage: run.modelUsage,
-      grimoireToolCalls: tools.total,
-      grimoireTools: tools.byTool,
-      hook,
-      ...(run.error ? { error: run.error } : {}),
     };
   } finally {
     wt.remove();
@@ -472,7 +497,13 @@ async function runTask(task: Task, mode: Mode, seed: number, options: { cli: str
 
 /* ── 요약 ───────────────────────────────────────────────── */
 
-function summarize(rows: RunRow[]) {
+/** 캐시 쓰기 몫을 뺀 비용 — 추정이 없으면 null */
+export function costNoWrite(row: Pick<RunRow, "costUsd" | "cacheWriteUsd">): number | null {
+  if (row.costUsd === null || row.cacheWriteUsd === null) return null;
+  return Math.max(0, row.costUsd - row.cacheWriteUsd);
+}
+
+export function summarize(rows: RunRow[]) {
   const by = (mode: Mode) => rows.filter((row) => row.mode === mode && !row.error);
   const mean = (values: number[]) => (values.length ? +(values.reduce((a, b) => a + b, 0) / values.length).toFixed(3) : null);
   const modes = Object.fromEntries(
@@ -480,6 +511,7 @@ function summarize(rows: RunRow[]) {
       const list = by(mode);
       const solved = list.filter((row) => row.pass).length;
       const cost = list.reduce((sum, row) => sum + (row.costUsd ?? 0), 0);
+      const noWrite = list.reduce((sum, row) => sum + (costNoWrite(row) ?? 0), 0);
       return [
         mode,
         {
@@ -488,6 +520,8 @@ function summarize(rows: RunRow[]) {
           p2pBroken: list.length ? +(list.filter((row) => row.p2pBroken).length / list.length).toFixed(3) : null,
           cost: +cost.toFixed(3),
           costPerSolved: solved ? +(cost / solved).toFixed(3) : null,
+          costNoWrite: +noWrite.toFixed(3),
+          costNoWritePerSolved: solved ? +(noWrite / solved).toFixed(3) : null,
           turns: mean(list.map((row) => row.turns ?? 0)),
           missed: mean(list.map((row) => row.missed)),
           stray: mean(list.map((row) => row.stray)),
@@ -508,8 +542,12 @@ function summarize(rows: RunRow[]) {
   const bare = new Map(by("bare").map((row) => [key(row), row]));
   const pairs = by("grimoire").map((row) => [bare.get(key(row)), row] as const).filter((pair): pair is readonly [RunRow, RunRow] => Boolean(pair[0]));
   const ok = pairs.filter(([a, b]) => a.pass && b.pass && a.costUsd && b.costUsd);
-  const ratio = (list: (readonly [RunRow, RunRow])[]) => {
-    const diffs = list.map(([a, b]) => Math.log(b.costUsd! / a.costUsd!));
+  // 짝마다 log(grimoire/bare)를 평균해 되돌린 기하평균 비 — 값이 없거나 0인 짝은 뺀다
+  const ratio = (list: (readonly [RunRow, RunRow])[], cost: (row: RunRow) => number | null = (row) => row.costUsd) => {
+    const diffs = list.flatMap(([a, b]) => {
+      const [x, y] = [cost(a), cost(b)];
+      return x && y ? [Math.log(y / x)] : [];
+    });
     return diffs.length ? +Math.exp(diffs.reduce((x, y) => x + y, 0) / diffs.length).toFixed(3) : null;
   };
   const logDiff = ok.map(([a, b]) => Math.log(b.costUsd! / a.costUsd!));
@@ -524,6 +562,7 @@ function summarize(rows: RunRow[]) {
       n: pairs.length,
       okPairs: ok.length,
       costRatioOk: ratio(ok),
+      costRatioNoWriteOk: ratio(ok, costNoWrite),
       turnsDeltaOk: mean(turnDiff),
       missedDelta: mean(pairs.map(([a, b]) => b.missed - a.missed)),
       p2pDelta: mean(pairs.map(([a, b]) => Number(b.p2pBroken) - Number(a.p2pBroken))),
@@ -578,6 +617,7 @@ async function main(): Promise<number> {
       "max-turns": { type: "string" },
       bare: { type: "boolean" },
       label: { type: "string" },
+      warmup: { type: "string" },
     },
   });
   if (values.mine) {
@@ -600,7 +640,7 @@ async function main(): Promise<number> {
   const modes = (values.modes?.split(",") as Mode[] | undefined) ?? MODES;
   const cli = process.env.BENCH_CLI ? path.resolve(process.env.BENCH_CLI) : path.resolve(__dirname, "..", "..", "dist", "cli.js");
   if (!fs.existsSync(cli)) throw new Error(`${cli}가 없습니다 — npm run build를 먼저 하세요`);
-  const options = { cli, model: values.model, bare: values.bare === true, budget: values.budget ?? "2.00", maxTurns: Number.parseInt(values["max-turns"] ?? "60", 10) || 60 };
+  const options: RunOptions = { cli, model: values.model, bare: values.bare === true, budget: values.budget ?? "2.00", maxTurns: Number.parseInt(values["max-turns"] ?? "60", 10) || 60 };
   process.stdout.write(
     options.bare
       ? "--bare: 사용자 설정을 끈 깨끗한 비교 — ANTHROPIC_API_KEY로 돌아 토큰당 과금됩니다\n"
@@ -608,6 +648,20 @@ async function main(): Promise<number> {
   );
   // 캐시 TTL을 두 모드에 같게 — 쓰기 단가가 다르면 비용 비교가 흔들린다
   process.env.CLAUDE_CODE_PROMPT_CACHE_TTL ??= "5m";
+
+  // 준비 실행: 모드마다 공통 캐시 머리말을 먼저 써 둔다 — 측정에서 맨 처음 도는 모드만 그 비용을 떠안지 않게
+  const warmups = Math.max(0, Number.parseInt(values.warmup ?? "1", 10) || 0);
+  const warm: RunRow[] = [];
+  if (tasks.length > 0) {
+    for (let round = 1; round <= warmups; round++) {
+      for (const mode of modes) {
+        process.stdout.write(`… 준비 실행 ${round} ${mode}\n`);
+        const row = await runTask(tasks[0], mode, 0, { ...options, warmup: true });
+        warm.push(row);
+        process.stdout.write(`   $${(row.costUsd ?? 0).toFixed(3)}  캐시 쓰기 $${(row.cacheWriteUsd ?? 0).toFixed(3)}${row.error ? `  ${row.error.slice(0, 80)}` : ""}\n`);
+      }
+    }
+  }
 
   const rows: RunRow[] = [];
   for (const task of tasks) {
@@ -619,7 +673,7 @@ async function main(): Promise<number> {
         const row = await runTask(task, mode, seed, options);
         rows.push(row);
         process.stdout.write(
-          `   ${row.pass ? "✓" : "✗"}${row.p2pBroken ? " 회귀" : ""}  $${(row.costUsd ?? 0).toFixed(3)}  ${row.turns ?? "-"}턴  missed ${row.missed}  stray ${row.stray}  훅 ${row.hook.injections}/${row.hook.calls}  도구 ${row.grimoireToolCalls}${row.hook.leaked ? `  누수 ${row.hook.leaked}` : ""}  ${row.subtype ?? ""}${row.error ? `  ${row.error.slice(0, 80)}` : ""}\n`,
+          `   ${row.pass ? "✓" : "✗"}${row.p2pBroken ? " 회귀" : ""}  $${(row.costUsd ?? 0).toFixed(3)} (쓰기 뺌 $${(costNoWrite(row) ?? 0).toFixed(3)})  ${row.turns ?? "-"}턴  missed ${row.missed}  stray ${row.stray}  훅 ${row.hook.injections}/${row.hook.calls}  도구 ${row.grimoireToolCalls}${row.hook.leaked ? `  누수 ${row.hook.leaked}` : ""}  ${row.subtype ?? ""}${row.error ? `  ${row.error.slice(0, 80)}` : ""}\n`,
         );
       }
     }
@@ -629,12 +683,12 @@ async function main(): Promise<number> {
   fs.mkdirSync(resultsDir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const outFile = path.join(resultsDir, `taskbench-${stamp}${values.label ? `-${values.label}` : ""}.json`);
-  fs.writeFileSync(outFile, JSON.stringify({ label: values.label, model: values.model, bare: options.bare, tasks: tasks.map((task) => task.id), seeds, summary, rows }, null, 2));
+  fs.writeFileSync(outFile, JSON.stringify({ label: values.label, model: values.model, bare: options.bare, tasks: tasks.map((task) => task.id), seeds, warmups, summary, rows, warm }, null, 2));
   process.stdout.write("\n" + JSON.stringify(summary, null, 2) + "\n");
   const paired = summary.paired;
   if (paired.okPairs > 0) {
     process.stdout.write(
-      `\n판정(§3-4): 둘 다 푼 짝 ${paired.okPairs}개에서 grimoire/bare 비용비 ${paired.costRatioOk} (목표 ≤ 0.85), 턴 차이 ${paired.turnsDeltaOk}, missed 차이 ${paired.missedDelta}, p2p 차이 ${paired.p2pDelta}, 비용 윌콕슨 p=${paired.wilcoxonCostP ?? "-"}\n`,
+      `\n판정(§3-4): 둘 다 푼 짝 ${paired.okPairs}개에서 grimoire/bare 비용비 ${paired.costRatioOk} (목표 ≤ 0.85; 캐시 쓰기 뺀 비용비 ${paired.costRatioNoWriteOk ?? "-"}), 턴 차이 ${paired.turnsDeltaOk}, missed 차이 ${paired.missedDelta}, p2p 차이 ${paired.p2pDelta}, 비용 윌콕슨 p=${paired.wilcoxonCostP ?? "-"}\n`,
     );
     process.stdout.write(
       `그리모어가 실제로 닿은 짝 ${paired.influencedOkPairs}/${paired.okPairs}개 — 닿은 짝 비용비 ${paired.costRatioInfluenced ?? "-"}, 안 닿은 짝 비용비 ${paired.costRatioUninfluenced ?? "-"} (안 닿은 짝의 차이는 실행 간 흔들림)\n`,

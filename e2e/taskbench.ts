@@ -55,6 +55,8 @@ interface Task {
   failing?: string[];
   /** 작업 폴더마다 원본 레포에서 연결해 올 폴더 (--link, 예: backend/node_modules) */
   links?: string[];
+  /** 테스트 명령이 도는 하위 폴더 (--under, 예: backend/) — {tests}의 경로를 이 폴더 기준으로 바꾼다 */
+  under?: string;
 }
 
 interface TaskFile {
@@ -237,9 +239,26 @@ export function worktree(repo: string, sha: string, links: string[] = []): { dir
   };
 }
 
-/** 테스트 명령의 {tests} 자리에 그 사례의 테스트 파일(레포 기준 경로)을 넣는다 — 전체 스위트가 무거운 레포용 */
-export function testCommand(test: string, testFiles: string[]): string {
-  return test.replace(/\{tests\}/g, testFiles.map((file) => `"${file}"`).join(" "));
+/**
+ * 테스트 명령의 {tests} 자리에 그 사례의 테스트 파일을 넣는다 — 전체 스위트가 무거운 레포용.
+ * under(예: backend/)가 있으면 명령이 그 폴더에서 돈다는 뜻이라 경로도 그 폴더 기준으로 바꾼다
+ * (`cd backend && vitest run backend/src/x.spec.ts`는 "No test files found"로 늘 실패한다).
+ */
+export function testCommand(test: string, testFiles: string[], under = ""): string {
+  const prefix = under && !under.endsWith("/") ? `${under}/` : under;
+  const local = testFiles.map((file) => (prefix && file.startsWith(prefix) ? file.slice(prefix.length) : file));
+  return test.replace(/\{tests\}/g, local.map((file) => `"${file}"`).join(" "));
+}
+
+/** 테스트 출력의 마지막 몇 줄 — 후보를 왜 버렸는지 보여 줄 때 */
+function outputTail(output: string, lines = 4): string {
+  return output
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter(Boolean)
+    .slice(-lines)
+    .map((line) => `      ${line.slice(0, 160)}`)
+    .join("\n");
 }
 
 /* ── 채굴 ───────────────────────────────────────────────── */
@@ -286,27 +305,40 @@ function mine(repo: string, test: string, limit: number, existing: Task[], all =
 
     // 부모 + 테스트 패치만 → 실패해야 함(3회 모두). 커밋 → 통과해야 함(3회 모두)
     const wt = worktree(repo, parents, links);
-    const command = testCommand(test, testFiles);
+    const command = testCommand(test, testFiles, under);
     let failing: string[] = [];
+    // 버린 후보는 이유를 남긴다 — 이유 없이 "사례 0개"면 명령이 틀렸는지 레포가 안 맞는지 알 수 없다
+    const reject = (reason: string, output = "") => process.stderr.write(`  ✗ ${reason}\n${output ? `${outputTail(output)}\n` : ""}`);
     try {
       const patch = git(repo, ["show", "--format=", sha, "--", ...testFiles]);
       const apply = spawnSync("git", ["apply", "--3way", "-"], { cwd: wt.dir, input: patch, encoding: "utf8" });
-      if (apply.status !== 0) continue;
+      if (apply.status !== 0) {
+        reject("테스트 패치를 부모에 적용하지 못함", apply.stderr);
+        continue;
+      }
       let consistentFail = true;
       for (let i = 0; i < FLAKY_RUNS && consistentFail; i++) {
         const result = runShell(command, wt.dir);
-        if (result.ok) consistentFail = false;
-        else if (i === 0) failing = failingNames(result.output);
+        if (result.ok) {
+          consistentFail = false;
+          reject(i === 0 ? "부모에서도 테스트가 통과 — 테스트가 이 버그를 잡지 못함" : `부모에서 ${i + 1}번째에 통과 — 들쭉날쭉`);
+        } else if (i === 0) failing = failingNames(result.output);
       }
       if (!consistentFail) continue;
       git(wt.dir, ["checkout", "-q", "--detach", sha]);
       let consistentPass = true;
-      for (let i = 0; i < FLAKY_RUNS && consistentPass; i++) if (!runShell(command, wt.dir).ok) consistentPass = false;
+      for (let i = 0; i < FLAKY_RUNS && consistentPass; i++) {
+        const result = runShell(command, wt.dir);
+        if (!result.ok) {
+          consistentPass = false;
+          reject(i === 0 ? "고친 커밋에서도 테스트가 실패 — 명령·환경을 확인하세요" : `고친 커밋에서 ${i + 1}번째에 실패 — 들쭉날쭉`, result.output);
+        }
+      }
       if (!consistentPass) continue;
     } finally {
       wt.remove();
     }
-    tasks.push({ id: `${path.basename(repo)}-${sha.slice(0, 8)}`, repo, sha, parent: parents, subject, prompt: "", test, files, testFiles, ...(failing.length > 0 ? { failing } : {}), ...(links.length > 0 ? { links } : {}) });
+    tasks.push({ id: `${path.basename(repo)}-${sha.slice(0, 8)}`, repo, sha, parent: parents, subject, prompt: "", test, files, testFiles, ...(failing.length > 0 ? { failing } : {}), ...(links.length > 0 ? { links } : {}), ...(under ? { under } : {}) });
     process.stderr.write(`  ✓ 사례 ${tasks.length - existing.length}: ${sha.slice(0, 10)}\n`);
   }
   process.stderr.write(`후보 ${scanned}개를 돌려 사례 ${tasks.length - existing.length}개\n`);
@@ -338,7 +370,7 @@ function editChurn(run: AgentRun): number {
 
 async function runTask(task: Task, mode: Mode, seed: number, options: { cli: string; model?: string; bare: boolean; budget: string; maxTurns: number }): Promise<RunRow> {
   const wt = worktree(task.repo, task.parent, task.links ?? []);
-  const test = testCommand(task.test, task.testFiles);
+  const test = testCommand(task.test, task.testFiles, task.under);
   const data = tempDir("grimoire-taskbench-data-");
   const started = Date.now();
   try {
@@ -547,7 +579,7 @@ async function main(): Promise<number> {
     const repo = path.resolve(expandHome(values.repo));
     const out = path.resolve(values.out ?? "bench/tasks.local.json");
     const existing: TaskFile = fs.existsSync(out) ? (JSON.parse(fs.readFileSync(out, "utf8")) as TaskFile) : { tasks: [] };
-    const tasks = mine(repo, values.test, Number.parseInt(values.limit ?? "40", 10) || 40, existing.tasks, values.all === true, (values.link ?? "").split(",").map((item) => item.trim()).filter(Boolean), values.under ?? "");
+    const tasks = mine(repo, values.test, Number.parseInt(values.limit ?? "40", 10) || 40, existing.tasks, values.all === true, (values.link ?? "").split(",").map((item) => item.trim()).filter(Boolean), values.under ? values.under.replace(/\\/g, "/").replace(/\/?$/, "/") : "");
     fs.mkdirSync(path.dirname(out), { recursive: true });
     fs.writeFileSync(out, JSON.stringify({ tasks }, null, 2) + "\n");
     process.stdout.write(`${out}: 사례 ${tasks.length}개. 각 사례의 "prompt"를 증상 서술로 다듬으세요(비면 커밋 제목을 씁니다 — 수정 힌트가 샐 수 있습니다).\n`);

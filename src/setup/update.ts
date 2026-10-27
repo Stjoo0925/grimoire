@@ -6,7 +6,7 @@
  * clone에서 고친 파일이 있거나 fast-forward가 안 되면 건드리지 않고 멈춘다.
  * MCP 설정에는 dist/cli.js의 절대경로가 들어 있고 두 방식 모두 같은 자리를 갈아 끼우므로, 설정은 그대로 둬도 된다.
  */
-import { execFile } from "node:child_process";
+import { exec as execShell, execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -107,17 +107,46 @@ export async function runUpdate(options: UpdateOptions = {}): Promise<number> {
   return 0;
 }
 
+/** cmd.exe가 특별히 읽지 않는 글자만 — 공백·따옴표·`&|<>^%!()` 같은 셸 문법은 없다 */
+const SAFE_SHELL_ARG = /^[\w@+=:,./\\-]+$/;
+
+/**
+ * Windows 셸(cmd.exe)에 넘길 명령 한 줄. 인자를 따옴표로 감싸 이스케이프하는 대신, 셸 문법이 될 수 있는 글자가 하나라도 있으면
+ * 거절한다 — cmd.exe의 따옴표·`%`·`^` 규칙은 까다로워 이스케이프를 믿기 어렵다. 업데이트가 넘기는 인자는
+ * `install`·`-g`·`@stjoo0925/grimoire@0.7.0`·`run`·`build`뿐이고, 버전은 이미 `1.2.3` 꼴로 검증된 것이다(core/update.ts).
+ */
+export function windowsCommandLine(command: string, args: string[]): string {
+  for (const part of [command, ...args]) {
+    if (!SAFE_SHELL_ARG.test(part)) throw new Error(`셸로 넘기기에 안전하지 않은 인자라 실행하지 않았습니다: ${JSON.stringify(part)}`);
+  }
+  return [command, ...args].join(" ");
+}
+
+/** 셸을 거쳐야 하는 명령인가 — Windows의 npm은 npm.cmd(배치 파일)라 셸 없이는 띄울 수 없다. git은 git.exe라 필요 없다 */
+export function needsShell(command: string, platform: NodeJS.Platform = process.platform): boolean {
+  return platform === "win32" && command === "npm";
+}
+
 function defaultExec(command: string, args: string[], cwd: string): Promise<string> {
+  const options = { cwd, encoding: "utf8" as const, timeout: STEP_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 };
+  const done = (resolve: (value: string) => void, reject: (error: Error) => void) => (error: Error | null, stdout: string, stderr: string) => {
+    if (error) reject(new Error(stderr.trim() || error.message));
+    else resolve(stdout);
+  };
   return new Promise((resolve, reject) => {
-    execFile(
-      command,
-      args,
-      // Windows에서 npm은 npm.cmd라 셸을 거쳐야 한다
-      { cwd, encoding: "utf8", timeout: STEP_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, shell: process.platform === "win32" },
-      (error, stdout, stderr) => {
-        if (error) reject(new Error(stderr.trim() || error.message));
-        else resolve(stdout);
-      },
-    );
+    if (needsShell(command)) {
+      // 인자 배열과 shell: true를 함께 주면 Node 24가 DEP0190(인자를 이스케이프 없이 이어 붙임)을 경고한다.
+      // 검증한 한 줄을 직접 만들어 셸에 넘긴다
+      let line: string;
+      try {
+        line = windowsCommandLine(command, args);
+      } catch (error) {
+        reject(error as Error);
+        return;
+      }
+      execShell(line, options, done(resolve, reject));
+      return;
+    }
+    execFile(command, args, options, done(resolve, reject));
   });
 }

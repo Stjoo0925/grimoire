@@ -5,7 +5,7 @@ import { test } from "node:test";
 
 import { compareVersions, pendingUpdate, readUpdateCache, refreshUpdateCache, VERSION } from "../src/core/update";
 import { callTool } from "../src/mcp/tools";
-import { runUpdate, type Exec } from "../src/setup/update";
+import { needsShell, runUpdate, windowsCommandLine, type Exec } from "../src/setup/update";
 import { addCommit, git, makeRepo, memoryDb, tempDir } from "./helpers";
 
 /** GitHub releases/latest 응답을 흉내 내는 fetch — 호출 수를 센다 */
@@ -165,4 +165,44 @@ test("grimoire update: --check·최신·로컬 변경이면 설치본을 건드�
   assert.equal(await runUpdate({ ...base, current: "0.2.0", fetchImpl: fakeRelease("v0.3.0").impl }), 1, "로컬 변경");
   assert.match(fs.readFileSync(path.join(clone, "package.json"), "utf8"), /0\.2\.0-local/);
   assert.deepEqual(npm, []);
+});
+
+test("Windows 셸 명령 한 줄: 업데이트 인자는 그대로 잇고, 셸 문법이 될 글자는 거절한다 (DEP0190 없이)", () => {
+  assert.equal(windowsCommandLine("npm", ["install", "-g", "@stjoo0925/grimoire@0.7.0"]), "npm install -g @stjoo0925/grimoire@0.7.0");
+  assert.equal(windowsCommandLine("npm", ["install", "-g", "@stjoo0925/grimoire@1.0.0-rc.1"]), "npm install -g @stjoo0925/grimoire@1.0.0-rc.1");
+  assert.equal(windowsCommandLine("npm", ["run", "build"]), "npm run build");
+  for (const bad of ["0.7.0&calc", "0.7.0|x", "a b", '"x"', "%PATH%", "x^y", "!x!", "(x)", "x>y", "x<y", "x\ny", ""]) {
+    assert.throws(() => windowsCommandLine("npm", ["install", bad]), /안전하지 않은 인자/, JSON.stringify(bad));
+  }
+  assert.equal(needsShell("npm", "win32"), true);
+  assert.equal(needsShell("git", "win32"), false, "git.exe는 셸 없이");
+  assert.equal(needsShell("npm", "linux"), false);
+  assert.equal(needsShell("npm", "darwin"), false);
+});
+
+test("기본 실행기: 실제로 npm을 띄워도 DEP0190 경고가 나오지 않는다", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const script = `
+    process.on("warning", (w) => { if (w.code === "DEP0190") { console.log("DEP0190"); } });
+    const { runUpdate } = require(${JSON.stringify(path.resolve(__dirname, "..", "src", "setup", "update.js"))});
+    const root = ${JSON.stringify(path.join(tempDir(), "lib", "node_modules", "@stjoo0925", "grimoire"))};
+    require("node:fs").mkdirSync(root, { recursive: true });
+    const fetchImpl = async () => new Response(JSON.stringify({ tag_name: "v9.9.9", html_url: "https://github.com/Stjoo0925/grimoire/releases/tag/v9.9.9" }), { status: 200 });
+    runUpdate({ env: { GRIMOIRE_HOME: ${JSON.stringify(tempDir())} }, root, current: "0.0.1", fetchImpl, dryRun: false, log: () => {} }).then((code) => console.log("code", code));
+  `;
+  // npm install -g를 정말 돌리지 않게 npm 대신 'npm --version'이 되도록 PATH 앞에 가짜 npm을 둔다
+  const bin = tempDir();
+  if (process.platform === "win32") fs.writeFileSync(path.join(bin, "npm.cmd"), "@echo fake-npm %*\r\n");
+  else {
+    fs.writeFileSync(path.join(bin, "npm"), '#!/bin/sh\necho fake-npm "$@"\n');
+    fs.chmodSync(path.join(bin, "npm"), 0o755);
+  }
+  const result = spawnSync(process.execPath, ["-e", script], {
+    encoding: "utf8",
+    env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}` },
+    timeout: 60_000,
+  });
+  const out = `${result.stdout}\n${result.stderr}`;
+  assert.ok(!out.includes("DEP0190"), out);
+  assert.match(result.stdout, /code 0/, out);
 });

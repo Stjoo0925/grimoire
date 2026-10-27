@@ -224,20 +224,129 @@ export function recordEvent(
 const SLASH_COMMAND = /^\/[A-Za-z][\w:-]*(?=\s|$)/;
 
 /**
- * 프롬프트 하나를 기록한다 — 빈 것은 버리고, 비밀을 지우고, 길이를 자른다. 슬래시 명령은 이름을 떼고 뒤에 사용자의 말이
- * 남을 때만(`/goal 완성도를 계속 올려라` → "완성도를 계속 올려라") — `/clear`·`/model x`·`/loop 5m /foo`처럼 설정·인자뿐이면 버린다.
+ * Claude Code가 사용자 메시지 자리에 넣는 자동 블록 — 사용자의 말이 아니다. 실제 DB에서 저장된 프롬프트의 38%가
+ * 이런 블록(백그라운드 작업 완료 알림, 다른 세션의 메시지, 시스템 안내, CI 알림)이었고 그대로 "왜"가 됐다.
+ * 사용자가 직접 쓴 `<div>` 같은 태그는 건드리지 않도록 정해 둔 이름만 지운다.
  */
-export function recordPrompt(db: DB, sessionId: string, repoId: number | null, prompt: string): boolean {
-  let cleaned = redact(prompt).trim();
+const SYSTEM_BLOCK_TAGS = [
+  "system-reminder",
+  "task-notification",
+  "cross-session-message",
+  "ci-monitor-event",
+  "side-sessions-event",
+  "local-command-caveat",
+  "local-command-stdout",
+  "local-command-stderr",
+  // `!` 셸 실행, `#` 메모리 입력, IDE 연동이 붙이는 열린 파일·선택 영역 — 사용자의 말이 아니라 맥락이다
+  "bash-input",
+  "bash-stdout",
+  "bash-stderr",
+  "user-memory-input",
+  "ide_opened_file",
+  "ide_selection",
+];
+const SYSTEM_BLOCK_OPEN = new RegExp(`<(${SYSTEM_BLOCK_TAGS.join("|")})\\b[^>]*>`, "g");
+
+/**
+ * 자동 블록을 앞에서부터 한 번 훑어 지운다. 닫는 태그가 없으면(옛 버전이 1000자에서 잘라 저장한 것) 거기서 끝까지 버린다.
+ * 정규식 `<x>[\s\S]*?</x>`는 여는 태그마다 끝까지 닫는 태그를 찾아 여는 태그만 수천 개면 제곱 시간이 된다.
+ */
+function removeSystemBlocks(text: string): string {
+  const open = new RegExp(SYSTEM_BLOCK_OPEN.source, "g");
+  let out = "";
+  let pos = 0;
+  for (let match = open.exec(text); match; match = open.exec(text)) {
+    out += text.slice(pos, match.index);
+    const close = text.indexOf(`</${match[1]}>`, open.lastIndex);
+    if (close < 0) return out;
+    pos = close + match[1].length + 3;
+    open.lastIndex = pos;
+  }
+  return out + text.slice(pos);
+}
+/** 슬래시 명령 실행 기록 — `<command-name>/goal</command-name> <command-message>…</command-message> <command-args>…</command-args>` */
+const COMMAND_BLOCK =
+  /<command-name>\s*([^<]*?)\s*<\/command-name>\s*(?:<command-message>[\s\S]*?<\/command-message>\s*)?(?:<command-args>([\s\S]*?)<\/command-args>)?/g;
+
+/** 사용자의 말로 볼 만한가 — `/`·`-`로 시작하지 않는 낱말이 둘 이상 (`clear`·`5m /foo`·`--x` 같은 설정 값은 아니다) */
+function looksLikeWords(text: string): boolean {
+  return text.split(/\s+/).filter((word) => word && !/^[/-]/.test(word)).length >= 2;
+}
+
+/**
+ * 자동 블록을 지운다. 슬래시 명령 실행 기록은 인자가 사용자의 말일 때만 그 인자를 남긴다
+ * (`/goal 완성도를 계속 올려라` → "완성도를 계속 올려라", `/goal clear` → 지움 — 뒤에 이어 쓴 말은 그대로 남는다).
+ */
+export function stripSystemBlocks(text: string): string {
+  return removeSystemBlocks(text)
+    .replace(COMMAND_BLOCK, (_, _name: string, args: string | undefined) => (args && looksLikeWords(args.trim()) ? args.trim() : ""))
+    .trim();
+}
+
+/**
+ * 저장할 프롬프트 글 — 자동 블록을 지우고, 비밀을 지우고, 슬래시 명령은 이름을 떼고 뒤에 사용자의 말이 남을 때만
+ * (`/goal 완성도를 계속 올려라` → "완성도를 계속 올려라") — `/clear`·`/model x`·`/loop 5m /foo`처럼 설정·인자뿐이면 null.
+ * 새 프롬프트(recordPrompt)와 이미 저장된 프롬프트 정리(마이그레이션 9)가 같은 규칙을 쓴다.
+ */
+export function promptText(raw: string): string | null {
+  let cleaned = redact(stripSystemBlocks(raw)).trim();
   const command = SLASH_COMMAND.exec(cleaned);
   if (command) {
     cleaned = cleaned.slice(command[0].length).trim();
-    const words = cleaned.split(/\s+/).filter((word) => word && !/^[/-]/.test(word));
-    if (words.length < 2) return false;
+    if (!looksLikeWords(cleaned)) return null;
   }
-  if (!cleaned) return false;
-  recordEvent(db, { sessionId, repoId, kind: "prompt", text: cleaned.slice(0, PROMPT_MAX) });
+  return cleaned ? cleaned.slice(0, PROMPT_MAX) : null;
+}
+
+/** 프롬프트 하나를 기록한다 (규칙은 promptText). 기록하지 않았으면 false */
+export function recordPrompt(db: DB, sessionId: string, repoId: number | null, prompt: string): boolean {
+  const text = promptText(prompt);
+  if (!text) return false;
+  recordEvent(db, { sessionId, repoId, kind: "prompt", text });
   return true;
+}
+
+/**
+ * 이미 저장된 프롬프트를 promptText 규칙으로 다시 거른다(마이그레이션 9) — 자동 블록뿐이던 기록은 지우고, 섞여 있던
+ * 기록은 사용자의 말만 남긴다. 커밋에 묶인 프롬프트가 바뀐 커밋은 검색 문서의 [why]도 다시 쓴다. 바뀌거나 지운 행 수.
+ */
+export function cleanStoredPrompts(db: DB): number {
+  let changed = 0;
+  const events = db.prepare("SELECT id, text FROM session_events WHERE kind = 'prompt'").all() as { id: number; text: string }[];
+  for (const row of events) {
+    const clean = promptText(row.text);
+    if (clean === row.text) continue;
+    if (clean === null) db.prepare("DELETE FROM session_events WHERE id = ?").run(row.id);
+    else db.prepare("UPDATE session_events SET text = ? WHERE id = ?").run(clean, row.id);
+    changed++;
+  }
+  const rows = db.prepare("SELECT repo_id, sha, ord, text FROM commit_context WHERE kind = 'prompt'").all() as { repo_id: number; sha: string; ord: number; text: string }[];
+  const touched = new Map<string, { repoId: number; sha: string }>();
+  for (const row of rows) {
+    const clean = promptText(row.text);
+    if (clean === row.text) continue;
+    if (clean === null) db.prepare("DELETE FROM commit_context WHERE repo_id = ? AND sha = ? AND kind = 'prompt' AND ord = ?").run(row.repo_id, row.sha, row.ord);
+    else db.prepare("UPDATE commit_context SET text = ? WHERE repo_id = ? AND sha = ? AND kind = 'prompt' AND ord = ?").run(clean, row.repo_id, row.sha, row.ord);
+    changed++;
+    touched.set(`${row.repo_id}\0${row.sha}`, { repoId: row.repo_id, sha: row.sha });
+  }
+  for (const { repoId, sha } of touched.values()) refreshWhy(db, repoId, sha);
+
+  // 노트 — 에이전트가 맥락을 붙여 넣어 섞인 자동 블록을 뗀다. 블록뿐인 노트는 지우지 않고 둔다(사용자가 남긴 기록이다)
+  const notes = db.prepare("SELECT id, text, tags FROM notes").all() as { id: number; text: string; tags: string }[];
+  const noteDoc = db.prepare("SELECT d.id, f.paths, f.code FROM docs d JOIN docs_fts f ON f.rowid = d.id WHERE d.kind = 'note' AND d.ref = ?");
+  for (const note of notes) {
+    const clean = stripSystemBlocks(note.text);
+    if (!clean || clean === note.text) continue;
+    db.prepare("UPDATE notes SET text = ? WHERE id = ?").run(clean, note.id);
+    changed++;
+    const doc = noteDoc.get(String(note.id)) as { id: number; paths: string; code: string | null } | undefined;
+    if (!doc) continue;
+    const { title, body } = noteDocFields(clean, note.tags);
+    db.prepare("DELETE FROM docs_fts WHERE rowid = ?").run(doc.id);
+    db.prepare("INSERT INTO docs_fts (rowid, title, body, paths, code) VALUES (?, ?, ?, ?, ?)").run(doc.id, title, body, doc.paths, doc.code ?? "");
+  }
+  return changed;
 }
 
 /** 직전 커밋 이후 이 세션·레포의 기록 */

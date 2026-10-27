@@ -198,10 +198,22 @@ export function recordEvent(
   );
 }
 
-/** 프롬프트 하나를 기록한다 — 슬래시 명령·빈 것은 버리고, 비밀을 지우고, 길이를 자른다 */
+/** 슬래시 명령 이름 — `/goal`·`/review`·`/plugin:skill` (경로 `/src/a.ts`는 아니다) */
+const SLASH_COMMAND = /^\/[A-Za-z][\w:-]*(?=\s|$)/;
+
+/**
+ * 프롬프트 하나를 기록한다 — 빈 것은 버리고, 비밀을 지우고, 길이를 자른다. 슬래시 명령은 이름을 떼고 뒤에 사용자의 말이
+ * 남을 때만(`/goal 완성도를 계속 올려라` → "완성도를 계속 올려라") — `/clear`·`/model x`·`/loop 5m /foo`처럼 설정·인자뿐이면 버린다.
+ */
 export function recordPrompt(db: DB, sessionId: string, repoId: number | null, prompt: string): boolean {
-  const cleaned = redact(prompt).trim();
-  if (!cleaned || cleaned.startsWith("/")) return false;
+  let cleaned = redact(prompt).trim();
+  const command = SLASH_COMMAND.exec(cleaned);
+  if (command) {
+    cleaned = cleaned.slice(command[0].length).trim();
+    const words = cleaned.split(/\s+/).filter((word) => word && !/^[/-]/.test(word));
+    if (words.length < 2) return false;
+  }
+  if (!cleaned) return false;
   recordEvent(db, { sessionId, repoId, kind: "prompt", text: cleaned.slice(0, PROMPT_MAX) });
   return true;
 }

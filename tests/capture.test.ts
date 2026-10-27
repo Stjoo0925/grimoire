@@ -415,3 +415,12 @@ test("reRedactStored(마이그레이션 8): 옛 버전이 저장한 프롬프트
   assert.ok(search(db, "결제 재시도 테스트").hits.length > 0, "나머지 말은 그대로 검색된다");
   assert.equal(reRedactStored(db), 0, "두 번째는 바꿀 것이 없다");
 });
+
+test("recordPrompt: 슬래시 명령은 뒤에 사용자의 말이 있을 때만 그 말을 남긴다, 경로로 시작하는 말은 그대로", async () => {
+  const db = memoryDb();
+  const texts = () => (db.prepare("SELECT text FROM session_events WHERE session_id = 'slash' ORDER BY id").all() as { text: string }[]).map((row) => row.text);
+  for (const prompt of ["/clear", "/model claude-opus-5-5", "/loop 5m /foo", "/review 123", "/goal 완성도를 계속 올려라", "/src/a.ts 이 파일의 경계값을 고쳐", "/plugin:skill 결제 재시도 로직 정리해 줘"]) {
+    recordPrompt(db, "slash", null, prompt);
+  }
+  assert.deepEqual(texts(), ["완성도를 계속 올려라", "/src/a.ts 이 파일의 경계값을 고쳐", "결제 재시도 로직 정리해 줘"]);
+});

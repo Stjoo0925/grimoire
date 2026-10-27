@@ -372,3 +372,35 @@ test("doctor: hook.log의 최근 오류만 센다 (7일 밖은 무시)", async (
   );
   assert.deepEqual(recentHookErrors(home, now), { count: 2, last: "2026-10-26T12:00:00.000Z bad stdin: Unexpected token" });
 });
+
+test("doctor: 업그레이드로 비워진 공변경 이력을 sync 전까지 알린다", async () => {
+  const { addRepo, syncRepo } = await import("../src/core/indexer.js");
+  const home = tempDir();
+  const env = { GRIMOIRE_HOME: path.join(home, ".grimoire"), GRIMOIRE_ME: "me@example.com" };
+  const offline = (async () => {
+    throw new Error("down");
+  }) as unknown as typeof fetch;
+  const repoDir = makeRepo([{ message: "fix: 결제와 영수증을 함께", files: { "src/pay.ts": "a", "src/receipt.ts": "b" } }], "cochange-doctor");
+  const db = openDb(path.join(env.GRIMOIRE_HOME, "grimoire.db"));
+  const repo = await addRepo(db, repoDir);
+  await syncRepo(db, repo);
+  const title = "공변경 이력을 다시 계산해야 하는 레포";
+  db.close();
+  let checks = await doctor({ cliPath: fakeCli(), env, home, fetchImpl: offline });
+  assert.ok(!checks.some((c) => c.title.includes(title)), "sync 직후에는 조용해야 합니다");
+
+  // 마이그레이션 7처럼 표를 비운다 → 경고, sync로 다시 채우면 사라진다
+  const again = openDb(path.join(env.GRIMOIRE_HOME, "grimoire.db"));
+  again.exec("DELETE FROM cochange; DELETE FROM file_touches;");
+  again.close();
+  checks = await doctor({ cliPath: fakeCli(), env, home, fetchImpl: offline });
+  const warn = checks.find((c) => c.title.includes(title));
+  assert.equal(warn?.level, "warn", formatChecks(checks));
+  assert.equal(warn?.detail, "cochange-doctor");
+
+  const fixDb = openDb(path.join(env.GRIMOIRE_HOME, "grimoire.db"));
+  await syncRepo(fixDb, fixDb.prepare("SELECT * FROM repos").get() as never);
+  fixDb.close();
+  checks = await doctor({ cliPath: fakeCli(), env, home, fetchImpl: offline });
+  assert.ok(!checks.some((c) => c.title.includes(title)), formatChecks(checks));
+});

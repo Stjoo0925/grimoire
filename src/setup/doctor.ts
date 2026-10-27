@@ -7,6 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { dbPath, grimoireHome, type Env } from "../core/config";
+import { needsCochangeBackfill } from "../core/context";
 import { loadSqlite, MIN_NODE, openDb } from "../core/db";
 import { runGit } from "../core/git";
 import { myEmails } from "../core/identity";
@@ -103,6 +104,16 @@ export async function doctor(options: DoctorOptions): Promise<Check[]> {
           const neverSynced = repos.filter((repo) => !repo.synced_at);
           if (neverSynced.length > 0) {
             checks.push({ level: "warn", title: `한 번도 동기화되지 않은 레포 ${neverSynced.length}개`, fix: "grimoire sync" });
+          }
+          // 업그레이드(마이그레이션)가 공변경 표를 비운 뒤 아직 sync가 안 돈 레포 — 그동안 편집 직전 훅은 아무 맥락도 못 준다
+          const stale = repos.filter((repo) => repo.synced_at && needsCochangeBackfill(db, repo.id));
+          if (stale.length > 0) {
+            checks.push({
+              level: "warn",
+              title: `공변경 이력을 다시 계산해야 하는 레포 ${stale.length}개 — 그때까지 편집 직전 맥락이 비어 있습니다`,
+              detail: stale.map((repo) => repo.name).join(", "),
+              fix: "grimoire sync",
+            });
           }
           // 예전 버전은 git worktree(Claude Code의 .claude/worktrees/<세션>)를 따로 등록했다 — 같은 커밋이 겹쳐 색인된다
           const worktrees = await worktreeRegistrations(db);

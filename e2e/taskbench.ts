@@ -2,7 +2,8 @@
  * 작업 완수 벤치 — "실제 수정 작업을 Grimoire가 있을 때 더 싸게, 회귀 없이 끝내나" (docs/enhancement-plan.md §3-4).
  *
  * 1) 채굴: 자기 레포의 과거 fix 커밋 중, 부모에서(테스트 패치만 적용하면) 실패하고 그 커밋에서 통과하는 것을 고른다.
- *    npm run taskbench -- --mine --repo ~/work/foo --test "npm test" [--limit 40] [--out bench/tasks.local.json]
+ *    npm run taskbench -- --mine --repo ~/work/foo --test "npm test" [--limit 40] [--all] [--out bench/tasks.local.json]
+ *    --all: 브랜치 커밋까지 본다 (squash 머지 레포용, 같은 변경의 중복은 한 번만)
  *    사람이 tasks.local.json의 `prompt`를 증상 서술로 다듬는다 (기본값은 커밋 제목 — 수정 힌트가 들어 있을 수 있다).
  *
  * 2) 실행: 사례마다 부모 커밋의 임시 worktree에서 claude -p를 두 모드로 돌린다.
@@ -121,10 +122,17 @@ function worktree(repo: string, sha: string): { dir: string; remove: () => void 
 
 /* ── 채굴 ───────────────────────────────────────────────── */
 
-function mine(repo: string, test: string, limit: number, existing: Task[]): Task[] {
+/** 같은 변경인가 — squash 머지 커밋과 브랜치의 원본 커밋은 제목(PR 번호 접미 제외)과 변경 파일 집합이 같다 */
+function changeKey(subject: string, files: string[]): string {
+  return `${subject.replace(/\s*\(#\d+\)\s*$/, "").trim()}\0${[...files].sort().join("\n")}`;
+}
+
+function mine(repo: string, test: string, limit: number, existing: Task[], all = false): Task[] {
   const known = new Set(existing.map((task) => task.sha));
-  const log = git(repo, ["log", "--no-merges", "--format=%H%x1f%P%x1f%s", "-n", "2000"]).trim().split("\n");
+  // --all: 브랜치·원격 브랜치의 커밋까지 — PR을 squash로 합치는 레포는 main만 보면 후보가 적다
+  const log = git(repo, ["log", ...(all ? ["--all"] : []), "--no-merges", "--format=%H%x1f%P%x1f%s", "-n", "2000"]).trim().split("\n");
   const tasks: Task[] = [...existing];
+  const seen = new Set(existing.map((task) => changeKey(task.subject, [...task.files, ...task.testFiles])));
   let scanned = 0;
   for (const line of log) {
     if (tasks.length - existing.length >= limit) break;
@@ -139,6 +147,10 @@ function mine(repo: string, test: string, limit: number, existing: Task[]): Task
     const testFiles = changed.filter((file) => TEST_PATH.test(file));
     const files = changed.filter((file) => !TEST_PATH.test(file));
     if (testFiles.length === 0 || files.length === 0) continue;
+    // 같은 변경이 커밋 둘로 남은 것(squash 머지 ↔ 브랜치 원본)은 한 번만
+    const key = changeKey(subject, changed);
+    if (seen.has(key)) continue;
+    seen.add(key);
     const numstat = git(repo, ["show", "--format=", "--numstat", sha, "--", ...files]);
     const nonTestLines = numstat
       .trim()
@@ -359,6 +371,7 @@ async function main(): Promise<number> {
       repo: { type: "string" },
       test: { type: "string" },
       limit: { type: "string" },
+      all: { type: "boolean" },
       out: { type: "string" },
       tasks: { type: "string" },
       seeds: { type: "string" },
@@ -376,7 +389,7 @@ async function main(): Promise<number> {
     const repo = path.resolve(expandHome(values.repo));
     const out = path.resolve(values.out ?? "bench/tasks.local.json");
     const existing: TaskFile = fs.existsSync(out) ? (JSON.parse(fs.readFileSync(out, "utf8")) as TaskFile) : { tasks: [] };
-    const tasks = mine(repo, values.test, Number.parseInt(values.limit ?? "40", 10) || 40, existing.tasks);
+    const tasks = mine(repo, values.test, Number.parseInt(values.limit ?? "40", 10) || 40, existing.tasks, values.all === true);
     fs.mkdirSync(path.dirname(out), { recursive: true });
     fs.writeFileSync(out, JSON.stringify({ tasks }, null, 2) + "\n");
     process.stdout.write(`${out}: 사례 ${tasks.length}개. 각 사례의 "prompt"를 증상 서술로 다듬으세요(비면 커밋 제목을 씁니다 — 수정 힌트가 샐 수 있습니다).\n`);

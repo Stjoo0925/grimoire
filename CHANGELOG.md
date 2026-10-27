@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.1](https://github.com/Stjoo0925/grimoire/compare/v0.8.0...v0.8.1) (2026-10-27)
+
+
+### 버그 수정
+
+* **capture:** Claude Code의 자동 블록을 사용자 프롬프트로 저장하지 않는다 ([#25](https://github.com/Stjoo0925/grimoire/issues/25)) ([07cef58](https://github.com/Stjoo0925/grimoire/commit/07cef5855014e204893eeb67c65bee2e0d745647))
+
 ## [0.8.0](https://github.com/Stjoo0925/grimoire/compare/v0.7.1...v0.8.0) (2026-10-27)
 
 

@@ -24,7 +24,7 @@ import { fileContext, formatFileContext } from "./core/context";
 import { openDb, type DB } from "./core/db";
 import { myEmails, resolveAuthors } from "./core/identity";
 import { indexCommitCode } from "./core/diffs";
-import { addRepo, discoverRepos, listRepos, matchRepos, relativeToRepo, removeRepo, repoOfPath, syncRepo, type RepoRow } from "./core/indexer";
+import { addRepo, discoverRepos, listRepos, matchRepos, relativeToRepo, removeRepo, resolveRepoFile, syncRepo, type RepoRow } from "./core/indexer";
 import { addNote } from "./core/notes";
 import { commitDetail, repoOverview, repoSummaries } from "./core/overview";
 import { search } from "./core/search";
@@ -163,10 +163,12 @@ async function main(argv: string[]): Promise<number> {
         return 0;
       }
       case "context": {
-        const target = need(positionals[0], "파일 경로");
-        const repo = values.repo ? requireRepo(db, values.repo) : repoOfPath(db, path.resolve(target)) ?? repoOfPath(db, path.resolve(process.cwd()));
+        const target = path.resolve(need(positionals[0], "파일 경로"));
+        // 레포 밖 워크트리에서 불러도 본 레포의 기억을 쓴다 (resolveRepoFile)
+        const located = values.repo ? null : await resolveRepoFile(db, target);
+        const repo = values.repo ? requireRepo(db, values.repo) : located?.repo;
         if (!repo) throw new UsageError("어느 레포의 파일인지 알 수 없습니다 — --repo로 지정하세요");
-        const context = fileContext(db, repo.id, relativeToRepo(repo.path, path.isAbsolute(target) ? target : path.resolve(target)));
+        const context = fileContext(db, repo.id, located?.relative ?? relativeToRepo(repo.path, target));
         if (values.json) return printJson(context);
         print(formatFileContext(context, { me: await myEmails(), budget: 2000 }) || `${context.path}: 이력에서 더 알려 줄 것이 없습니다`);
         return 0;

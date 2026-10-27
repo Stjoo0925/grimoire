@@ -33,7 +33,7 @@ import { grimoireHome, type Env } from "../core/config";
 import { fileContext, formatFileContext, TEST_PATH, HOOK_BUDGET } from "../core/context";
 import type { DB } from "../core/db";
 import { addedLines, headSha } from "../core/git";
-import { indexCommitSha, relativeToRepo, repoOfPath, type RepoRow } from "../core/indexer";
+import { indexCommitSha, resolveRepoFile, type RepoRow } from "../core/indexer";
 
 /** 훅이 돌려주는 것 — Claude Code 규약(JSON은 hookSpecificOutput, 일부 이벤트는 plain stdout) */
 export interface HookOutput {
@@ -165,24 +165,28 @@ function captureOn(context: HookContext, input: HookInput): boolean {
   return context.env.GRIMOIRE_CAPTURE !== "0" && !input.agent_id;
 }
 
-function sessionRepo(context: HookContext, input: HookInput): RepoRow | undefined {
-  return input.cwd ? repoOfPath(context.db, input.cwd) : undefined;
+/** 세션의 작업 폴더가 속한 등록 레포 — 레포 밖의 추가 작업 트리(git worktree)면 본 레포 */
+async function sessionRepo(context: HookContext, input: HookInput): Promise<RepoRow | undefined> {
+  return input.cwd ? (await resolveRepoFile(context.db, input.cwd))?.repo : undefined;
 }
 
-function userPromptSubmit(context: HookContext, input: HookInput): HookOutput | null {
+async function userPromptSubmit(context: HookContext, input: HookInput): Promise<HookOutput | null> {
   if (!captureOn(context, input) || typeof input.prompt !== "string" || !input.session_id) return null;
-  recordPrompt(context.db, input.session_id, sessionRepo(context, input)?.id ?? null, input.prompt);
+  recordPrompt(context.db, input.session_id, (await sessionRepo(context, input))?.id ?? null, input.prompt);
   return null;
 }
 
 async function postToolUse(context: HookContext, input: HookInput): Promise<HookOutput | null> {
   if (!captureOn(context, input) || !input.session_id) return null;
-  const repo = sessionRepo(context, input);
+  const repo = await sessionRepo(context, input);
   if (!repo) return null;
   if (EDIT_TOOLS.has(input.tool_name ?? "")) {
     const file = editedPath(input);
     if (!file) return null;
-    const relative = relativeToRepo(repo.path, file);
+    // 세션 레포의 파일만 — 다른 레포 파일을 고친 것은 이 세션의 커밋에 묶이지 않는다
+    const resolved = await resolveRepoFile(context.db, file);
+    if (!resolved || resolved.repo.id !== repo.id) return null;
+    const relative = resolved.relative;
     const added = newText(input.tool_input ?? {});
     recordEvent(context.db, { sessionId: input.session_id, repoId: repo.id, kind: "edit", text: relative, path: relative, lineHashes: lineHashes(added) });
     return null;
@@ -207,11 +211,14 @@ async function postToolUse(context: HookContext, input: HookInput): Promise<Hook
     }
   }
   if (isGitCommit(command) && commitSucceeded(input.tool_response)) {
-    const sha = await headSha(repo.path);
+    // 커밋은 명령이 돈 작업 폴더의 HEAD다 — 워크트리에서 일하는 세션이면 본 레포 폴더의 HEAD와 다르다
+    // (본 레포 폴더에서 읽으면 세션 기록이 엉뚱한 커밋에 묶인다). 커밋 저장소는 같으므로 색인은 본 레포로 한다
+    const where = input.cwd ?? repo.path;
+    const sha = await headSha(where);
     if (!sha) return null;
     // 커밋을 바로 색인해 두면(다음 동기화를 기다리지 않고) 묶을 수 있고 검색에도 바로 걸린다
     const files = (await indexCommitSha(context.db, repo, sha)) ?? [];
-    const addedHashes = new Set(lineHashes((await addedLines(repo.path, sha)).join("\n")));
+    const addedHashes = new Set(lineHashes((await addedLines(where, sha)).join("\n")));
     bindToCommit(context.db, { sessionId: input.session_id, repoId: repo.id, sha, files, addedHashes });
   }
   return null;
@@ -275,11 +282,11 @@ const START_BUDGET = 600;
  * SessionStart(startup·clear·compact): 작업 레포의 "지난 세션 이후 내 커밋 + 묶인 왜 + 커밋 안 된 편집"을 600자 안에
  * plain stdout으로 (이 이벤트는 stdout이 그대로 컨텍스트가 된다). resume은 세션 파일을 이어 쓸 뿐 다시 내지 않는다.
  */
-function sessionStart(context: HookContext, input: HookInput): HookOutput | null {
+async function sessionStart(context: HookContext, input: HookInput): Promise<HookOutput | null> {
   pruneSessions(context.env);
   pruneEvents(context.db);
   if (input.source === "resume") return null;
-  const repo = sessionRepo(context, input);
+  const repo = await sessionRepo(context, input);
   if (!repo) return null;
   const mine = context.me.map((email) => email.toLowerCase());
   const recent = context.db
@@ -313,13 +320,14 @@ function sessionStart(context: HookContext, input: HookInput): HookOutput | null
   return { stdout: text };
 }
 
-function preToolUse(context: HookContext, input: HookInput): HookOutput | null {
+async function preToolUse(context: HookContext, input: HookInput): Promise<HookOutput | null> {
   if (!input.tool_name || !EDIT_TOOLS.has(input.tool_name)) return null;
   const file = editedPath(input);
   if (!file) return null;
-  const repo = repoOfPath(context.db, file);
-  if (!repo) return null;
-  const relative = relativeToRepo(repo.path, file);
+  // 레포 폴더 안이면 git을 부르지 않는다. 레포 밖 워크트리의 파일이면 git 한 번으로 본 레포를 찾는다
+  const resolved = await resolveRepoFile(context.db, file);
+  if (!resolved) return null;
+  const { repo, relative } = resolved;
   // 테스트·생성·비소스 파일은 건너뛴다 — 맥락을 줄 가치가 낮고 매 편집마다 글자를 쓴다
   if (TEST_PATH.test(relative) || !isIndexable(relative, 0)) return null;
 

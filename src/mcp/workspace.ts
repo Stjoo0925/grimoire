@@ -16,7 +16,7 @@ import path from "node:path";
 
 import type { Env } from "../core/config";
 import type { DB } from "../core/db";
-import { repoRoot } from "../core/git";
+import { mainRepoRoot } from "../core/git";
 import { indexCommitCode } from "../core/diffs";
 import { addRepo, syncRepo, type RepoRow } from "../core/indexer";
 
@@ -76,7 +76,8 @@ export function isTempPath(dir: string): boolean {
 }
 
 export async function resolveWorkspaceRoot(cwd: string, env: Env = process.env): Promise<string | null> {
-  const root = await repoRoot(cwd);
+  // Claude Code는 세션마다 git worktree(.claude/worktrees/<이름>)에서 서버를 띄운다 — 본 레포로 묶어 한 번만 등록한다
+  const root = await mainRepoRoot(cwd);
   if (!root) return null;
   const resolved = path.resolve(root);
   if (resolved === path.parse(resolved).root || resolved === path.resolve(os.homedir())) return null;

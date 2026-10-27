@@ -10,7 +10,7 @@ import { dbPath, grimoireHome, type Env } from "../core/config";
 import { loadSqlite, MIN_NODE, openDb } from "../core/db";
 import { runGit } from "../core/git";
 import { myEmails } from "../core/identity";
-import { listRepos } from "../core/indexer";
+import { listRepos, worktreeRegistrations } from "../core/indexer";
 import { compareVersions, RELEASES_URL, refreshUpdateCache, updateCheckEnabled, VERSION } from "../core/update";
 import { parseHookCommand, readInstalledHooks, settingsPath } from "./hooks";
 import { CLIENTS, configPath, hasCommand, readInstalled, run, SERVER_NAME, staleDesktopConfigs } from "./install";
@@ -103,6 +103,18 @@ export async function doctor(options: DoctorOptions): Promise<Check[]> {
           const neverSynced = repos.filter((repo) => !repo.synced_at);
           if (neverSynced.length > 0) {
             checks.push({ level: "warn", title: `한 번도 동기화되지 않은 레포 ${neverSynced.length}개`, fix: "grimoire sync" });
+          }
+          // 예전 버전은 git worktree(Claude Code의 .claude/worktrees/<세션>)를 따로 등록했다 — 같은 커밋이 겹쳐 색인된다
+          const worktrees = await worktreeRegistrations(db);
+          if (worktrees.length > 0) {
+            checks.push({
+              level: "warn",
+              title: `다른 레포의 git worktree가 따로 등록돼 있습니다 (${worktrees.length}개) — 같은 커밋이 검색에 겹쳐 나옵니다`,
+              detail: worktrees.map((item) => `${item.repo.name} → 본 레포 ${item.main}${item.mainRegistered ? "" : " (미등록)"}`).join("\n    "),
+              fix: worktrees
+                .map((item) => (item.mainRegistered ? `grimoire remove ${item.repo.name}` : `grimoire remove ${item.repo.name} && grimoire add "${item.main}"`))
+                .join("  /  "),
+            });
           }
         }
       } finally {

@@ -24,9 +24,10 @@ import {
   readCommits,
   readFileAtHead,
   refTips,
+  mainRepoRoot,
   remoteUrl,
-  repoRoot,
   throwIfCancelled,
+  worktreeRoots,
   type GitCommit,
 } from "./git";
 import { isMeaningfulSubject } from "./meaningful";
@@ -72,7 +73,8 @@ export interface SyncResult {
 }
 
 export async function addRepo(db: DB, dir: string, signal?: AbortSignal): Promise<RepoRow> {
-  const root = await repoRoot(path.resolve(dir), signal);
+  // 추가 작업 트리(git worktree)면 본 레포로 등록한다 — 커밋 저장소가 같아 따로 두면 같은 기억이 세션 수만큼 쌓인다
+  const root = await mainRepoRoot(path.resolve(dir), signal);
   if (!root) throw new Error(`git 레포가 아닙니다: ${dir}`);
 
   const existing = db.prepare("SELECT * FROM repos WHERE path = ?").get(root) as
@@ -136,6 +138,62 @@ const NESTED_WORKTREE = /^\.claude\/worktrees\/[^/]+\//;
 export function relativeToRepo(repoPath: string, target: string): string {
   const relative = path.isAbsolute(target) ? path.relative(repoPath, path.resolve(target)) : target;
   return relative.split(path.sep).join("/").replace(/^\.\//, "").replace(NESTED_WORKTREE, "");
+}
+
+/** 있는 가장 가까운 폴더 (새로 만들 파일·폴더면 위로 올라간다) */
+function existingDir(target: string): string | null {
+  let dir = path.resolve(target);
+  for (;;) {
+    try {
+      if (fs.statSync(dir).isDirectory()) return dir;
+    } catch {
+      // 아직 없음
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+export interface RepoFile {
+  repo: RepoRow;
+  /** 색인과 같은 꼴의 레포 기준 경로 (폴더면 "" 또는 그 폴더 경로) */
+  relative: string;
+}
+
+/**
+ * 절대경로 → 등록 레포와 레포 기준 경로. 등록 레포 폴더 안(`.claude/worktrees/x/` 포함)이면 git을 부르지 않는다.
+ * 레포 밖에 만든 추가 작업 트리(git worktree)의 파일이면 git으로 본 레포를 찾아 그 작업 트리 기준 경로로 푼다 —
+ * 훅·file_context가 워크트리에서 일하는 세션에도 같은 기억을 쓰게. 해당 없으면 null.
+ */
+export async function resolveRepoFile(db: DB, target: string, signal?: AbortSignal): Promise<RepoFile | null> {
+  if (!path.isAbsolute(target)) return null;
+  const direct = repoOfPath(db, target);
+  if (direct) return { repo: direct, relative: relativeToRepo(direct.path, target) };
+  const dir = existingDir(target);
+  if (!dir) return null;
+  const roots = await worktreeRoots(dir, signal);
+  if (!roots || roots.main === roots.top) return null;
+  const repo = db.prepare("SELECT * FROM repos WHERE path = ?").get(roots.main) as RepoRow | undefined;
+  if (!repo) return null;
+  return { repo, relative: path.relative(roots.top, path.resolve(target)).split(path.sep).join("/") };
+}
+
+/**
+ * 등록된 레포 중 다른 레포의 추가 작업 트리인 것 — 예전 버전이 워크트리를 따로 등록했던 흔적 (doctor가 알린다).
+ * 본 레포도 등록돼 있으면 같은 커밋이 두 번 색인돼 검색에 겹쳐 나온다.
+ */
+export async function worktreeRegistrations(db: DB): Promise<{ repo: RepoRow; main: string; mainRegistered: boolean }[]> {
+  const repos = listRepos(db);
+  const registered = new Set(repos.map((repo) => repo.path));
+  const out: { repo: RepoRow; main: string; mainRegistered: boolean }[] = [];
+  for (const repo of repos) {
+    if (!fs.existsSync(repo.path)) continue;
+    const roots = await worktreeRoots(repo.path);
+    if (!roots || roots.main === roots.top || path.resolve(roots.top) !== path.resolve(repo.path)) continue;
+    out.push({ repo, main: roots.main, mainRegistered: registered.has(roots.main) });
+  }
+  return out;
 }
 
 /** 이름·경로·원격 URL 일부로 레포 하나를 찾는다. 정확한 일치가 우선이고, 부분 일치가 여럿이면(모호) null. */

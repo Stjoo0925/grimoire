@@ -22,7 +22,7 @@ import { isBusyError, type DB } from "../core/db";
 import { resolveAuthors } from "../core/identity";
 import { indexCommitCode } from "../core/diffs";
 import { CancelledError } from "../core/git";
-import { addRepo, discoverRepos, listRepos, matchRepos, relativeToRepo, repoOfPath, syncRepo } from "../core/indexer";
+import { addRepo, discoverRepos, listRepos, matchRepos, relativeToRepo, resolveRepoFile, syncRepo } from "../core/indexer";
 import { addNote, TAG_CHARS, TAGS_MAX } from "../core/notes";
 import { commitDetail, repoOverview, repoSummaries } from "../core/overview";
 import { search, type SearchHit } from "../core/search";
@@ -346,10 +346,12 @@ async function runTool(context: ToolContext, name: string, args: Args, signal: A
     case "file_context": {
       const target = str(args.path);
       if (!target) throw new ToolError("path가 필요합니다");
-      // 레포를 안 주면 작업 레포, 그것도 없으면 경로가 속한 등록 레포(절대경로일 때)
-      const repo = repoFilter(args.repo) ?? current ?? repoOfPath(db, target);
+      // 절대경로면 그 경로가 속한 등록 레포(레포 밖 워크트리면 본 레포), 아니면 repo 인자, 그것도 없으면 작업 레포
+      const explicit = repoFilter(args.repo);
+      const located = !explicit && path.isAbsolute(target) ? await resolveRepoFile(db, target, signal) : null;
+      const repo = explicit ?? located?.repo ?? current;
       if (!repo) throw new ToolError("repo가 필요합니다 (어느 레포의 파일인지 알 수 없습니다)");
-      const relative = relativeToRepo(repo.path, target);
+      const relative = located?.relative ?? relativeToRepo(repo.path, target);
       if (current) await context.workspace?.refresh?.(current, REFRESH_WAIT_MS);
       return slimFileContext(fileContext(db, repo.id, relative), me, args.verbose === true);
     }

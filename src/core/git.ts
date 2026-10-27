@@ -104,6 +104,35 @@ export function runGit(
 }
 
 /** 경로가 속한 작업 트리의 최상위 디렉터리. git 레포가 아니면 null. */
+/**
+ * 작업 트리의 최상위(top)와, 그것이 `git worktree`로 만든 추가 작업 트리라면 본 레포의 최상위(main).
+ * 추가 작업 트리는 커밋 저장소(--git-common-dir)를 본 레포와 함께 쓰므로, 기억은 본 레포 하나로 묶는다 —
+ * Claude Code는 세션마다 `.claude/worktrees/<이름>`을 만들어서, 그대로 두면 같은 레포가 세션 수만큼 등록된다.
+ * 서브모듈(common dir이 `.git/modules/x`)이나 bare 레포는 main = top. git 레포가 아니면 null.
+ */
+export async function worktreeRoots(dir: string, signal?: AbortSignal): Promise<{ top: string; main: string } | null> {
+  let out: string;
+  try {
+    out = await runGit(dir, ["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"], undefined, signal);
+  } catch (error) {
+    if (error instanceof CancelledError) throw error;
+    // --path-format은 git 2.31부터 — 옛 git이거나 레포가 아니면 최상위만
+    const top = await repoRoot(dir, signal);
+    return top ? { top, main: top } : null;
+  }
+  const [topLine, commonLine] = out.trim().split(/\r?\n/);
+  if (!topLine) return null;
+  const top = path.resolve(topLine);
+  const common = commonLine ? path.resolve(commonLine) : "";
+  const main = common && path.basename(common) === ".git" ? path.dirname(common) : top;
+  return { top, main };
+}
+
+/** 본 레포의 최상위 — 추가 작업 트리 안이면 본 레포로 올라간다 (worktreeRoots) */
+export async function mainRepoRoot(dir: string, signal?: AbortSignal): Promise<string | null> {
+  return (await worktreeRoots(dir, signal))?.main ?? null;
+}
+
 export async function repoRoot(dir: string, signal?: AbortSignal): Promise<string | null> {
   try {
     return path.resolve((await runGit(dir, ["rev-parse", "--show-toplevel"], undefined, signal)).trim());

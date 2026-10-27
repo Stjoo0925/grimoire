@@ -273,7 +273,7 @@ Gives real Claude (`claude -p`) **only a question** and scores whether it picks 
 | `cochange` | Built-in tools on, inside a repo where `refresh.ts` and `session.ts` always change together: asked to change only `refresh.ts`, does it mention or check `session.ts`? Run with `--no-hooks` for the control group |
 
 ```bash
-npm run e2e:agent                     # all three cases (about $0.2 per run)
+npm run e2e:agent                     # all cases (subscription usage; ~$0.2 API-equivalent per run)
 npm run e2e:agent -- --repeat 3       # to see variance between runs
 npm run e2e:agent -- --case recall --model sonnet
 ```
@@ -281,7 +281,7 @@ npm run e2e:agent -- --case recall --model sonnet
 - Claude Code must be installed and logged in. macOS keeps the login in Keychain, so a sandboxed shell that can't reach
   Keychain reports "not logged in". Run it from a normal terminal.
 - All built-in tools are off (`--tools ""`), so the agent can't read the fixtures with git. Its only evidence is what came through Grimoire.
-- The DB is a temp folder and `--strict-mcp-config` ignores your MCP settings. Cost is capped at $0.50 per case.
+- The DB is a temp folder and `--strict-mcp-config` ignores your MCP settings. Runs on your subscription login by default (no extra charge, uses plan limits); `--bare` switches to an API key and per-token billing. The `--max-budget-usd` cap is $0.50 per case.
 
 ### Pinpoint benchmark (`e2e/bench.ts`)
 
@@ -313,8 +313,8 @@ npm run taskbench -- --run --tasks bench/tasks.local.json --seeds 3             
 ```
 
 - **Mining** keeps a fix commit only if the test patch alone fails on the parent (3 runs) and the whole commit passes (3 runs) — flaky tests are dropped. Filters: non-merge, 1–15 files, ≥1 test file and ≥1 source file, ≤100 non-test lines, no dependency-file changes. Expect roughly 5–10% of test-touching commits to qualify. Then edit each task's `prompt` into a symptom description (the default is the commit subject, which may leak the fix).
-- **Running** gives `claude -p --bare` the prompt in a fresh worktree at the parent commit. In `grimoire` mode the temp index sees only commits up to the parent (time masking) and the edit-time hook is passed via `--settings`. Scoring applies the real test patch (`pass`), then the parent's tests (`p2p_broken`), and compares edited files with the real fix (`stray`, `missed`), plus billed cost from `total_cost_usd`/`modelUsage`, turns, reverted edits and churn ratio.
-- The summary pairs runs per task and seed; cost and turns are compared on pairs both modes solved (`_ok`), with a Wilcoxon signed-rank p. The acceptance criteria are fixed before looking (§3-4): pass rate not lower, no more regressions, and billed cost or turns down 15%+ or `missed`/`p2p_broken` significantly down. Budget: about $0.5–1.5 per run; pilot with 10 tasks × 1 seed first.
+- **Running** gives `claude -p` the prompt in a fresh worktree at the parent commit. By default it runs on your Claude subscription login (Pro/Max): no extra charge, but it uses your plan's usage limits, and the `$` in the results is only the API-equivalent estimate. Your own `~/.claude` settings apply equally to both modes; a globally installed Grimoire hook is switched off with `GRIMOIRE_HOOKS=0` so it can't leak into the control group or capture benchmark prompts into your real database. `--bare` gives a cleaner comparison with all user settings off, but per the docs it needs `ANTHROPIC_API_KEY` and is billed per token. In `grimoire` mode the temp index sees only commits up to the parent (time masking) and the edit-time hook is passed via `--settings`. Scoring applies the real test patch (`pass`), then the parent's tests (`p2p_broken`), and compares edited files with the real fix (`stray`, `missed`), plus billed cost from `total_cost_usd`/`modelUsage`, turns, reverted edits and churn ratio.
+- The summary pairs runs per task and seed; cost and turns are compared on pairs both modes solved (`_ok`), with a Wilcoxon signed-rank p. The acceptance criteria are fixed before looking (§3-4): pass rate not lower, no more regressions, and billed cost or turns down 15%+ or `missed`/`p2p_broken` significantly down. Size: a pilot of 10 tasks × 1 seed is 20 runs; the full 40 × 3 × 2 is 240 runs and will eat a large share of a subscription's usage limits.
 
 ### Cutting a release
 

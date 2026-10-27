@@ -8,7 +8,8 @@
  *   npm run e2e:agent -- --model sonnet
  *   npm run e2e:agent -- --case cochange [--no-hooks]   편집 직전 훅 사례 — --no-hooks는 훅 없는 대조군
  *
- * - Claude Code가 설치·로그인돼 있어야 한다. 실행마다 API 사용량이 든다(사례당 상한 --max-budget-usd).
+ * - Claude Code가 설치·로그인돼 있어야 한다. 기본은 구독 로그인으로 돌아 추가 요금 없이 구독 사용량을 쓴다
+ *   (--bare를 주면 API 키로 돌아 토큰당 과금). 사례당 상한 --max-budget-usd.
  * - 내장 도구는 모두 끈다(`--tools ""`). 에이전트가 git으로 픽스처를 직접 읽어 "커닝"하지 못하게 —
  *   답의 근거는 Grimoire MCP를 거친 것뿐이다.
  * - DB는 임시 폴더, MCP 설정은 --strict-mcp-config로 이 하네스의 것만 쓴다(사용자 설정 무시).
@@ -145,6 +146,7 @@ async function main(): Promise<number> {
       model: { type: "string" },
       json: { type: "boolean" },
       "no-hooks": { type: "boolean" },
+      bare: { type: "boolean" },
     },
   });
   const cases = values.case ? CASES.filter((item) => item.name === values.case) : CASES;
@@ -173,7 +175,7 @@ async function main(): Promise<number> {
       let settings: string | undefined;
       if (item.inRepo && !values["no-hooks"]) {
         const hook = path.join(path.dirname(cli), "hook.js");
-        const command = `"${process.execPath.split(path.sep).join("/")}" "${hook.split(path.sep).join("/")}" --env "GRIMOIRE_HOME=${data.split(path.sep).join("/")}" --env "GRIMOIRE_ME=${ME}"`;
+        const command = `"${process.execPath.split(path.sep).join("/")}" "${hook.split(path.sep).join("/")}" --env "GRIMOIRE_HOME=${data.split(path.sep).join("/")}" --env "GRIMOIRE_ME=${ME}" --env "GRIMOIRE_HOOKS=1"`;
         settings = path.join(workdir, "settings.json");
         fs.writeFileSync(settings, JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Edit|Write|MultiEdit", hooks: [{ type: "command", command, timeout: 5 }] }] } }));
       }
@@ -189,7 +191,9 @@ async function main(): Promise<number> {
         budgetUsd: BUDGET_USD,
         timeoutMs: CASE_TIMEOUT_MS,
         settings,
-        bare: item.inRepo,
+        // 기본은 구독 로그인(--bare는 API 키·토큰당 과금). 사용자 전역 grimoire 훅은 끄고 이 실행의 훅만 켠다
+        bare: values.bare === true,
+        env: { GRIMOIRE_HOOKS: "0" },
         permissionMode: item.inRepo ? "acceptEdits" : undefined,
       });
       const problems = run.error ? [run.error] : item.judge(run, shas);

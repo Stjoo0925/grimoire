@@ -232,7 +232,7 @@ Fixes(90d): 3 of 7 commits — 7a392cfe3c "fix(search): …"
 4. 기대 수율은 테스트를 건드린 커밋의 5~10%(SWE-rebench V2 7.1%). 사례 40개를 얻으려면 후보 500~1,000개를 훑어야 한다. 처음엔 10개로 파일럿.
 5. 문제 서술 = 3-3이 묶어 둔 당시 사용자 프롬프트가 있으면 그것, 없으면 커밋 제목이 아닌 **증상 서술**을 손으로. 수정 힌트는 지운다.
 
-**실행**: 사례마다 부모 커밋의 임시 worktree에서 `claude -p --bare --output-format json`(훅·CLAUDE.md·MCP 설정을 모두 끄고, Grimoire만 `--mcp-config`로, 훅은 `--settings`로 명시). `--max-turns`·`--max-budget-usd` 고정, `CLAUDE_CODE_PROMPT_CACHE_TTL=5m`을 두 모드에 같게, 매 실행 새 세션(`--resume` 금지: 세션 누적 비용이 섞인다).
+**실행**: 사례마다 부모 커밋의 임시 worktree에서 `claude -p --output-format json`(Grimoire만 `--mcp-config --strict-mcp-config`로, 훅은 `--settings`로 명시). 기본은 **구독 로그인** — 추가 요금 없이 구독 사용량을 쓴다. 사용자 설정은 두 모드에 똑같이 섞이고, 전역 grimoire 훅은 `GRIMOIRE_HOOKS=0`으로 끈다(이 실행의 훅만 `GRIMOIRE_HOOKS=1`). `--bare`는 사용자 설정을 모두 끈 깨끗한 비교지만 문서상 `ANTHROPIC_API_KEY`가 필요해 토큰당 과금된다 — 선택 사항. `--max-turns`·`--max-budget-usd` 고정, `CLAUDE_CODE_PROMPT_CACHE_TTL=5m`을 두 모드에 같게, 매 실행 새 세션(`--resume` 금지: 세션 누적 비용이 섞인다).
 
 | 모드 | 조건 |
 |---|---|
@@ -586,7 +586,7 @@ Claude Code 문서로 확인된 것(2026-10-26): 훅 이벤트 목록과 공통 
 | `dropped` 판정 | 파일 집합 차이 | **줄 해시**(정확/공백제거) | Agent Blame 1.0/0.95 |
 | 트레일러 | Lore 5개 | **Lore·QAC·플랫폼 허용 목록, 자유 문자열, 모르는 키도 저장** | 열거값 불일치; 채택 데이터 없음 → 의존 금지 |
 | 벤치 규모 | 10~20사례 × 3회 | **파일럿 10 → 40사례 × 3시드 × 2 = 240회** | ICC 0.37~0.55 기준 검정력 계산 |
-| 벤치 실행 | `-p` | **`-p --bare`**, 새 세션, 캐시 TTL 고정, `modelUsage` | 문서 확인 |
+| 벤치 실행 | `-p` | **`-p`(구독 로그인 기본, `--bare`는 선택·API 과금)**, 전역 grimoire 훅 끔, 새 세션, 캐시 TTL 고정, `modelUsage` | 문서 확인 |
 | 통과율 | 1차 지표 | **비열등 가드레일**, 1차는 해결당 청구 비용 | 15pt 차이는 100+ 사례 필요 |
 
 ### 10-9. 출처 (2차)

@@ -44,10 +44,15 @@ export interface ClaudeOptions {
   model?: string;
   budgetUsd?: string;
   timeoutMs?: number;
-  /** --settings 파일 — 훅 등 세션 설정을 이 파일 것으로 (사용자 설정과 섞이지 않게 --bare와 함께) */
+  /** --settings 파일 — 이 실행에만 더할 설정(훅 등). 사용자 settings.json과 합쳐진다 */
   settings?: string;
-  /** --bare: 훅·CLAUDE.md·사용자 MCP를 모두 끈 채 시작 (벤치는 늘 이걸로) */
+  /**
+   * --bare: 훅·CLAUDE.md·사용자 MCP를 모두 끈 채 시작. 문서상 구독 로그인이 아니라 ANTHROPIC_API_KEY로 돌아 **토큰당 과금**된다.
+   * 기본은 끔 — 구독(Pro/Max) 사용량으로 돈다. 대신 사용자 설정이 섞이므로 호출부가 env로 막을 것을 막는다.
+   */
   bare?: boolean;
+  /** claude 프로세스에 더할 환경 변수 (그 아래에서 도는 훅도 물려받는다) */
+  env?: Record<string, string>;
   /** 작업 폴더 안 파일을 고치게 할 때 */
   permissionMode?: string;
 }
@@ -78,7 +83,7 @@ export function runClaude(options: ClaudeOptions): Promise<AgentRun> {
   ];
   const started = Date.now();
   return new Promise((resolve) => {
-    const child = spawn("claude", args, { cwd: options.cwd, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn("claude", args, { cwd: options.cwd, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...(options.env ?? {}) } });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => (stdout += String(chunk)));

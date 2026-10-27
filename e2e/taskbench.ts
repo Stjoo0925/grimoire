@@ -6,13 +6,17 @@
  *    사람이 tasks.local.json의 `prompt`를 증상 서술로 다듬는다 (기본값은 커밋 제목 — 수정 힌트가 들어 있을 수 있다).
  *
  * 2) 실행: 사례마다 부모 커밋의 임시 worktree에서 claude -p를 두 모드로 돌린다.
- *    npm run taskbench -- --run --tasks bench/tasks.local.json [--seeds 3] [--modes bare,grimoire] [--model sonnet] [--no-bare]
- *      bare      내장 도구만
+ *    npm run taskbench -- --run --tasks bench/tasks.local.json [--seeds 3] [--modes bare,grimoire] [--model sonnet] [--bare]
+ *      기본은 구독(Pro/Max) 로그인으로 돈다 — 추가 요금 없이 구독 사용량을 쓴다. 내 ~/.claude 설정(CLAUDE.md·다른 훅·플러그인)이
+ *      두 모드에 똑같이 섞이고, 전역에 설치한 grimoire 훅은 GRIMOIRE_HOOKS=0으로 막는다(대조군 오염·실제 DB 기록 방지).
+ *      --bare: 사용자 설정을 모두 끈 깨끗한 비교. 문서상 ANTHROPIC_API_KEY가 필요하고 토큰당 과금된다.
+ *      모드 bare = 내장 도구만 (--bare 플래그와는 별개)
  *      grimoire  내장 도구 + Grimoire MCP + 편집 직전 훅 — 임시 DB는 부모 커밋까지만 색인(시간 마스킹)
  *    채점: pass(F2P), p2p_broken, cost_billed·modelUsage, turns, stray/missed, reverted_edits, churn_ratio, subtype.
  *    결과: bench/results/taskbench-<시각>.json + 짝지은 요약(_ok 변형, cost_per_solved).
  *
- * 비용이 든다(사례·모드·시드당 $0.5~1.5). 먼저 10사례 × 1시드 파일럿으로 분산을 보고 N을 정한다.
+ * 구독으로 돌면 추가 요금은 없지만 사용량 한도(5시간·주간)를 먹는다 — 실행마다 결과의 $는 API 환산 추정치다.
+ * 먼저 10사례 × 1시드 파일럿(20회)으로 분산을 보고 N을 정한다. 본 실험(40×3×2=240회)은 한도를 크게 쓴다.
  * 채택 기준은 결과를 보기 전에 §3-4에 고정돼 있다.
  */
 import { execFileSync, spawnSync } from "node:child_process";
@@ -217,7 +221,8 @@ async function runTask(task: Task, mode: Mode, seed: number, options: { cli: str
       fs.writeFileSync(mcpConfig, JSON.stringify({ mcpServers: { grimoire: { command: process.execPath, args: [options.cli, "mcp"], env } } }));
       const hook = path.join(path.dirname(options.cli), "hook.js");
       const slash = (value: string) => value.split(path.sep).join("/");
-      const command = `"${slash(process.execPath)}" "${slash(hook)}" --env "GRIMOIRE_HOME=${slash(data)}" --env "GRIMOIRE_CAPTURE=0"`;
+      // GRIMOIRE_HOOKS=1: claude 프로세스에는 0을 줘 사용자 전역 grimoire 훅을 끄므로, 이 실행의 훅만 다시 켠다
+      const command = `"${slash(process.execPath)}" "${slash(hook)}" --env "GRIMOIRE_HOME=${slash(data)}" --env "GRIMOIRE_CAPTURE=0" --env "GRIMOIRE_HOOKS=1"`;
       settings = path.join(data, "settings.json");
       fs.writeFileSync(settings, JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Edit|Write|MultiEdit", hooks: [{ type: "command", command, timeout: 5 }] }] } }));
     } else {
@@ -234,6 +239,9 @@ async function runTask(task: Task, mode: Mode, seed: number, options: { cli: str
       maxTurns: options.maxTurns,
       settings,
       bare: options.bare,
+      // 사용자가 전역에 설치한 grimoire 훅은 끈다 — 대조군(bare 모드)에 맥락이 새거나(실제 DB는 미래 커밋까지 안다),
+      // 실험 프롬프트가 실제 DB에 캡처되지 않게. 이 실행의 훅은 명령에 GRIMOIRE_HOOKS=1을 따로 준다
+      env: { GRIMOIRE_HOOKS: "0" },
       permissionMode: "bypassPermissions",
       timeoutMs: 20 * 60_000,
     });
@@ -359,7 +367,7 @@ async function main(): Promise<number> {
       model: { type: "string" },
       budget: { type: "string" },
       "max-turns": { type: "string" },
-      "no-bare": { type: "boolean" },
+      bare: { type: "boolean" },
       label: { type: "string" },
     },
   });
@@ -383,7 +391,12 @@ async function main(): Promise<number> {
   const modes = (values.modes?.split(",") as Mode[] | undefined) ?? MODES;
   const cli = process.env.BENCH_CLI ? path.resolve(process.env.BENCH_CLI) : path.resolve(__dirname, "..", "..", "dist", "cli.js");
   if (!fs.existsSync(cli)) throw new Error(`${cli}가 없습니다 — npm run build를 먼저 하세요`);
-  const options = { cli, model: values.model, bare: !values["no-bare"], budget: values.budget ?? "2.00", maxTurns: Number.parseInt(values["max-turns"] ?? "60", 10) || 60 };
+  const options = { cli, model: values.model, bare: values.bare === true, budget: values.budget ?? "2.00", maxTurns: Number.parseInt(values["max-turns"] ?? "60", 10) || 60 };
+  process.stdout.write(
+    options.bare
+      ? "--bare: 사용자 설정을 끈 깨끗한 비교 — ANTHROPIC_API_KEY로 돌아 토큰당 과금됩니다\n"
+      : "구독 로그인으로 실행합니다 — 추가 요금 없이 구독 사용량을 씁니다 (결과의 $는 API 환산 추정치)\n",
+  );
   // 캐시 TTL을 두 모드에 같게 — 쓰기 단가가 다르면 비용 비교가 흔들린다
   process.env.CLAUDE_CODE_PROMPT_CACHE_TTL ??= "5m";
 

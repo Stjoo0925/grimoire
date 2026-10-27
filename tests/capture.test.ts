@@ -302,3 +302,16 @@ test("commitDir: git -C <경로> commit이면 그 폴더(따옴표·상대경로
   assert.equal(commitDir("git -C other log && git commit -m y", cwd), cwd, "-C가 다른 명령에 붙은 것은 무시");
   assert.equal(isGitCommit('git -C "C:/a b/wt" commit -m x'), true);
 });
+
+test("verifyRecord: 검증 명령과 실패 출력의 비밀을 저장 전에 지운다", async () => {
+  const { verifyRecord } = await import("../src/core/capture.js");
+  const secret = "sk-abcdefghijklmnopqrstuvwxyz123456";
+  const passed = verifyRecord(`OPENAI_API_KEY=${secret} npm test`, { ok: true, tail: "" });
+  assert.ok(!passed.includes(secret) && passed.endsWith("→ pass"), passed);
+  const failed = verifyRecord("npm test -- --token=abcd1234efgh", { ok: false, tail: `Error: request failed Authorization: Bearer abcdefghijklmnopqrstuv\nℹ fail 1` });
+  assert.ok(!failed.includes("abcd1234efgh") && !failed.includes("abcdefghijklmnopqrstuv"), failed);
+  assert.match(failed, /→ fail :: /);
+  // 200자에서 잘리는 자리에 걸친 토큰도 남지 않는다 (자르기 전에 지운다)
+  const long = verifyRecord(`${"x".repeat(185)} ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123 npm test`, { ok: true, tail: "" });
+  assert.ok(!long.includes("ghp_ABCDEF"), long);
+});

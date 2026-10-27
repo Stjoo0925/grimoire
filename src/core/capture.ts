@@ -105,6 +105,17 @@ export function verifyOutcome(response: { stdout?: unknown; stderr?: unknown; in
   return { ok: !failed, tail };
 }
 
+/**
+ * 저장할 검증 기록 한 줄 — "명령 → pass|fail :: 실패 출력 끝". 명령과 출력은 저장 전에 비밀을 지운다
+ * (`API_KEY=sk-… npm test`처럼 명령에 값을 붙여 돌리거나, 실패 출력에 토큰이 찍힐 수 있다). 자르기 전에 지운다 —
+ * 자른 뒤 지우면 반쯤 잘린 토큰이 패턴에 안 걸려 남는다.
+ */
+export function verifyRecord(command: string, outcome: { ok: boolean; tail: string }): string {
+  const cleanCommand = redact(command).trim().slice(0, 200);
+  const cleanTail = outcome.tail ? redact(outcome.tail) : "";
+  return `${cleanCommand} → ${outcome.ok ? "pass" : "fail"}${cleanTail ? ` :: ${cleanTail}` : ""}`;
+}
+
 /** 줄 해시 — 정확 해시와 공백 제거 해시 (Agent Blame 방식: 1.0 / 0.95) */
 export function lineHashes(text: string): string[] {
   const out: string[] = [];

@@ -27,6 +27,7 @@ import {
   recordEvent,
   recordPrompt,
   verifyOutcome,
+  verifyRecord,
   whyLine,
 } from "../core/capture";
 import { isIndexable } from "../core/code";
@@ -197,7 +198,7 @@ async function postToolUse(context: HookContext, input: HookInput): Promise<Hook
   if (!command) return null;
   if (isVerifyCommand(command)) {
     const outcome = verifyOutcome(input.tool_response);
-    const text = `${command.trim().slice(0, 200)} → ${outcome.ok ? "pass" : "fail"}${outcome.tail ? ` :: ${outcome.tail}` : ""}`;
+    const text = verifyRecord(command, outcome);
     recordEvent(context.db, { sessionId: input.session_id, repoId: repo.id, kind: "verify", text });
     if (!outcome.ok) {
       // 막혔을 때 2단계(§3-5): 이 세션의 첫 번째 실패한 검증 뒤 한 번만, 편집 중인 파일들의 왜·검증·버린 편집을 건넨다.

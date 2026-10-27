@@ -342,6 +342,12 @@ test("막혔을 때 2단계: 꼬리표만 있는 커밋은 빈 항목으로 내�
   const passing = { ...fail, tool_response: { stdout: "const x = row.error;\nℹ fail 0\n", stderr: "warning: LF will be replaced by CRLF\n" } };
   assert.equal(await handleHook(context, event(dir, "s-c", passing)), null);
   assert.deepEqual(pendingEvents(db, "s-c", repo.id).filter((e) => e.kind === "verify").map((e) => e.text), ["npm test → pass"]);
+
+  // 백그라운드로 띄운 검증은 결과를 모른다 — "→ pass"로 적지 않는다
+  await handleHook(context, event(dir, "s-d", edit("src/a.ts")));
+  const background = { ...fail, tool_input: { command: "npm test", run_in_background: true }, tool_response: { stdout: "Command running in background with ID: b1", stderr: "", backgroundTaskId: "b1" } };
+  assert.equal(await handleHook(context, event(dir, "s-d", background)), null);
+  assert.deepEqual(pendingEvents(db, "s-d", repo.id).filter((e) => e.kind === "verify"), []);
 });
 
 test("commitDir: git -C <경로> commit이면 그 폴더(따옴표·상대경로), 아니면 cwd", () => {

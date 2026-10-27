@@ -213,6 +213,9 @@ async function postToolUse(context: HookContext, input: HookInput): Promise<Hook
   if (input.tool_name !== "Bash") return null;
   const command = typeof input.tool_input?.command === "string" ? input.tool_input.command : "";
   if (!command) return null;
+  // 백그라운드로 띄운 명령(run_in_background)은 응답이 "실행 중" 안내뿐이라 결과를 모른다 — 실패 요약이 없다고
+  // 통과로 적으면 안 되고, git commit도 아직 안 끝났을 수 있다(HEAD가 그 커밋이 아니다). 둘 다 건너뛴다
+  if (input.tool_input?.run_in_background === true || typeof input.tool_response?.backgroundTaskId === "string") return null;
   if (isVerifyCommand(command)) {
     const outcome = verifyOutcome(input.tool_response);
     const text = verifyRecord(command, outcome);

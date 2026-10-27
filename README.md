@@ -157,7 +157,7 @@ After the commit metadata is indexed, a second pass reads each commit's diff (so
 With `detail: "summary"`, search results show them as `changed` ("webhook.ts: dedupeWebhookEvent"). The default stays the compact list: in the offline eval, summary made responses 66% larger without significantly raising how often one search was enough to answer (docs/improvement-plan.md §7).
 The names are also searchable, but only to fill in when titles, bodies and paths give too few results (for example a function that no longer exists anywhere). Mixing them into the main ranking made search 2–3× slower without a significant accuracy gain in the offline eval (see docs/improvement-plan.md §7).
 
-The server syncs registered repos in the background right after it starts, then fills in the diff pass. The repo you're working in is re-synced before a search when 15 seconds have passed, so a commit you just made is searchable. Set `GRIMOIRE_SYNC_ON_START=0` to turn off the startup sync.
+The server syncs registered repos in the background right after it starts, then fills in the diff pass. The repo you're working in is re-synced before a search when 15 seconds have passed, so a commit you just made is searchable. With hooks installed, the SessionStart hook also starts a background `grimoire sync` for the session's repo when it was last synced more than 10 minutes ago (or its co-change history is empty after an upgrade) — the hook itself doesn't wait. Set `GRIMOIRE_SYNC_ON_START=0` to turn off both.
 
 ### Measuring search quality
 

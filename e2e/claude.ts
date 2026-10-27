@@ -25,6 +25,8 @@ export interface AgentRun {
   usage: Usage | null;
   /** modelUsage 합계 (서브에이전트 포함) — 벤치는 이쪽을 쓴다 (docs/enhancement-plan.md §3-4) */
   modelUsage: Usage | null;
+  /** costUsd 중 캐시 쓰기 몫 (추정, cacheWriteCost) */
+  cacheWriteUsd: number | null;
   /** success | error_max_turns | error_max_budget_usd | error_during_execution … */
   subtype: string | null;
   apiMs: number | null;
@@ -59,6 +61,23 @@ export interface ClaudeOptions {
 
 const DEFAULT_TIMEOUT_MS = 300_000;
 
+/** 입력 단가를 1로 둔 가격 비율 — 캐시 쓰기(5분 TTL) 1.25, 캐시 읽기 0.1, 출력 5. 현행 Claude 모델이 모두 이 비율이다 */
+const PRICE_WEIGHT: Usage = { input: 1, cacheWrite: 1.25, cacheRead: 0.1, output: 5 };
+
+/**
+ * 청구 비용 중 캐시 쓰기 몫 — 결과에는 모델별 총액만 있으므로, 모델마다 총액을 토큰 수 × 가격 비율로 나눠 쓰기 몫을 뗀다.
+ * 콜드 캐시(그 세션의 첫 실행이 공통 머리말을 새로 쓰는 것)가 비용비를 흔들어, 벤치는 이 몫을 뺀 비용도 따로 낸다.
+ */
+export function cacheWriteCost(parts: { usage: Usage; costUsd: number }[]): number | null {
+  if (parts.length === 0) return null;
+  let total = 0;
+  for (const { usage, costUsd } of parts) {
+    const weighted = (Object.keys(PRICE_WEIGHT) as (keyof Usage)[]).reduce((sum, key) => sum + usage[key] * PRICE_WEIGHT[key], 0);
+    if (weighted > 0) total += (costUsd * usage.cacheWrite * PRICE_WEIGHT.cacheWrite) / weighted;
+  }
+  return +total.toFixed(6);
+}
+
 export function runClaude(options: ClaudeOptions): Promise<AgentRun> {
   const args = [
     "-p",
@@ -89,7 +108,7 @@ export function runClaude(options: ClaudeOptions): Promise<AgentRun> {
     child.stdout.on("data", (chunk) => (stdout += String(chunk)));
     child.stderr.on("data", (chunk) => (stderr += String(chunk)));
     const timer = setTimeout(() => child.kill("SIGTERM"), options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-    const empty = (): AgentRun => ({ answer: "", tools: [], calls: [], turns: null, costUsd: null, usage: null, modelUsage: null, subtype: null, apiMs: null, ms: Date.now() - started });
+    const empty = (): AgentRun => ({ answer: "", tools: [], calls: [], turns: null, costUsd: null, usage: null, modelUsage: null, cacheWriteUsd: null, subtype: null, apiMs: null, ms: Date.now() - started });
     child.on("error", (error) => {
       clearTimeout(timer);
       resolve({ ...empty(), error: error.message });
@@ -126,18 +145,26 @@ export function runClaude(options: ClaudeOptions): Promise<AgentRun> {
             output: u.output_tokens ?? 0,
           };
           // modelUsage는 서브에이전트까지 합친 값 — 캐시 생성·읽기가 청구액의 대부분이라 이쪽으로 센다
-          const models = Object.values(event.modelUsage ?? {}) as { inputTokens?: number; outputTokens?: number; cacheReadInputTokens?: number; cacheCreationInputTokens?: number }[];
-          if (models.length > 0) {
-            run.modelUsage = models.reduce(
+          const models = Object.values(event.modelUsage ?? {}) as { inputTokens?: number; outputTokens?: number; cacheReadInputTokens?: number; cacheCreationInputTokens?: number; costUSD?: number }[];
+          const perModel = models.map((m) => ({
+            usage: { input: m.inputTokens ?? 0, cacheWrite: m.cacheCreationInputTokens ?? 0, cacheRead: m.cacheReadInputTokens ?? 0, output: m.outputTokens ?? 0 },
+            costUsd: m.costUSD,
+          }));
+          if (perModel.length > 0) {
+            run.modelUsage = perModel.reduce(
               (sum, m) => ({
-                input: sum.input + (m.inputTokens ?? 0),
-                cacheWrite: sum.cacheWrite + (m.cacheCreationInputTokens ?? 0),
-                cacheRead: sum.cacheRead + (m.cacheReadInputTokens ?? 0),
-                output: sum.output + (m.outputTokens ?? 0),
+                input: sum.input + m.usage.input,
+                cacheWrite: sum.cacheWrite + m.usage.cacheWrite,
+                cacheRead: sum.cacheRead + m.usage.cacheRead,
+                output: sum.output + m.usage.output,
               }),
               { input: 0, cacheWrite: 0, cacheRead: 0, output: 0 },
             );
           }
+          // 모델별 비용이 있으면 모델마다(단가가 다르다), 없으면 총액과 합계 토큰으로 나눈다
+          const priced = perModel.filter((m): m is { usage: Usage; costUsd: number } => typeof m.costUsd === "number");
+          const totals = run.modelUsage ?? run.usage;
+          run.cacheWriteUsd = cacheWriteCost(priced.length === perModel.length && priced.length > 0 ? priced : run.costUsd !== null && totals ? [{ usage: totals, costUsd: run.costUsd }] : []);
           if (event.is_error) {
             const reason = run.answer.trim() || event.subtype || "unknown";
             run.error = /not logged in|\/login/i.test(reason)

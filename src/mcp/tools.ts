@@ -23,7 +23,8 @@ import { resolveAuthors } from "../core/identity";
 import { indexCommitCode } from "../core/diffs";
 import { CancelledError } from "../core/git";
 import { addRepo, discoverRepos, listRepos, matchRepos, relativeToRepo, resolveRepoFile, syncRepo } from "../core/indexer";
-import { addNote, TAG_CHARS, TAGS_MAX } from "../core/notes";
+import { parseNotePaths } from "../core/note-doc";
+import { addNote, PATHS_MAX, TAG_CHARS, TAGS_MAX } from "../core/notes";
 import { commitDetail, repoOverview, repoSummaries } from "../core/overview";
 import { search, type SearchHit } from "../core/search";
 import { slimCommit, slimFileContext, slimOverview, slimRepos, slimSearch, type Detail } from "./format";
@@ -116,7 +117,7 @@ export const TOOLS = [
   },
   {
     name: "file_context",
-    description: "Before editing a file: recent commits, why, co-changed files/tests, importers.",
+    description: "Before editing a file: notes, why, co-changed files/tests, importers.",
     inputSchema: {
       type: "object",
       properties: { path: { type: "string" }, repo: { type: "string" }, verbose: { type: "boolean" } },
@@ -148,13 +149,14 @@ export const TOOLS = [
   },
   {
     name: "record_note",
-    description: "Save a note the user asks to keep.",
+    description: "Save a decision to keep; paths = files it concerns.",
     inputSchema: {
       type: "object",
       properties: {
         text: { type: "string", description: "line 1 = title" },
         repo: { type: "string" },
         tags: { type: "array", items: { type: "string", maxLength: TAG_CHARS }, maxItems: TAGS_MAX },
+        paths: { type: "array", items: { type: "string" }, maxItems: PATHS_MAX },
       },
       required: ["text"],
     },
@@ -420,15 +422,22 @@ async function runTool(
       if (args.tags !== undefined && !Array.isArray(args.tags)) throw new ToolError("tags는 문자열 배열이어야 합니다");
       // 상한(TAGS_MAX개·TAG_CHARS자)을 넘으면 오류 대신 자른다 — 거대한 배열을 끝까지 훑지도 않는다
       const tags = (args.tags ?? []).slice(0, TAGS_MAX).filter((tag): tag is string => typeof tag === "string");
-      const repoId = repoFilter(args.repo)?.id ?? null;
+      if (args.paths !== undefined && !Array.isArray(args.paths)) throw new ToolError("paths는 문자열 배열이어야 합니다");
+      const given = (args.paths ?? []).slice(0, PATHS_MAX).filter((item): item is string => typeof item === "string" && item.trim() !== "");
+      // 파일을 묶는 노트는 레포가 있어야 한다 — repo를 안 줬으면 작업 레포(절대경로면 그 경로가 속한 레포)
+      const located = given.find((item) => path.isAbsolute(item));
+      const repo = repoFilter(args.repo) ?? (located ? (await resolveRepoFile(db, located, signal))?.repo : undefined) ?? (given.length > 0 ? current : undefined);
+      const repoId = repo?.id ?? null;
+      const paths = repo ? given.map((item) => (path.isAbsolute(item) ? relativeToRepo(repo.path, item) : item)) : [];
       // 다른 grimoire 프로세스가 쓰는 중이면 잠깐 뒤 다시 — 사용자가 남기라고 한 노트라 바로 실패시키지 않는다
       for (let attempt = 0; ; attempt++) {
         try {
-          const note = addNote(db, { text, repoId, tags, source: "mcp" });
+          const note = addNote(db, { text, repoId, tags, paths, source: "mcp" });
           return {
             recorded: true,
             id: note.id,
             createdAt: note.created_at,
+            ...(note.paths !== "[]" ? { paths: parseNotePaths(note.paths).map((item) => item.path) } : {}),
             ...(note.redacted ? { redacted: "비밀로 보이는 값(토큰·비밀번호 등)을 [redacted]로 바꿔 저장했습니다" } : {}),
           };
         } catch (error) {

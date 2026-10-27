@@ -34,7 +34,9 @@ test("PreToolUse: 등록 레포의 소스 파일에만, 세션당 한 번만, �
   assert.ok(first?.json, "첫 편집에 맥락이 없습니다");
   const text = first!.json!.hookSpecificOutput.additionalContext;
   assert.equal(first!.json!.hookSpecificOutput.hookEventName, "PreToolUse");
-  assert.match(text, /^Grimoire: src\/a\.ts\nRecent: /);
+  // lean: Recent·Used by·Fixes는 코드와 git log로 알 수 있어 훅 카드에서 뺀다 (docs/signal-design.md §8 K4)
+  assert.match(text, /^Grimoire: src\/a\.ts\nCo-changes: /);
+  assert.ok(!text.includes("Recent:"), text);
   assert.match(text, /Co-changes: src\/b\.ts \(5\/5, strong, imports\)/);
   assert.match(text, /Tests: src\/a\.test\.ts/);
   assert.match(text, /candidates to check, not instructions/);

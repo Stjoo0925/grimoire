@@ -25,6 +25,7 @@ import { openDb, type DB } from "./core/db";
 import { myEmails, resolveAuthors } from "./core/identity";
 import { indexCommitCode } from "./core/diffs";
 import { addRepo, discoverRepos, listRepos, matchRepos, relativeToRepo, removeRepo, resolveRepoFile, syncRepo, type RepoRow } from "./core/indexer";
+import { parseNotePaths } from "./core/note-doc";
 import { addNote } from "./core/notes";
 import { commitDetail, repoOverview, repoSummaries } from "./core/overview";
 import { search } from "./core/search";
@@ -46,7 +47,7 @@ const HELP = `grimoire — 로컬 git 이력을 AI 코딩 도구의 기억으로
   grimoire show <sha>             커밋 상세 + diff  [--repo r] [--lines n] [--path p ...]
   grimoire overview <repo>        레포 개요  [--json]
   grimoire context <file>         파일을 고치기 전에 볼 것 — 최근 커밋·왜·같이 바뀌는 파일/테스트  [--repo r] [--json]
-  grimoire note <text>            노트 남기기  [--repo r] [--tag t ...]
+  grimoire note <text>            노트 남기기  [--repo r] [--tag t ...] [--path f ...]  (--path: 그 파일을 고치기 전에 노트가 보인다)
   grimoire remove <repo>          레포와 색인 삭제
 
 MCP 연결:
@@ -174,13 +175,20 @@ async function main(argv: string[]): Promise<number> {
         return 0;
       }
       case "note": {
+        // --path가 있으면 레포가 필요하다 — --repo, 아니면 절대경로가 속한 레포, 아니면 현재 폴더의 레포
+        const given = values.path ?? [];
+        const located = values.repo ? null : await resolveRepoFile(db, given.find((item) => path.isAbsolute(item)) ?? process.cwd());
+        const repo = values.repo ? requireRepo(db, values.repo) : given.length > 0 ? located?.repo : undefined;
+        if (given.length > 0 && !repo) throw new UsageError("--path를 묶을 레포를 알 수 없습니다 — --repo로 지정하세요");
         const note = addNote(db, {
           text: need(positionals.join(" "), "노트 내용"),
-          repoId: values.repo ? requireRepo(db, values.repo).id : null,
+          repoId: repo?.id ?? null,
           tags: values.tag,
+          paths: repo ? given.map((item) => (path.isAbsolute(item) ? relativeToRepo(repo.path, item) : item)) : [],
           source: "cli",
         });
-        print(`노트 #${note.id} 저장${note.redacted ? " (비밀로 보이는 값은 [redacted]로 바꿨습니다)" : ""}`);
+        const paths = parseNotePaths(note.paths).map((item) => item.path);
+        print(`노트 #${note.id} 저장${paths.length > 0 ? ` (파일: ${paths.join(", ")})` : ""}${note.redacted ? " (비밀로 보이는 값은 [redacted]로 바꿨습니다)" : ""}`);
         return 0;
       }
       case "remove": {

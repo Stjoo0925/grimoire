@@ -455,3 +455,74 @@ test("addNote: 노트의 비밀(연결 문자열·토큰)을 저장 전에 지�
   const body = (db.prepare("SELECT body FROM docs_fts WHERE rowid = ?").get(docId) as { body: string }).body;
   assert.equal(body, "auth token", "태그는 비밀이 아니다 — auth [redacted]로 망가지면 안 됩니다");
 });
+
+test("notes paths: 노트를 파일에 묶고(명시·본문 자동), 그 파일을 고치기 전에 보이며, 파일이 바뀌면 stale, 경로로 검색된다", async () => {
+  const { notesForFile } = await import("../src/core/notes.js");
+  const { fileContext, formatFileContext } = await import("../src/core/context.js");
+  const { slimFileContext } = await import("../src/mcp/format.js");
+  const { backfillNotePaths } = await import("../src/core/capture.js");
+  const db = memoryDb();
+  const dir = sampleRepo("noted");
+  const repo = await addRepo(db, dir);
+  await syncRepo(db, repo);
+  const known = (db.prepare("SELECT path FROM code_files WHERE repo_id = ? ORDER BY path").all(repo.id) as { path: string }[]).map((row) => row.path);
+  const target = known.find((file) => file.endsWith(".ts"))!;
+  const other = known.find((file) => file !== target)!;
+
+  // 명시한 경로(역슬래시·앞의 ./·줄 번호는 손질) + 본문에 적힌 레포 파일은 자동으로
+  const note = addNote(db, { text: `결정: ${other}는 동기 호출로 둔다\n재시도는 호출부에서 한다`, repoId: repo.id, paths: [`.\\${target.replace(/\//g, "\\")}:12`], source: "mcp" });
+  assert.deepEqual(
+    JSON.parse(note.paths).map((item: { path: string; blob: string | null }) => [item.path, typeof item.blob]),
+    [
+      [target, "string"],
+      [other, "string"],
+    ],
+  );
+
+  const hints = notesForFile(db, repo.id, target);
+  assert.equal(hints.length, 1);
+  assert.equal(hints[0].id, note.id);
+  assert.equal(hints[0].stale, false);
+  assert.equal(notesForFile(db, repo.id, "src/none.ts").length, 0);
+
+  // 편집 직전 카드(lean)와 file_context에 노트가 실린다 — 노트만 있어도 줄 것이 있다
+  const context = fileContext(db, repo.id, target);
+  assert.equal(context.worth, true);
+  const card = formatFileContext(context, { lean: true });
+  assert.ok(card.startsWith(`Grimoire: ${target}\nNotes: #${note.id} "결정: `), card);
+  assert.ok(!card.includes("Recent:"));
+  const slim = slimFileContext(context, []) as { notes?: string[] };
+  assert.match(slim.notes![0], new RegExp(`^#${note.id} \\d{4}-\\d\\d-\\d\\d "결정: `));
+
+  // 경로(파일 이름)로 검색된다
+  const base = target.split("/").pop()!.replace(/\.[^.]+$/, "");
+  assert.ok(search(db, base, { kind: "note" }).hits.some((hit) => hit.ref === String(note.id) && hit.files.includes(target)), "노트가 경로로 검색되지 않습니다");
+
+  // 파일이 바뀌고 동기화되면 stale
+  addCommit(dir, { message: "refactor: 바꿈", files: { [target]: "export const changed = 1;\n" } });
+  await syncRepo(db, repo);
+  assert.equal(notesForFile(db, repo.id, target)[0].stale, true);
+  assert.match(formatFileContext(fileContext(db, repo.id, target), { lean: true }), /file changed since/);
+  assert.equal(notesForFile(db, repo.id, other)[0].stale, false, "안 바뀐 파일은 그대로");
+
+  // 옛 노트(paths 없음)는 마이그레이션 11이 본문의 경로를 묶는다 — blob을 몰라 stale로 보지 않는다
+  db.prepare("INSERT INTO notes (repo_id, text, tags, paths, source, created_at) VALUES (?, ?, '', '[]', 'cli', ?)").run(repo.id, `교훈: ${other} 재시도 주의`, new Date().toISOString());
+  assert.equal(backfillNotePaths(db), 1);
+  assert.equal(notesForFile(db, repo.id, other).length, 2);
+  assert.ok(notesForFile(db, repo.id, other).every((hint) => !hint.stale));
+  assert.equal(backfillNotePaths(db), 0);
+});
+
+test("record_note paths: 절대경로는 레포 기준으로, repo를 안 주면 작업 레포에 묶는다", async () => {
+  const db = memoryDb();
+  const dir = sampleRepo("noted-tool");
+  const repo = await addRepo(db, dir);
+  await syncRepo(db, repo);
+  const target = (db.prepare("SELECT path FROM code_files WHERE repo_id = ? ORDER BY path LIMIT 1").get(repo.id) as { path: string }).path;
+  const recorded = (await callTool({ db, me: [], cwd: dir }, "record_note", { text: "제약: 외부 API는 초당 5회", paths: [path.join(dir, target)] })) as { paths?: string[] };
+  assert.deepEqual(recorded.paths, [target]);
+  const row = db.prepare("SELECT repo_id FROM notes ORDER BY id DESC LIMIT 1").get() as { repo_id: number };
+  assert.equal(row.repo_id, repo.id);
+  await assert.rejects(callTool({ db, me: [], cwd: dir }, "record_note", { text: "x", paths: "a.ts" }), /문자열 배열/);
+  assert.ok(TOOLS.find((tool) => tool.name === "record_note")!.inputSchema.properties.paths, "스키마에 paths가 있어야 한다");
+});

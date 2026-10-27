@@ -284,6 +284,41 @@ export function refreshWhy(db: DB, repoId: number, sha: string): void {
   db.prepare("INSERT INTO docs_fts (rowid, title, body, paths, code) VALUES (?, ?, ?, ?, ?)").run(doc.id, doc.title, body, doc.paths, doc.code ?? "");
 }
 
+/**
+ * 이미 저장된 세션 기록(대기 중인 이벤트와 커밋에 묶인 프롬프트·검증)에 지금의 비밀 지우기 규칙을 다시 적용한다 —
+ * 규칙이 보강되면 그 전에 저장된 것에도 닿게(마이그레이션 8). 프롬프트가 바뀐 커밋은 검색 문서의 [why]도 다시 쓴다.
+ * 트레일러는 git 커밋 본문 그대로라 건드리지 않는다. 바뀐 행 수를 돌려준다.
+ */
+export function reRedactStored(db: DB): number {
+  let changed = 0;
+  const events = db.prepare("SELECT id, text FROM session_events WHERE kind IN ('prompt', 'verify')").all() as { id: number; text: string }[];
+  const setEvent = db.prepare("UPDATE session_events SET text = ? WHERE id = ?");
+  for (const row of events) {
+    const clean = redact(row.text);
+    if (clean === row.text) continue;
+    setEvent.run(clean, row.id);
+    changed++;
+  }
+  const rows = db.prepare("SELECT repo_id, sha, kind, ord, text FROM commit_context WHERE kind IN ('prompt', 'verify')").all() as {
+    repo_id: number;
+    sha: string;
+    kind: string;
+    ord: number;
+    text: string;
+  }[];
+  const setContext = db.prepare("UPDATE commit_context SET text = ? WHERE repo_id = ? AND sha = ? AND kind = ? AND ord = ?");
+  const touched = new Map<string, { repoId: number; sha: string }>();
+  for (const row of rows) {
+    const clean = redact(row.text);
+    if (clean === row.text) continue;
+    setContext.run(clean, row.repo_id, row.sha, row.kind, row.ord);
+    changed++;
+    if (row.kind === "prompt") touched.set(`${row.repo_id}\0${row.sha}`, { repoId: row.repo_id, sha: row.sha });
+  }
+  for (const { repoId, sha } of touched.values()) refreshWhy(db, repoId, sha);
+  return changed;
+}
+
 /* ── 읽기 ───────────────────────────────────────────────── */
 
 export interface CommitContextView {

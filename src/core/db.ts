@@ -9,6 +9,8 @@ import path from "node:path";
 
 import type * as NodeSqlite from "node:sqlite";
 
+import { reRedactStored } from "./capture";
+
 /** node:sqlite가 들어간 첫 버전(플래그 없이) — package.json engines와 맞춘다 */
 export const MIN_NODE = "22.13.0";
 
@@ -108,7 +110,8 @@ export class DB {
 }
 
 /** 스키마 버전 — 바꾸면 MIGRATIONS에 한 단계를 덧붙인다. */
-const MIGRATIONS: string[] = [
+/** SQL 한 덩어리, 또는 SQL로 못 하는 데이터 손질(같은 트랜잭션 안에서 돈다) */
+const MIGRATIONS: (string | ((db: DB) => void))[] = [
   `
   CREATE TABLE repos (
     id          INTEGER PRIMARY KEY,
@@ -292,6 +295,9 @@ const MIGRATIONS: string[] = [
   DELETE FROM cochange;
   DELETE FROM file_touches;
   `,
+  // 8: 이미 저장된 세션 기록(프롬프트·검증)에 보강된 비밀 지우기 규칙을 다시 적용한다 (capture.ts) —
+  //    0.7.x는 OPENAI_API_KEY=… 같은 접두 붙은 이름·연결 문자열 비밀번호 등을 놓쳤다
+  reRedactStored,
 ];
 
 /**
@@ -333,7 +339,9 @@ function migrate(db: DB): void {
     db.transaction(() => {
       // 첫 실행에서 두 프로세스가 동시에 열면, 잠금을 기다리는 사이 다른 쪽이 이 단계를 끝냈을 수 있다
       if ((db.pragma("user_version") as number) > version) return;
-      db.exec(MIGRATIONS[version]);
+      const step = MIGRATIONS[version];
+      if (typeof step === "string") db.exec(step);
+      else step(db);
       db.pragma(`user_version = ${version + 1}`);
     })();
   }

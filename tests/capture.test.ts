@@ -367,3 +367,26 @@ test("git -C <다른 레포> commit: 세션 기록을 남의 레포 커밋에 �
   assert.equal(commitContextOf(db, repoA.id, bHead), null, "A 레포에 B의 sha로 묶이면 안 됩니다");
   assert.deepEqual(pendingEvents(db, "s-other", repoA.id).map((e) => e.kind), ["prompt"], "A의 세션 기록은 A의 다음 커밋을 기다린다");
 });
+
+test("reRedactStored(마이그레이션 8): 옛 버전이 저장한 프롬프트·검증의 비밀을 지우고 검색 문서의 [why]도 고친다", async () => {
+  const { reRedactStored, refreshWhy } = await import("../src/core/capture.js");
+  const db = memoryDb();
+  const dir = makeRepo([{ message: "fix(pay): 결제 재시도", files: { "src/pay.ts": "1\n" } }], "reredact");
+  const repo = await addRepo(db, dir);
+  await syncRepo(db, repo);
+  const sha = (await headSha(dir))!;
+  // 0.7.x가 저장한 그대로 — 접두 붙은 이름의 값은 지워지지 않았다
+  const leaked = "OPENAI_API_KEY=abcd1234leak 로 결제 재시도 테스트";
+  db.prepare("INSERT INTO commit_context (repo_id, sha, kind, text, ord) VALUES (?, ?, 'prompt', ?, 0)").run(repo.id, sha, leaked);
+  db.prepare("INSERT INTO commit_context (repo_id, sha, kind, text, ord) VALUES (?, ?, 'verify', ?, 0)").run(repo.id, sha, "DB_PASSWORD=hunter22 npm test → pass");
+  db.prepare("INSERT INTO session_events (session_id, repo_id, at, kind, text) VALUES ('old', ?, ?, 'prompt', ?)").run(repo.id, new Date().toISOString(), leaked);
+  refreshWhy(db, repo.id, sha);
+  assert.ok(search(db, "abcd1234leak").hits.length > 0, "준비: 검색 문서에 새어 있어야 합니다");
+
+  assert.equal(reRedactStored(db), 3);
+  const texts = (db.prepare("SELECT text FROM commit_context UNION ALL SELECT text FROM session_events").all() as { text: string }[]).map((row) => row.text).join("\n");
+  assert.ok(!texts.includes("abcd1234leak") && !texts.includes("hunter22"), texts);
+  assert.equal(search(db, "abcd1234leak").hits.length, 0, "검색 문서의 [why]에서도 사라져야 합니다");
+  assert.ok(search(db, "결제 재시도 테스트").hits.length > 0, "나머지 말은 그대로 검색된다");
+  assert.equal(reRedactStored(db), 0, "두 번째는 바꿀 것이 없다");
+});

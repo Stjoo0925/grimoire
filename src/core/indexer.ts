@@ -274,11 +274,13 @@ async function syncRepoNow(db: DB, repo: RepoRow, signal?: AbortSignal): Promise
       throwIfCancelled(signal);
       db.transaction(() => {
         for (const commit of batch) {
+          // 실제로 들어간 커밋만 센다 — 동시에 돈 다른 sync가 먼저 넣은 커밋은 "새 커밋"이 아니다
+          if (!insertCommit(db, repo, commit)) continue;
+          added++;
           // 공변경은 새로 들어간 커밋만 더한다 — 옛 DB는 끝에 전체를 다시 만들므로 여기서는 건너뛴다
-          if (insertCommit(db, repo, commit) && !backfill) addCochange(db, repo.id, cochangeInput(commit, isMeaningfulSubject(commit.subject)));
+          if (!backfill) addCochange(db, repo.id, cochangeInput(commit, isMeaningfulSubject(commit.subject)));
         }
       })();
-      added += batch.length;
     }
     return added;
   };

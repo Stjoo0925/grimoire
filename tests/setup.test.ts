@@ -516,3 +516,37 @@ test("doctor: 스킬이 없으면 안내하고, 낡았으면 경고하고, 같�
   assert.equal(stale?.level, "warn");
   assert.equal(stale?.fix, "grimoire install claude-code --skills");
 });
+
+test("스킬(codex·cursor): ~/.agents/skills에 MCP 이름 없이 쓰고, 낡은 것만 MCP 서버 시작 때 맞추며, doctor가 본다", async () => {
+  const { installSkill, skillFile, skillState, refreshAgentsSkill, AGENTS_SKILL_CONTENT, SKILL_CONTENT } = await import("../src/setup/skills.js");
+  const home = tempDir();
+  assert.equal(skillFile(home, "agents"), path.join(home, ".agents", "skills", "grimoire-impact", "SKILL.md"));
+  // 없으면 새로 넣지 않는다 — 설치는 사용자가 고른다
+  assert.equal(refreshAgentsSkill(home, {}), false);
+  assert.equal(skillState(home, "agents"), "missing");
+
+  installSkill({ home, target: "agents" });
+  const text = fs.readFileSync(skillFile(home, "agents"), "utf8");
+  assert.equal(text, AGENTS_SKILL_CONTENT);
+  assert.ok(/^---\nname: grimoire-impact\ndescription: MANDATORY .+\n---\n/.test(text));
+  assert.ok(!text.includes("mcp__grimoire__") && !text.includes("ToolSearch"), "클라이언트마다 다른 도구 이름·Claude 전용 도구를 쓰지 않는다");
+  assert.ok(text.includes("grimoire impact --intent"), "MCP가 없을 때의 CLI 대안");
+  assert.ok(!fs.existsSync(skillFile(home)), "Claude Code 폴더는 건드리지 않는다");
+  assert.equal(SKILL_CONTENT.split("\n")[2], AGENTS_SKILL_CONTENT.split("\n")[2], "설명(고르게 하는 문구)은 같다");
+  assert.equal(refreshAgentsSkill(home, {}), false, "같으면 그대로");
+
+  fs.writeFileSync(skillFile(home, "agents"), "old version");
+  assert.equal(refreshAgentsSkill(home, { GRIMOIRE_AUTO_SETUP: "0" }), false);
+  const offline = (async () => {
+    throw new Error("down");
+  }) as unknown as typeof fetch;
+  const checks = await doctor({ cliPath: fakeCli(), env: { GRIMOIRE_HOME: path.join(home, "g"), GRIMOIRE_ME: "me@example.com" }, home, fetchImpl: offline, runCommand: noClaude });
+  const check = checks.find((c) => c.title.startsWith("codex·cursor 스킬"));
+  assert.equal(check?.level, "warn");
+  assert.equal(refreshAgentsSkill(home, {}), true);
+  assert.equal(skillState(home, "agents"), "current");
+
+  installSkill({ home, target: "agents", remove: true });
+  assert.equal(skillState(home, "agents"), "removed");
+  assert.equal(refreshAgentsSkill(home, {}), false);
+});

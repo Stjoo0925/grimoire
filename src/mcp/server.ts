@@ -26,6 +26,7 @@ import { myEmails } from "../core/identity";
 import { indexCommitCode } from "../core/diffs";
 import { listRepos, syncRepo } from "../core/indexer";
 import { pendingUpdate, refreshUpdateCache, updateHint, VERSION } from "../core/update";
+import { refreshAgentsSkill } from "../setup/skills";
 import { callTool, describeError, ToolError, toolsWithDescriptions, type Progress, type ToolContext } from "./tools";
 import { resolveWorkspaceRoot, rootFromRoots, startWorkspace, type Background } from "./workspace";
 
@@ -94,6 +95,8 @@ export async function runMcpServer(env = process.env): Promise<void> {
   const kickoff = () => {
     if (closing || startup) return;
     startup = (async () => {
+      // Codex·Cursor엔 SessionStart 훅이 없어, 업데이트 뒤 낡은 ~/.agents/skills 스킬은 새 버전의 서버가 맞춘다
+      if (refreshAgentsSkill(undefined, env)) log("~/.agents/skills/grimoire-impact를 이 버전으로 갱신했습니다");
       await workspace.begin();
       if (env.GRIMOIRE_SYNC_ON_START !== "0") await backgroundSync(context, stopping.signal);
     })();

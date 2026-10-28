@@ -295,6 +295,16 @@ async function clientChecks(options: DoctorOptions, env: Env): Promise<Check[]> 
   } else {
     checks.push({ level: "ok", title: "claude-code 스킬: 없음 (선택) — 커밋·리뷰·PR 때 impact를 부르게 하려면", fix: "grimoire install claude-code --skills" });
   }
+  // Codex·Cursor 스킬(~/.agents/skills) — 설치한 사람에게만 보인다. 낡은 것은 새 버전의 MCP 서버가 뜰 때 맞춘다
+  const agents = skillState(options.home, "agents");
+  if (agents === "current") checks.push({ level: "ok", title: "codex·cursor 스킬: grimoire-impact (~/.agents/skills)" });
+  else if (agents === "stale") {
+    checks.push({
+      level: "warn",
+      title: "codex·cursor 스킬: ~/.agents/skills의 grimoire-impact가 이 버전이 쓰는 내용과 다릅니다 (MCP 서버가 다음에 뜰 때 맞춥니다)",
+      fix: "grimoire install codex --skills",
+    });
+  }
   return checks;
 }
 

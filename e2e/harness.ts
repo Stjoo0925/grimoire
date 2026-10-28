@@ -389,6 +389,28 @@ async function runScenario(spec: ServerSpec): Promise<StepResult[]> {
     }
   });
 
+  await step("CLI impact: MCP 없이 불러도 처음 보는 레포를 등록·색인한다 (Codex 스킬의 대안 경로)", async () => {
+    const data = tempDir("grimoire-e2e-cli-impact-");
+    const run = (extra: Record<string, string>) =>
+      spawnSync(spec.command, [spec.args[0], "impact", "--intent", "장바구니"], {
+        cwd: path.join(fixture.web, "src"),
+        env: { ...process.env, GRIMOIRE_HOME: data, GRIMOIRE_UPDATE_CHECK: "0", ...extra },
+        encoding: "utf8",
+        timeout: 60_000,
+      });
+    try {
+      // 픽스처는 임시 폴더라 기본값으로는 등록하지 않는다 — MCP 서버의 자동 등록과 같은 기준
+      const skipped = run({});
+      expect(skipped.status !== 0 && skipped.stderr.includes("어느 레포의 변경인지"), `exit ${skipped.status}: ${skipped.stderr}`);
+      const added = run({ GRIMOIRE_AUTO_ADD: "1" });
+      expect(added.status === 0 && added.stderr.includes("처음 보는 레포라 등록하고 색인합니다"), `exit ${added.status}: ${added.stderr}`);
+      const again = run({ GRIMOIRE_AUTO_ADD: "1" });
+      expect(again.status === 0 && !again.stderr.includes("처음 보는 레포"), `두 번째는 등록하지 않는다: ${again.stderr}`);
+    } finally {
+      fs.rmSync(data, { recursive: true, force: true });
+    }
+  });
+
   await step("cwd가 레포가 아니면 클라이언트의 roots에서 작업 레포를 찾음", async () => {
     // 전역 설정으로 "/"에서 뜬 서버에, roots를 지원하는 클라이언트가 프로젝트 폴더를 알려 준다
     const fresh = { home: sandbox.home, data: tempDir("grimoire-e2e-roots-") };

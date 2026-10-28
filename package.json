@@ -44,7 +44,8 @@
     "eval": "npm run build --silent && tsc -p tsconfig.test.json && node .test-out/e2e/eval.js",
     "taskbench": "npm run build --silent && tsc -p tsconfig.test.json && node .test-out/e2e/taskbench.js",
     "impactbench": "npm run build --silent && tsc -p tsconfig.test.json && node .test-out/e2e/impactbench.js",
-    "perf": "npm run build --silent && tsc -p tsconfig.test.json && node .test-out/e2e/perf.js",
+    "usage": "tsc -p tsconfig.test.json && node .test-out/e2e/usage.js",
+    "perf":"npm run build --silent && tsc -p tsconfig.test.json && node .test-out/e2e/perf.js",
     "upgrade-check": "npm run build --silent && tsc -p tsconfig.test.json && node .test-out/e2e/upgrade.js",
     "prepack": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && npm run build && npm test"
   },

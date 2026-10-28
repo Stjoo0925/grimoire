@@ -33,10 +33,11 @@ import { commitDetail, repoOverview, repoSummaries } from "./core/overview";
 import { search } from "./core/search";
 import { pendingUpdate, refreshUpdateCache, VERSION } from "./core/update";
 import { runMcpServer } from "./mcp/server";
+import { resolveWorkspaceRoot } from "./mcp/workspace";
 import { doctor, formatChecks } from "./setup/doctor";
 import { installHooks } from "./setup/hooks";
 import { refreshIntegrations } from "./setup/refresh";
-import { installSkill } from "./setup/skills";
+import { installSkill, skillFile, skillState } from "./setup/skills";
 import { CLIENTS, install, InstallError, type ClientName } from "./setup/install";
 import { runUpdate } from "./setup/update";
 
@@ -60,7 +61,7 @@ MCP 연결:
                                   [--project <dir>] 프로젝트 범위  [--dry-run] 쓰지 않고 보기
                                   [--hooks] claude-code: 편집 직전 맥락 주입·세션 캡처 훅을 ~/.claude/settings.json에
                                   [--remove-hooks] 그 훅만 뺀다
-                                  [--skills] claude-code: 커밋 전·리뷰·PR 때 impact를 부르는 스킬을 ~/.claude/skills/grimoire-impact에
+                                  [--skills] 커밋 전·리뷰·PR 때 impact를 부르는 스킬 — claude-code: ~/.claude/skills, codex·cursor: ~/.agents/skills
                                   [--remove-skills] 그 스킬 폴더만 지운다
   grimoire doctor                 연결 문제 진단
   grimoire mcp                    MCP 서버 (stdio) — 보통 클라이언트가 직접 띄웁니다
@@ -75,7 +76,8 @@ MCP 연결:
 
 async function main(argv: string[]): Promise<number> {
   const [command, ...rest] = argv;
-  if (!command || command === "help" || command === "--help" || command === "-h") {
+  // `grimoire impact --help`처럼 명령 뒤에 붙여도 도움말 — 에이전트가 처음 쓰는 명령을 이렇게 확인한다
+  if (!command || command === "help" || command === "--help" || command === "-h" || rest.includes("--help") || rest.includes("-h")) {
     process.stdout.write(HELP);
     return 0;
   }
@@ -194,7 +196,20 @@ async function main(argv: string[]): Promise<number> {
       case "impact": {
         const given = positionals.map((item) => path.resolve(item));
         const located = values.repo ? null : await resolveRepoFile(db, given[0] ?? process.cwd());
-        const repo = values.repo ? requireRepo(db, values.repo) : located?.repo;
+        let repo = values.repo ? requireRepo(db, values.repo) : located?.repo;
+        // MCP 없이 CLI로만 부르는 에이전트(Codex 스킬의 대안 경로)는 레포를 등록·동기화해 줄 서버가 없다 — 여기서 한다.
+        // 기준은 MCP 서버의 작업 레포 자동 등록과 같다(홈·루트·임시 폴더 제외, GRIMOIRE_AUTO_ADD=0이면 끔)
+        if (!values.repo && process.env.GRIMOIRE_AUTO_ADD !== "0") {
+          if (repo) await syncRepo(db, repo);
+          else {
+            const root = await resolveWorkspaceRoot(process.cwd());
+            if (root) {
+              console.error(`처음 보는 레포라 등록하고 색인합니다: ${root}`);
+              repo = await addRepo(db, root);
+              await syncRepo(db, repo);
+            }
+          }
+        }
         if (!repo) throw new UsageError("어느 레포의 변경인지 알 수 없습니다 — 레포 안에서 부르거나 --repo로 지정하세요");
         const changed = given.length > 0 ? await Promise.all(given.map(async (item) => (await resolveRepoFile(db, item))?.relative ?? relativeToRepo(repo.path, item))) : await workingChanges(process.cwd());
         const impact = impactOf(db, repo.id, changed, { limit: Number.parseInt(values.limit ?? "10", 10) || 10, intent: values.intent });
@@ -321,8 +336,17 @@ async function cmdInstallHooks(client: string | undefined, dryRun: boolean | und
 }
 
 function cmdInstallSkills(client: string | undefined, dryRun: boolean | undefined, remove: boolean | undefined): number {
-  if (client !== "claude-code") throw new UsageError("스킬은 claude-code에만 설치합니다: grimoire install claude-code --skills");
-  const result = installSkill({ dryRun, remove });
+  if (client !== "claude-code" && client !== "codex" && client !== "cursor") {
+    throw new UsageError("스킬은 claude-code · codex · cursor에 설치합니다: grimoire install <client> --skills");
+  }
+  const target = client === "claude-code" ? "claude" : "agents";
+  // Cursor는 ~/.claude/skills도 읽는다 — Claude Code용이 이미 있으면 같은 이름을 하나 더 두지 않는다
+  const claudeSkill = skillState(undefined, "claude");
+  if (client === "cursor" && !remove && (claudeSkill === "current" || claudeSkill === "stale")) {
+    print(`Cursor는 Claude Code 스킬 폴더도 읽어 이미 보입니다: ${skillFile(undefined, "claude")}`);
+    return 0;
+  }
+  const result = installSkill({ dryRun, remove, target });
   if (dryRun) {
     print(`[dry-run] ${result.file} ${remove ? "폴더를 지웁니다" : result.unchanged ? "— 이미 같은 내용입니다" : "을 씁니다"}`);
     return 0;
@@ -330,8 +354,14 @@ function cmdInstallSkills(client: string | undefined, dryRun: boolean | undefine
   if (result.unchanged) print(remove ? `설치돼 있지 않습니다: ${result.file}` : `이미 같은 스킬입니다: ${result.file}`);
   else if (remove) print(`✓ 스킬을 지웠습니다: ${path.dirname(result.file)}`);
   else {
-    print(`✓ Claude Code 스킬을 넣었습니다: ${result.file}`);
-    print("  커밋·리뷰·PR 때 Claude가 고르거나, /grimoire-impact로 직접 부릅니다. 새 세션부터 보입니다.");
+    if (target === "claude") {
+      print(`✓ Claude Code 스킬을 넣었습니다: ${result.file}`);
+      print("  커밋·리뷰·PR 때 Claude가 고르거나, /grimoire-impact로 직접 부릅니다. 새 세션부터 보입니다.");
+    } else {
+      print(`✓ 스킬을 넣었습니다: ${result.file} (Codex·Cursor가 읽는 폴더)`);
+      print(`  커밋·리뷰·PR 때 에이전트가 고르거나, ${client === "codex" ? "$grimoire-impact" : "/grimoire-impact"}로 직접 부릅니다. 새 세션부터 보입니다.`);
+      print("  업데이트 뒤에는 새 버전의 grimoire MCP 서버가 뜰 때 이 파일을 맞춥니다.");
+    }
   }
   if (result.backup) print(`  이전 파일 백업: ${result.backup}`);
   if (!remove) print("  확인: grimoire doctor");

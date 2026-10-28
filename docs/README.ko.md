@@ -142,7 +142,16 @@ grimoire install claude-code --skills          # ~/.claude/skills/grimoire-impac
 grimoire install claude-code --remove-skills   # 그 폴더만 지웁니다
 ```
 
-Claude가 설명을 보고 고르거나, `/grimoire-impact`로 직접 부를 수 있습니다. `grimoire doctor`가 설치 여부를 알려 주고, 이 버전이 쓰는 내용과 다르면 경고합니다(업데이트 뒤에는 `--skills`를 다시 실행하세요).
+Claude가 설명을 보고 고르거나, `/grimoire-impact`로 직접 부를 수 있습니다. `grimoire doctor`가 설치 여부를 알려 주고, 이 버전이 쓰는 내용과 다르면 경고합니다(업데이트 뒤에는 훅이 맞춥니다 — 아래 참고).
+
+**Codex와 Cursor**에는 같은 스킬을 둘 다 읽는 사용자 스킬 폴더 `~/.agents/skills`에 넣습니다. 이쪽 스킬은 도구를 서버 기준(`grimoire` MCP 서버의 `impact`)으로 가리키고, MCP 서버가 연결돼 있지 않으면 셸에서 `grimoire impact --intent "…"`를 부르게 합니다:
+
+```bash
+grimoire install codex --skills                # ~/.agents/skills/grimoire-impact/SKILL.md를 씁니다
+grimoire install codex --remove-skills         # 그 폴더만 지웁니다
+```
+
+`install cursor --skills`도 같은 파일을 쓰지만, Claude Code 스킬이 이미 있으면 쓰지 않습니다(Cursor는 `~/.claude/skills`도 읽어 하나 더 두면 중복입니다). Codex에서는 `$grimoire-impact`로 직접 부를 수도 있습니다. 두 도구엔 세션 훅이 없어, 업데이트 뒤에는 새 버전의 MCP 서버가 시작 작업 때 설치돼 있는 스킬을 맞춥니다(`GRIMOIRE_AUTO_SETUP=0`이면 하지 않음). 설치하지 않은 스킬을 새로 넣지는 않습니다.
 
 ### 커밋에 묶인 "왜"
 
@@ -193,10 +202,11 @@ grimoire context src/core/search.ts            # 고치기 전에: 최근 커밋
 grimoire note "결정: 세션 대신 JWT — 모바일 때문" --repo shop-api --tag decision
 grimoire remove shop-api                       # 레포와 색인 삭제
 grimoire update                                # 최신 릴리스로 올리기 (아래 '업데이트')
-grimoire impact                                 # 커밋 안 된 변경이 같이 건드릴 곳 (또는 grimoire impact <파일...>)
+grimoire impact                                 # 커밋 안 된 변경이 같이 건드릴 곳 (또는 grimoire impact <파일...>) — MCP 서버처럼 그 레포를 등록·동기화
 grimoire impact src/api.ts --intent "내보내기에 열 추가"   # 같은 작업을 한 과거 커밋이 건드린 파일도 합침
 grimoire install claude-code --hooks           # 편집 직전 맥락 + 세션 캡처 (위 참고)
 grimoire install claude-code --skills          # /grimoire-impact: 커밋·리뷰·PR 전에 영향 범위 확인 (위 참고)
+grimoire install codex --skills                # 같은 스킬을 Codex·Cursor용으로 (~/.agents/skills)
 ```
 
 데이터는 `~/.grimoire/grimoire.db`(SQLite) 하나에 있습니다. `GRIMOIRE_HOME`으로 위치를 바꿀 수 있습니다.

@@ -153,7 +153,16 @@ grimoire install claude-code --skills          # writes ~/.claude/skills/grimoir
 grimoire install claude-code --remove-skills   # deletes only that folder
 ```
 
-Claude picks it by its description, or you call it as `/grimoire-impact`. `grimoire doctor` reports whether it is installed and warns when its content differs from what this version would write (run `--skills` again after updating).
+Claude picks it by its description, or you call it as `/grimoire-impact`. `grimoire doctor` reports whether it is installed and warns when its content differs from what this version would write (after an update the hook refreshes it; see below).
+
+**Codex and Cursor** get the same skill in `~/.agents/skills`, the user skill folder both read. Their copy names the tool by server (`impact` on the `grimoire` MCP server) and falls back to `grimoire impact --intent "…"` in a shell when the MCP server isn't connected:
+
+```bash
+grimoire install codex --skills                # writes ~/.agents/skills/grimoire-impact/SKILL.md
+grimoire install codex --remove-skills         # deletes only that folder
+```
+
+`install cursor --skills` writes the same file, unless the Claude Code skill is already there (Cursor reads `~/.claude/skills` too, so a second copy would only duplicate it). In Codex you can also call it as `$grimoire-impact`. They have no session hook, so after an update the new version's MCP server refreshes an installed copy when it starts its background work (`GRIMOIRE_AUTO_SETUP=0` turns this off); it never installs one you didn't ask for.
 
 ### The why, bound to the commit
 
@@ -201,13 +210,14 @@ grimoire show 2518bf75                         # commit message + files + diff (
 grimoire show 2518bf75 --path route.ts         # diff of files whose path partly matches (--lines n for more)
 grimoire overview please_readme                # tech stack, activity, hot spots, recent notable commits
 grimoire context src/core/search.ts            # before editing: recent commits, why, co-changed files/tests, importers
-grimoire impact                                 # what else the uncommitted changes likely touch (or: grimoire impact <file...>)
+grimoire impact                                 # what else the uncommitted changes likely touch (or: grimoire impact <file...>); registers and syncs the repo it runs in, like the MCP server
 grimoire impact src/api.ts --intent "add a column to the export"   # also pull in files past commits on the same task touched
 grimoire note "Decision: JWT over sessions — because of mobile" --repo shop-api --tag decision
 grimoire remove shop-api                       # delete a repo and its index
 grimoire update                                # move to the latest release (see Updating)
 grimoire install claude-code --hooks           # context before edits + session capture (see above)
 grimoire install claude-code --skills          # /grimoire-impact: check impact before a commit, review or PR (see above)
+grimoire install codex --skills                # the same skill for Codex and Cursor (~/.agents/skills)
 ```
 
 All data lives in a single `~/.grimoire/grimoire.db` (SQLite). Change the location with `GRIMOIRE_HOME`.

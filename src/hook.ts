@@ -96,17 +96,22 @@ function trace(env: Env, input: HookInput, text: string, error?: string): void {
  * 업데이트 확인(네트워크)은 끈다. 띄우지 못해도 로그만 남긴다.
  */
 function backgroundSync(env: Env, repoPath: string): void {
+  background(env, ["sync", repoPath], "background sync");
+}
+
+/** cli.js 명령 하나를 떼어 낸 프로세스로 — 훅은 기다리지 않는다 */
+function background(env: Env, args: string[], label: string): void {
   try {
-    const child = spawn(process.execPath, [path.join(__dirname, "cli.js"), "sync", repoPath], {
+    const child = spawn(process.execPath, [path.join(__dirname, "cli.js"), ...args], {
       detached: true,
       stdio: "ignore",
       windowsHide: true,
       env: { ...env, GRIMOIRE_UPDATE_CHECK: "0" },
     });
-    child.on("error", (error) => log(env, `background sync: ${error.message}`));
+    child.on("error", (error) => log(env, `${label}: ${error.message}`));
     child.unref();
   } catch (error) {
-    log(env, `background sync: ${error instanceof Error ? error.message : error}`);
+    log(env, `${label}: ${error instanceof Error ? error.message : error}`);
   }
 }
 
@@ -153,11 +158,12 @@ async function main(): Promise<void> {
     return;
   }
   try {
-    const output = await handleHook({ db, env, me, settingsFile: settingsPath() }, input);
+    const output = await handleHook({ db, env, me, settingsFile: settingsPath(), hookPath: path.join(__dirname, "hook.js") }, input);
     if (output?.json) process.stdout.write(JSON.stringify(output.json) + "\n");
     else if (output?.stdout) process.stdout.write(output.stdout + "\n");
     trace(env, input, output?.json?.hookSpecificOutput.additionalContext ?? output?.stdout ?? "");
     if (output?.syncRepo) backgroundSync(env, output.syncRepo);
+    if (output?.refreshSetup) background(env, ["setup-refresh"], "setup refresh");
   } catch (error) {
     log(env, `${input.hook_event_name ?? "?"}: ${error instanceof Error ? (error.stack ?? error.message) : error}`);
     trace(env, input, "", error instanceof Error ? error.message : String(error));

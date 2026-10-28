@@ -44,6 +44,13 @@ export interface SkillInstallOptions {
   home?: string;
   dryRun?: boolean;
   remove?: boolean;
+  /** 자동 갱신(setup-refresh)이 부른 것 — 사용자가 --remove-skills로 뺀 적이 있으면 다시 넣지 않는다 */
+  auto?: boolean;
+}
+
+/** 사용자가 --remove-skills로 스킬을 뺐다는 표시 — 자동 갱신이 다시 넣지 않게. 직접 --skills로 설치하면 지운다 */
+export function skillOptOutFile(home = os.homedir()): string {
+  return path.join(home, ".claude", "skills", `.${SKILL_NAME}-removed`);
 }
 
 export interface SkillInstallResult {
@@ -55,11 +62,18 @@ export interface SkillInstallResult {
 export function installSkill(options: SkillInstallOptions = {}): SkillInstallResult {
   const file = skillFile(options.home);
   const current = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null;
+  const optOut = skillOptOutFile(options.home);
   if (options.remove) {
+    if (!options.dryRun) {
+      fs.mkdirSync(path.dirname(optOut), { recursive: true });
+      fs.writeFileSync(optOut, "grimoire install claude-code --skills로 다시 넣을 때까지 자동 갱신이 이 스킬을 넣지 않는다\n");
+    }
     if (current === null) return { file, backup: null, unchanged: true };
     if (!options.dryRun) fs.rmSync(path.dirname(file), { recursive: true, force: true });
     return { file, backup: null, unchanged: false };
   }
+  if (options.auto && fs.existsSync(optOut)) return { file, backup: null, unchanged: true };
+  if (!options.dryRun && !options.auto) fs.rmSync(optOut, { force: true });
   if (current === SKILL_CONTENT) return { file, backup: null, unchanged: true };
   if (options.dryRun) return { file, backup: null, unchanged: false };
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -74,10 +88,10 @@ export function installSkill(options: SkillInstallOptions = {}): SkillInstallRes
   return { file, backup, unchanged: false };
 }
 
-/** 설치 상태 (doctor용): 없음 / 같음 / 이 버전이 쓰는 것과 다름 */
-export function skillState(home = os.homedir()): "missing" | "current" | "stale" {
+/** 설치 상태 (doctor·자동 갱신용): 없음 / 같음 / 이 버전이 쓰는 것과 다름 / 사용자가 뺌 */
+export function skillState(home = os.homedir()): "missing" | "current" | "stale" | "removed" {
   const file = skillFile(home);
-  if (!fs.existsSync(file)) return "missing";
+  if (!fs.existsSync(file)) return fs.existsSync(skillOptOutFile(home)) ? "removed" : "missing";
   try {
     return fs.readFileSync(file, "utf8") === SKILL_CONTENT ? "current" : "stale";
   } catch {

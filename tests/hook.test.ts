@@ -212,20 +212,61 @@ test("outdatedHooks: 이 버전의 이벤트·matcher와 다른 설치를 알아
   assert.deepEqual(outdatedHooks([{ ...old[0], matcher: "Bash|Edit|Write|MultiEdit|NotebookEdit" }, ...old.slice(1)]), []);
 });
 
-test("SessionStart: settings.json의 우리 훅이 낡았으면 다시 설치하라는 한 줄", async () => {
+test("SessionStart: 등록된 바로 그 hook.js가 낡은 설정을 보면 뒤에서 맞추게 하고(refreshSetup), 다른 위치의 훅·꺼진 스위치는 건드리지 않는다", async () => {
   const db = memoryDb();
   const repo = await addRepo(db, coupledRepo());
   await syncRepo(db, repo);
   const env = { GRIMOIRE_HOME: tempDir("grimoire-hook-home-"), GRIMOIRE_SYNC_ON_START: "0" };
-  const settingsFile = path.join(tempDir(), "settings.json");
-  const command = '"node" "/x/dist/hook.js"';
-  fs.writeFileSync(settingsFile, JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Edit", hooks: [{ type: "command", command }] }] } }));
+  const home = tempDir("grimoire-home-");
+  const settingsFile = settingsPath(home);
+  fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
+  const hookPath = path.join(tempDir(), "dist", "hook.js");
+  const command = hookCommand(hookPath, {});
+  // 0.9.0이 쓴 꼴 — PreToolUse에 Bash가 없다
+  fs.writeFileSync(settingsFile, JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Edit|Write|MultiEdit|NotebookEdit", hooks: [{ type: "command", command }] }] } }));
   const start = { hook_event_name: "SessionStart", session_id: "s", cwd: repo.path, source: "startup" };
-  const stale = await handleHook({ db, env, me: [], settingsFile }, start);
-  assert.match(stale?.stdout ?? "", /grimoire install claude-code --hooks/);
-  fs.writeFileSync(settingsFile, JSON.stringify(mergeHooks({}, command)));
-  const fresh = await handleHook({ db, env, me: [], settingsFile }, start);
-  assert.doesNotMatch(fresh?.stdout ?? "", /install claude-code/);
+  const stale = await handleHook({ db, env, me: [], settingsFile, hookPath }, start);
+  assert.equal(stale?.refreshSetup, true);
+  assert.match(stale?.stdout ?? "", /updating its Claude Code hooks/);
+  // 벤치·개발 빌드처럼 다른 위치의 hook.js가 돌 때는 사용자의 설정을 건드리지 않는다
+  const elsewhere = await handleHook({ db, env, me: [], settingsFile, hookPath: path.join(tempDir(), "dist", "hook.js") }, start);
+  assert.equal(elsewhere?.refreshSetup, undefined);
+  const off = await handleHook({ db, env: { ...env, GRIMOIRE_AUTO_SETUP: "0" }, me: [], settingsFile, hookPath }, start);
+  assert.equal(off?.refreshSetup, undefined);
+  // 등록 레포 밖의 세션에서도 맞춘다 (맥락 줄은 없음)
+  const outside = await handleHook({ db, env, me: [], settingsFile, hookPath }, { ...start, cwd: tempDir() });
+  assert.deepEqual(outside, { refreshSetup: true });
+});
+
+test("refreshIntegrations: 훅을 이 버전으로 다시 쓰고 스킬을 넣는다 — 훅이 없으면 아무것도, --remove-skills로 뺀 스킬은 다시 넣지 않는다", async () => {
+  const { refreshIntegrations } = await import("../src/setup/refresh.js");
+  const { installSkill, skillFile, skillState } = await import("../src/setup/skills.js");
+  const home = tempDir("grimoire-home-");
+  const cliDir = path.join(tempDir(), "dist");
+  fs.mkdirSync(cliDir, { recursive: true });
+  fs.writeFileSync(path.join(cliDir, "hook.js"), "");
+  // 훅을 설치하지 않은 사용자 — 손대지 않는다
+  assert.deepEqual(await refreshIntegrations({ cliDir, env: {}, home }), { hooks: "skipped", skill: "skipped" });
+  assert.equal(fs.existsSync(skillFile(home)), false);
+
+  const settingsFile = settingsPath(home);
+  fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
+  const command = hookCommand(path.join(cliDir, "hook.js"), {});
+  fs.writeFileSync(settingsFile, JSON.stringify({ theme: "dark", hooks: { PreToolUse: [{ matcher: "Edit", hooks: [{ type: "command", command }] }] } }));
+  const first = await refreshIntegrations({ cliDir, env: {}, home });
+  assert.deepEqual(first, { hooks: "updated", skill: "installed" });
+  assert.deepEqual(outdatedHooks(readInstalledHooks(settingsFile)), []);
+  assert.equal(JSON.parse(fs.readFileSync(settingsFile, "utf8")).theme, "dark");
+  assert.equal(skillState(home), "current");
+  assert.deepEqual(await refreshIntegrations({ cliDir, env: {}, home }), { hooks: "unchanged", skill: "unchanged" });
+
+  installSkill({ home, remove: true });
+  assert.equal(skillState(home), "removed");
+  assert.deepEqual(await refreshIntegrations({ cliDir, env: {}, home }), { hooks: "unchanged", skill: "unchanged" });
+  assert.equal(fs.existsSync(skillFile(home)), false, "사용자가 뺀 스킬은 자동으로 다시 넣지 않는다");
+  // 직접 --skills로 넣으면 표시가 지워져 다시 자동 갱신 대상이 된다
+  installSkill({ home });
+  assert.equal(skillState(home), "current");
 });
 
 test("PreToolUse(git commit) GRIMOIRE_COMMIT_IMPACT=all: 엄격한 규칙 대신 영향 후보 상위를 이유와 함께 준다 (실험)", async () => {

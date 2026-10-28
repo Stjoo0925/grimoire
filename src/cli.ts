@@ -35,6 +35,7 @@ import { pendingUpdate, refreshUpdateCache, VERSION } from "./core/update";
 import { runMcpServer } from "./mcp/server";
 import { doctor, formatChecks } from "./setup/doctor";
 import { installHooks } from "./setup/hooks";
+import { refreshIntegrations } from "./setup/refresh";
 import { installSkill } from "./setup/skills";
 import { CLIENTS, install, InstallError, type ClientName } from "./setup/install";
 import { runUpdate } from "./setup/update";
@@ -126,6 +127,12 @@ async function main(argv: string[]): Promise<number> {
   }
   if (command === "update") {
     return runUpdate({ check: values.check, dryRun: values["dry-run"] });
+  }
+  if (command === "setup-refresh") {
+    // 보통은 새 버전의 SessionStart 훅이 낡은 설정을 보고 떼어 낸 프로세스로 부른다(setup/refresh.ts)
+    const result = await refreshIntegrations({ cliDir: path.dirname(__filename) });
+    print(`훅: ${result.hooks} · 스킬: ${result.skill}`);
+    return 0;
   }
 
   const db = openDb(dbPath());

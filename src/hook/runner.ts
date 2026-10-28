@@ -39,7 +39,7 @@ import { fileContext, formatFileContext, needsCochangeBackfill, TEST_PATH, HOOK_
 import type { DB } from "../core/db";
 import { addedLines, commitTime, dirtyFiles, headSha, stagedFiles } from "../core/git";
 import { commitImpact, formatMissing, IMPACT_HEAD, missingCompanions } from "../core/impact";
-import { outdatedHooks, readInstalledHooks } from "../setup/hook-config";
+import { setupNeeded } from "../setup/hook-config";
 
 /** git 요약 줄이 없을 때 "방금 만든 커밋"으로 보는 HEAD 커밋 시각의 한도 */
 const FRESH_COMMIT_MS = 2 * 60_000;
@@ -51,6 +51,8 @@ export interface HookOutput {
   stdout?: string;
   /** 응답을 낸 뒤 백그라운드로 동기화할 레포 경로 — 훅은 기다리지 않는다(hook.ts가 떼어 낸 프로세스로 띄운다) */
   syncRepo?: string;
+  /** 훅·스킬 설정이 이 버전보다 낡았다 — hook.ts가 `grimoire setup-refresh`를 떼어 낸 프로세스로 띄운다 (setup/refresh.ts) */
+  refreshSetup?: boolean;
 }
 
 export interface HookInput {
@@ -168,6 +170,8 @@ export interface HookContext {
   headOf?: (repo: RepoRow) => string;
   /** ~/.claude/settings.json — 주면 SessionStart가 우리 훅 설정이 낡았는지 본다(hook.ts가 채운다) */
   settingsFile?: string;
+  /** 지금 도는 hook.js — settings.json에 등록된 것과 같을 때만 자동 갱신한다 */
+  hookPath?: string;
 }
 
 /**
@@ -356,15 +360,16 @@ export function needsBackgroundSync(db: DB, env: Env, repo: RepoRow, now = Date.
 async function sessionStart(context: HookContext, input: HookInput): Promise<HookOutput | null> {
   pruneSessions(context.env);
   pruneEvents(context.db);
+  // 업데이트는 옛 코드가 돌아 훅 설정·스킬을 새로 쓰지 못한다 — 새 버전의 이 훅이 알아보고 뒤에서 맞춘다(다음 세션부터).
+  // 등록 레포 밖의 세션에서도 맞춘다
+  const setup = context.settingsFile ? setupNeeded(context.env, path.dirname(path.dirname(context.settingsFile)), context.hookPath) : { hooks: false, skill: false };
+  const refresh = setup.hooks || setup.skill ? { refreshSetup: true } : null;
   const repo = await sessionRepo(context, input);
-  if (!repo) return null;
+  if (!repo) return refresh;
   const sync = needsBackgroundSync(context.db, context.env, repo) ? { syncRepo: repo.path } : null;
-  if (input.source === "resume") return sync;
+  if (input.source === "resume") return sync || refresh ? { ...sync, ...refresh } : null;
   const lines = [`Grimoire (${repo.name}): search_memory answers "where/how/why did I…"; record_note with paths keeps a decision on the files it concerns.`];
-  // 업데이트는 훅 설정을 새로 쓰지 못한다 — 새 훅(커밋 직전 알림)이 빠졌으면 사용자에게 전하게 한 줄
-  if (context.settingsFile && outdatedHooks(readInstalledHooks(context.settingsFile)).length > 0) {
-    lines.push("Grimoire hooks are from an older version — tell the user to run: grimoire install claude-code --hooks");
-  }
+  if (refresh) lines.push("Grimoire is updating its Claude Code hooks and /grimoire-impact skill to this version in the background — they take effect next session.");
   if (context.env.GRIMOIRE_START_SUMMARY === "1") {
     const mine = context.me.map((email) => email.toLowerCase());
     const recent = context.db
@@ -394,7 +399,7 @@ async function sessionStart(context: HookContext, input: HookInput): Promise<Hoo
     lines.splice(lines.length - 1, 1);
     text = lines.join("\n");
   }
-  return { stdout: text, ...sync };
+  return { stdout: text, ...sync, ...refresh };
 }
 
 /**

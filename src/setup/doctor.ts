@@ -290,6 +290,8 @@ async function clientChecks(options: DoctorOptions, env: Env): Promise<Check[]> 
   if (skill === "current") checks.push({ level: "ok", title: "claude-code 스킬: grimoire-impact" });
   else if (skill === "stale") {
     checks.push({ level: "warn", title: "claude-code 스킬: 설치된 grimoire-impact가 이 버전이 쓰는 내용과 다릅니다", fix: "grimoire install claude-code --skills" });
+  } else if (skill === "removed") {
+    checks.push({ level: "ok", title: "claude-code 스킬: 뺌 (--remove-skills) — 자동 갱신이 다시 넣지 않습니다", fix: "grimoire install claude-code --skills" });
   } else {
     checks.push({ level: "ok", title: "claude-code 스킬: 없음 (선택) — 커밋·리뷰·PR 때 impact를 부르게 하려면", fix: "grimoire install claude-code --skills" });
   }

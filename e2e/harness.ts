@@ -213,6 +213,9 @@ async function runScenario(spec: ServerSpec): Promise<StepResult[]> {
     const progress: number[] = [];
     const added = await call(live(), "add_repo", { path: fixture.root, scan: true }, (value) => progress.push(value));
     expect(!added.isError, added.text);
+    // 한 틱으로도 모자랄 때가 있다(macOS CI에서 다시 [0,1]) — 알림 콜백이 다 돌 때까지 최대 1초 기다린다.
+    // 서버가 알림을 덜 보냈다면 1초 뒤에도 모자라 아래 검사가 그대로 실패한다
+    for (let waited = 0; progress.length < 3 && waited < 1000; waited += 20) await new Promise((resolve) => setTimeout(resolve, 20));
     expect(JSON.stringify(progress) === JSON.stringify([0, 1, 2]), `진행 알림: ${JSON.stringify(progress)}`);
     const names = added.json.added.map((item: { repo: string }) => item.repo).sort();
     expect(JSON.stringify(names) === JSON.stringify(["shop-api", "shop-web"]), `등록된 레포: ${names}`);

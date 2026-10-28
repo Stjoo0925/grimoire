@@ -142,6 +142,17 @@ Tests: tests/search.test.ts
 - **Git worktrees** (Claude Code opens each session in `.claude/worktrees/<session>`) share the main repo's memory: a worktree is registered as its main repo, never as a repo of its own, and files in a worktree outside the repo folder are resolved to the same paths (by reading its `.git` file — no git process per edit). Files opened through a symlink or junction (e.g. `~/code` → another disk) resolve to the registered repo too. A commit made in a worktree is bound to that worktree's HEAD. `grimoire doctor` flags worktrees that an older version registered separately.
 - **The same change counted once**: a PR squash-merged into main leaves the same change twice (the branch commit and the `(#N)` commit). Co-change, fix counts and recent commits fold them by subject and file set, and the *why* recorded on the branch commit is found from the squash commit too.
 
+### Before you commit — Claude Code skill (opt-in)
+
+Agents call Grimoire reliably when told *when* to, and almost never on their own for impact checks. The skill is that explicit entry point: it tells Claude to run the `impact` tool once the change is ready (before a commit, a diff review or a PR, or when you ask "did I miss anything"), open only the plausible top candidates, and say which files it checked and why it left the others alone. Candidates are never edit instructions.
+
+```bash
+grimoire install claude-code --skills          # writes ~/.claude/skills/grimoire-impact/SKILL.md (nothing else in ~/.claude is touched)
+grimoire install claude-code --remove-skills   # deletes only that folder
+```
+
+Claude picks it by its description, or you call it as `/grimoire-impact`. `grimoire doctor` reports whether it is installed and warns when its content differs from what this version would write (run `--skills` again after updating).
+
 ### The why, bound to the commit
 
 A commit records *what* changed. The reason — what you asked for, what you tried and threw away, how you checked it — disappears when the chat window closes. Grimoire attaches it to the sha two ways, so that later you find the commit with the words you used at the time (search results carry a one-line `why`, `show_commit` the full record):

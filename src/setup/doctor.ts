@@ -14,6 +14,7 @@ import { myEmails } from "../core/identity";
 import { listRepos, worktreeRegistrations } from "../core/indexer";
 import { compareVersions, RELEASES_URL, refreshUpdateCache, updateCheckEnabled, VERSION } from "../core/update";
 import { hookCommandEnv, outdatedHooks, parseHookCommand, readInstalledHooks, settingsPath } from "./hooks";
+import { skillState } from "./skills";
 import { CLIENTS, configPath, hasCommand, readInstalled, run, SERVER_NAME, staleDesktopConfigs } from "./install";
 
 export type Level = "ok" | "warn" | "fail";
@@ -283,6 +284,14 @@ async function clientChecks(options: DoctorOptions, env: Env): Promise<Check[]> 
       title: "claude-code 훅: 없음 (선택) — 편집 직전 맥락 주입·세션 캡처를 쓰려면",
       fix: "grimoire install claude-code --hooks",
     });
+  }
+  // Claude Code 스킬 — 업데이트는 옛 코드로 돌아 스킬이 낡기 쉽다
+  const skill = skillState(options.home);
+  if (skill === "current") checks.push({ level: "ok", title: "claude-code 스킬: grimoire-impact" });
+  else if (skill === "stale") {
+    checks.push({ level: "warn", title: "claude-code 스킬: 설치된 grimoire-impact가 이 버전이 쓰는 내용과 다릅니다", fix: "grimoire install claude-code --skills" });
+  } else {
+    checks.push({ level: "ok", title: "claude-code 스킬: 없음 (선택) — 커밋·리뷰·PR 때 impact를 부르게 하려면", fix: "grimoire install claude-code --skills" });
   }
   return checks;
 }

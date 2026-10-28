@@ -34,6 +34,7 @@ import { pendingUpdate, refreshUpdateCache, VERSION } from "./core/update";
 import { runMcpServer } from "./mcp/server";
 import { doctor, formatChecks } from "./setup/doctor";
 import { installHooks } from "./setup/hooks";
+import { installSkill } from "./setup/skills";
 import { CLIENTS, install, InstallError, type ClientName } from "./setup/install";
 import { runUpdate } from "./setup/update";
 
@@ -57,6 +58,8 @@ MCP 연결:
                                   [--project <dir>] 프로젝트 범위  [--dry-run] 쓰지 않고 보기
                                   [--hooks] claude-code: 편집 직전 맥락 주입·세션 캡처 훅을 ~/.claude/settings.json에
                                   [--remove-hooks] 그 훅만 뺀다
+                                  [--skills] claude-code: 커밋 전·리뷰·PR 때 impact를 부르는 스킬을 ~/.claude/skills/grimoire-impact에
+                                  [--remove-skills] 그 스킬 폴더만 지운다
   grimoire doctor                 연결 문제 진단
   grimoire mcp                    MCP 서버 (stdio) — 보통 클라이언트가 직접 띄웁니다
 
@@ -99,6 +102,8 @@ async function main(argv: string[]): Promise<number> {
       check: { type: "boolean" },
       hooks: { type: "boolean" },
       "remove-hooks": { type: "boolean" },
+      skills: { type: "boolean" },
+      "remove-skills": { type: "boolean" },
     },
   });
 
@@ -109,6 +114,7 @@ async function main(argv: string[]): Promise<number> {
     return checks.some((check) => check.level === "fail") ? 1 : 0;
   }
   if (command === "install") {
+    if (values.skills || values["remove-skills"]) return cmdInstallSkills(positionals[0], values["dry-run"], values["remove-skills"]);
     if (values.hooks || values["remove-hooks"]) return cmdInstallHooks(positionals[0], values["dry-run"], values["remove-hooks"]);
     return cmdInstall(positionals[0], values.project, values["dry-run"]);
   }
@@ -294,6 +300,24 @@ async function cmdInstallHooks(client: string | undefined, dryRun: boolean | und
     }
     throw error;
   }
+}
+
+function cmdInstallSkills(client: string | undefined, dryRun: boolean | undefined, remove: boolean | undefined): number {
+  if (client !== "claude-code") throw new UsageError("스킬은 claude-code에만 설치합니다: grimoire install claude-code --skills");
+  const result = installSkill({ dryRun, remove });
+  if (dryRun) {
+    print(`[dry-run] ${result.file} ${remove ? "폴더를 지웁니다" : result.unchanged ? "— 이미 같은 내용입니다" : "을 씁니다"}`);
+    return 0;
+  }
+  if (result.unchanged) print(remove ? `설치돼 있지 않습니다: ${result.file}` : `이미 같은 스킬입니다: ${result.file}`);
+  else if (remove) print(`✓ 스킬을 지웠습니다: ${path.dirname(result.file)}`);
+  else {
+    print(`✓ Claude Code 스킬을 넣었습니다: ${result.file}`);
+    print("  커밋·리뷰·PR 때 Claude가 고르거나, /grimoire-impact로 직접 부릅니다. 새 세션부터 보입니다.");
+  }
+  if (result.backup) print(`  이전 파일 백업: ${result.backup}`);
+  if (!remove) print("  확인: grimoire doctor");
+  return 0;
 }
 
 async function cmdAdd(db: DB, paths: string[]): Promise<number> {

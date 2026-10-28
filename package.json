@@ -1,6 +1,6 @@
 {
   "name": "@stjoo0925/grimoire",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "로컬 git 이력을 인덱싱해 AI 코딩 도구가 MCP로 내 과거 작업을 근거와 함께 찾게 해 주는 개발 메모리",
   "keywords": [
     "mcp",
@@ -45,7 +45,7 @@
     "taskbench": "npm run build --silent && tsc -p tsconfig.test.json && node .test-out/e2e/taskbench.js",
     "impactbench": "npm run build --silent && tsc -p tsconfig.test.json && node .test-out/e2e/impactbench.js",
     "usage": "tsc -p tsconfig.test.json && node .test-out/e2e/usage.js",
-    "perf":"npm run build --silent && tsc -p tsconfig.test.json && node .test-out/e2e/perf.js",
+    "perf": "npm run build --silent && tsc -p tsconfig.test.json && node .test-out/e2e/perf.js",
     "upgrade-check": "npm run build --silent && tsc -p tsconfig.test.json && node .test-out/e2e/upgrade.js",
     "prepack": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && npm run build && npm test"
   },

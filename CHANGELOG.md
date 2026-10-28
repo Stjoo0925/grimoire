@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/Stjoo0925/grimoire/compare/v0.9.0...v0.10.0) (2026-10-28)
+
+
+### 기능
+
+* 영향 범위(impact) — 이력·구조·작업 의도로 같이 바뀔 파일을 찾는다 ([#30](https://github.com/Stjoo0925/grimoire/issues/30)) ([4ca2c6b](https://github.com/Stjoo0925/grimoire/commit/4ca2c6b370a0dab00f0c7829b2dc86d7e8fb8e8d))
+
 ## [0.9.0](https://github.com/Stjoo0925/grimoire/compare/v0.8.1...v0.9.0) (2026-10-27)
 
 

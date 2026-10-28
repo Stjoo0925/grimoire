@@ -16,11 +16,12 @@ AI가 프로젝트를 일일이 열어 보거나 git log를 뒤지지 않고, �
 - 한국어 질문도 영어 식별자에 닿도록 흔한 개발 용어를 영어로 확장("충돌" → `conflict`, "횟수 제한" → `rate limit`)
 - 응답은 토큰을 아끼는 최소 형태. 대화 컨텍스트에 쌓이는 양이 곧 비용이라서
 - **고치기 전에** (Claude Code 훅, 선택): 그 파일에 묶인 노트, 커밋에 묶인 *왜*, 같이 바뀌는 파일과 테스트를 몇 줄로, 세션당 파일당 한 번 — 이력만 아는 것, 코드로는 알 수 없는 것만
+- **같이 바뀔 파일** (`impact`): 바뀐 파일(안 주면 커밋 안 된 변경)과, 원하면 작업 내용을 주면 같이 고쳐야 할 가능성이 높은 파일을 이유와 함께 순위로 — import(별칭 포함), 정의→참조, 같이 바뀌어 온 이력, 테스트, 거기 묶인 노트. 실제 변경 864건을 다시 돌렸을 때 실제로 같이 바뀐 파일이 상위 5개 안에 든 비율이 59%(작업 내용을 주면 64%), import 그래프만 쓰면 36%. Claude Code에서는 `/grimoire-impact` 스킬이 커밋 전에 부릅니다
 - **파일에 묶인 노트**: `record_note`에 `paths`를 주면 결정·제약·교훈이 그 파일에 묶입니다. 그 파일을 고치기 직전에 보이고, 노트 뒤에 파일이 바뀌었으면 오래됐을 수 있다고 표시합니다. `paths`를 안 주면 작업 폴더에서 바뀐 소스 파일(최대 5개)에 자동으로 묶고 응답에 `autoBound`로 알립니다(`paths: []`면 묶지 않음)
 - **커밋에 묶인 "왜"**: 커밋 트레일러(`Constraint:`·`Rejected:`·`Tested:`·`Why:` …)와, 훅이 있으면 AI에게 한 말·돌린 검증·고쳤다가 뺀 파일까지 sha에 붙어 그때 쓴 말로 검색됨
 - LLM·임베딩 모델·GPU 필요 없음: 검색은 키워드(SQLite FTS5)로 하고, 찾은 근거를 읽는 건 이미 쓰는 AI가 합니다
 
-설계와 이전 버전에서 바뀐 점은 [PLANNING.md](./PLANNING.md)를, 연구에 기반한 개선 로드맵은 [improvement-plan.md](./improvement-plan.md)를, 에이전트 코딩에 실질적으로 도움이 되게 하는 핵심가치와 강화 계획(커밋에 묶인 "왜"·편집 직전 훅·공변경·작업 완수 벤치)은 [enhancement-plan.md](./enhancement-plan.md)를 보세요.
+grimoire가 왜 "왜"의 기억인지는 [signal-design.md](./signal-design.md)를, `impact`의 연구·측정·버린 것은 [impact-research.md](./impact-research.md)를, 설계와 이전 버전에서 바뀐 점은 [PLANNING.md](./PLANNING.md)를, 연구에 기반한 개선 로드맵은 [improvement-plan.md](./improvement-plan.md)를, 에이전트 코딩에 실질적으로 도움이 되게 하는 핵심가치와 강화 계획(커밋에 묶인 "왜"·편집 직전 훅·공변경·작업 완수 벤치)은 [enhancement-plan.md](./enhancement-plan.md)를 보세요.
 
 ## 빠른 시작
 
@@ -192,7 +193,10 @@ grimoire context src/core/search.ts            # 고치기 전에: 최근 커밋
 grimoire note "결정: 세션 대신 JWT — 모바일 때문" --repo shop-api --tag decision
 grimoire remove shop-api                       # 레포와 색인 삭제
 grimoire update                                # 최신 릴리스로 올리기 (아래 '업데이트')
+grimoire impact                                 # 커밋 안 된 변경이 같이 건드릴 곳 (또는 grimoire impact <파일...>)
+grimoire impact src/api.ts --intent "내보내기에 열 추가"   # 같은 작업을 한 과거 커밋이 건드린 파일도 합침
 grimoire install claude-code --hooks           # 편집 직전 맥락 + 세션 캡처 (위 참고)
+grimoire install claude-code --skills          # /grimoire-impact: 커밋·리뷰·PR 전에 영향 범위 확인 (위 참고)
 ```
 
 데이터는 `~/.grimoire/grimoire.db`(SQLite) 하나에 있습니다. `GRIMOIRE_HOME`으로 위치를 바꿀 수 있습니다.
@@ -223,10 +227,12 @@ grimoire update --check    # 확인만
 grimoire update --dry-run  # 무엇을 실행할지만 보기
 ```
 
-- npm으로 설치했다면 `npm install -g @stjoo0925/grimoire@<새 버전>`을 실행합니다.
+- npm으로 설치했다면 `npm install -g --prefer-online @stjoo0925/grimoire@<새 버전>`을 실행합니다(`--prefer-online`: 막 나온 릴리스를 로컬 npm 캐시가 아직 몰라 실패하지 않게).
 - clone으로 설치했다면 릴리스 태그로 fast-forward한 뒤 `npm install`·`npm run build`를 합니다. 커밋하지 않은 변경이 있거나 fast-forward가 안 되면 아무것도 바꾸지 않고 멈춥니다.
 
 업데이트한 뒤에는 MCP 클라이언트를 다시 시작하세요. 같은 자리를 갈아 끼우므로 MCP 설정은 다시 쓸 필요가 없습니다.
+
+Claude Code 연동도 따라옵니다. 업데이트는 옛 버전의 코드가 돌므로, 업데이트 뒤 첫 Claude Code 세션에서 새 훅이 훅 설정을 이 버전에 맞추고 `/grimoire-impact` 스킬을 뒤에서 넣습니다(같은 `hook.js`, 같은 `--env` 값, 다른 설정은 그대로, 다음 세션부터 적용). `--remove-skills`로 뺀 스킬은 다시 넣지 않고, `GRIMOIRE_AUTO_SETUP=0`이면 하지 않습니다. 손으로 하려면 `grimoire setup-refresh`.
 
 새 버전은 하루 한 번 확인하고(`~/.grimoire/update.json`에 기록), 이렇게 알립니다.
 
@@ -263,6 +269,8 @@ npm run e2e:agent   # 에이전트 하네스 (아래, 실제 Claude 호출)
 npm run bench       # 핀포인트 벤치 (아래, 실제 Claude 호출)
 npm run taskbench   # 작업 완수 벤치: 실제 fix 작업을 Grimoire 있음/없음으로 (아래, 실제 Claude 호출)
 npm run eval -- --cochange   # 오프라인: 공변경이 같이 바뀔 파일을 맞히나 (시간 분할)
+npm run impactbench -- --repo <경로> --ratio 0.7   # 오프라인: impact가 같이 바뀐 파일을 맞히나 (시간 분할, 모델 호출 없음)
+npm run usage -- --since 2026-10-20                # 읽기만: Claude Code 세션의 grimoire 도구·스킬 사용과 48시간 재손질률
 npm run upgrade-check -- --from <옛 dist>   # 지난 릴리스로 만든 DB를 지금 소스로 열어 마이그레이션·공변경 재계산·비밀 지우기 확인 (임시 폴더만)
 ```
 
@@ -376,9 +384,10 @@ npm run taskbench -- --run --tasks bench/tasks.local.json --seeds 3             
 src/
   cli.ts            CLI 진입점
   mcp/              MCP 서버(stdio)·도구 정의·응답 다이어트(format)
-  core/             단일 코어 — db · git · indexer · code · search · terms · overview · notes · identity · update
+  core/             단일 코어 — db · git · indexer · code · search · terms · overview · notes · identity · update ·
+                    context(파일 맥락·공변경) · impact(같이 바뀔 곳) · capture(세션 → 커밋) · note-autobind
     tech/           매니페스트 파서와 기술 이름 정규화 사전
-  setup/            install · doctor · update 명령
+  setup/            install · doctor · update · hooks · hook-config(훅이 쓰는 가벼운 부분) · skills · refresh(업데이트 뒤 설정 맞추기)
 e2e/                종단 하네스(harness) · 에이전트 하네스(agent) · 벤치(bench) · 공용 픽스처와 claude 실행기
 tests/              단위·통합 테스트 (임시 git 레포, 네트워크 없음)
 ```

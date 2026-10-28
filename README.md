@@ -16,11 +16,12 @@ The goal is to let the AI point at the right file and commit with a single searc
 - Korean queries reach English identifiers: common dev terms are expanded to English ("충돌" → `conflict`, "횟수 제한" → `rate limit`)
 - Responses are kept minimal, because whatever lands in the conversation context is what you pay for
 - **Before you edit** (Claude Code hooks, opt-in): the notes bound to the file, the *why* bound to its commits, the files and tests that usually change with it, in a few lines, once per file per session — only what history knows and the code doesn't
+- **What else should change** (`impact`): give it the changed files (or nothing, for the uncommitted changes) and optionally the task in words; it ranks the files that likely need to change too, with reasons — imports (aliases included), definition→reference links, co-change history, tests, and the notes bound to them. On 864 replayed real changes, a truly co-changed file is in the top 5 for 59% of queries (64% with the task), against 36% for an import graph alone. With Claude Code, the `/grimoire-impact` skill runs it before a commit
 - **Notes bound to files**: `record_note` with `paths` keeps a decision, constraint or lesson on the files it concerns; it shows up before those files are edited and is flagged once the file has changed since. Without `paths`, the note binds to the source files changed in the working tree (up to 5; `paths: []` opts out), and the response says so (`autoBound`)
 - **The why, bound to the commit**: commit trailers (`Constraint:`, `Rejected:`, `Tested:`, `Why:`…) and, with hooks on, the prompt you gave the agent, the checks it ran and the edits it dropped, all attached to the sha and searchable in your own words
 - No LLM, no embedding model, no GPU: search is keyword-based (SQLite FTS5) and the AI you already use does the reading
 
-See [docs/PLANNING.md](./docs/PLANNING.md) (Korean) for the design and what changed from earlier versions, [docs/improvement-plan.md](./docs/improvement-plan.md) (Korean) for the research-based roadmap, and [docs/enhancement-plan.md](./docs/enhancement-plan.md) (Korean) for the core value and the plan to make it useful during agent coding (commit-bound "why", edit-time hooks, co-change, task benchmark).
+See [docs/PLANNING.md](./docs/PLANNING.md) (Korean) for the design and what changed from earlier versions, [docs/improvement-plan.md](./docs/improvement-plan.md) (Korean) for the research-based roadmap, [docs/enhancement-plan.md](./docs/enhancement-plan.md) (Korean) for the core value and the plan to make it useful during agent coding (commit-bound "why", edit-time hooks, co-change, task benchmark), [docs/signal-design.md](./docs/signal-design.md) (Korean) for why grimoire is the memory of the *why*, and [docs/impact-research.md](./docs/impact-research.md) (Korean) for the research, measurements and dead ends behind `impact`.
 
 ## Quick start
 
@@ -200,10 +201,13 @@ grimoire show 2518bf75                         # commit message + files + diff (
 grimoire show 2518bf75 --path route.ts         # diff of files whose path partly matches (--lines n for more)
 grimoire overview please_readme                # tech stack, activity, hot spots, recent notable commits
 grimoire context src/core/search.ts            # before editing: recent commits, why, co-changed files/tests, importers
+grimoire impact                                 # what else the uncommitted changes likely touch (or: grimoire impact <file...>)
+grimoire impact src/api.ts --intent "add a column to the export"   # also pull in files past commits on the same task touched
 grimoire note "Decision: JWT over sessions — because of mobile" --repo shop-api --tag decision
 grimoire remove shop-api                       # delete a repo and its index
 grimoire update                                # move to the latest release (see Updating)
 grimoire install claude-code --hooks           # context before edits + session capture (see above)
+grimoire install claude-code --skills          # /grimoire-impact: check impact before a commit, review or PR (see above)
 ```
 
 All data lives in a single `~/.grimoire/grimoire.db` (SQLite). Change the location with `GRIMOIRE_HOME`.
@@ -235,10 +239,12 @@ grimoire update --check    # only check
 grimoire update --dry-run  # only show what would run
 ```
 
-- Installed from npm: runs `npm install -g @stjoo0925/grimoire@<new version>`.
+- Installed from npm: runs `npm install -g --prefer-online @stjoo0925/grimoire@<new version>` (`--prefer-online` so a release that just came out isn't missed by a stale local npm cache).
 - Installed from a clone: fast-forwards to the release tag, then runs `npm install` and `npm run build`. If there are uncommitted changes or it can't fast-forward, nothing is changed and the update stops.
 
 Restart your MCP client afterwards. The install is replaced in place, so the MCP config doesn't need to be rewritten.
+
+The Claude Code integration follows by itself: the update runs the old version's code, so the first Claude Code session after it lets the new hook bring your hook settings up to this version and install the `/grimoire-impact` skill in the background (same `hook.js`, same `--env` values, other settings untouched; effective from the next session). A skill you removed with `--remove-skills` stays removed, and `GRIMOIRE_AUTO_SETUP=0` turns this off. `grimoire setup-refresh` does the same by hand.
 
 New versions are checked once a day (recorded in `~/.grimoire/update.json`) and announced like this:
 
@@ -277,6 +283,8 @@ npm run perf        # speed A/B of two builds on your indexed repos (docs/perf-l
 npm run upgrade-check -- --from <old dist>   # build a DB with the last release, open it with this source: migrations, co-change rebuild, redaction (temp folder only)
 npm run taskbench   # task benchmark: with vs without Grimoire on real fix tasks (below, calls real Claude)
 npm run eval -- --cochange   # offline: does co-change predict the files that change together? (time split)
+npm run impactbench -- --repo <path> --ratio 0.7   # offline: does impact rank the files that changed together? (time split, no model calls)
+npm run usage -- --since 2026-10-20                # read-only: grimoire tool/skill use in your Claude Code sessions and the 48-hour re-touch rate
 ```
 
 ### End-to-end MCP harness (`e2e/harness.ts`)
@@ -390,9 +398,10 @@ The [CI workflow](.github/workflows/ci.yml) runs typecheck, tests, the end-to-en
 src/
   cli.ts            CLI entry point
   mcp/              MCP server (stdio), tool definitions, response slimming (format)
-  core/             the single core — db · git · indexer · code · search · terms · overview · notes · identity · update
+  core/             the single core — db · git · indexer · code · search · terms · overview · notes · identity · update ·
+                    context (file context, co-change) · impact (what else changes) · capture (session → commit) · note-autobind
     tech/           manifest parsers and tech name normalization dictionary
-  setup/            install · doctor · update commands
+  setup/            install · doctor · update · hooks · hook-config (light, used by the hook) · skills · refresh (after-update setup)
 e2e/                end-to-end harness · agent harness · bench · shared fixture and claude runner
 tests/              unit and integration tests (temp git repos, no network)
 ```

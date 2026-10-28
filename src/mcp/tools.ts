@@ -20,6 +20,7 @@ import { commitContextOf } from "../core/capture";
 import { isIndexable } from "../core/code";
 import { fileContext } from "../core/context";
 import { impactOf, workingChanges } from "../core/impact";
+import { AUTO_BIND_MAX, autoBindPaths } from "../core/note-autobind";
 import { isBusyError, type DB } from "../core/db";
 import { resolveAuthors } from "../core/identity";
 import { indexCommitCode } from "../core/diffs";
@@ -468,16 +469,35 @@ async function runTool(
       const located = given.find((item) => path.isAbsolute(item));
       const repo = repoFilter(args.repo) ?? (located ? (await resolveRepoFile(db, located, signal))?.repo : undefined) ?? (given.length > 0 ? current : undefined);
       const repoId = repo?.id ?? null;
-      const paths = repo ? given.map((item) => (path.isAbsolute(item) ? relativeToRepo(repo.path, item) : item)) : [];
+      let paths = repo ? given.map((item) => (path.isAbsolute(item) ? relativeToRepo(repo.path, item) : item)) : [];
+      // paths를 아예 안 줬으면(빈 배열 []은 "묶지 않음") 지금 작업 폴더에서 바뀐 소스 파일에 묶는다
+      let bound = repo;
+      let autoBound = false;
+      let tooMany = false;
+      if (args.paths === undefined) {
+        const target = repo ?? current;
+        if (target) {
+          const dir = current && target.id === current.id && context.workspace?.root ? context.workspace.root : target.path;
+          const auto = await autoBindPaths(db, target.id, text, dir, signal);
+          tooMany = auto.tooMany;
+          if (auto.paths.length > 0) {
+            paths = auto.paths;
+            bound = target;
+            autoBound = true;
+          }
+        }
+      }
       // 다른 grimoire 프로세스가 쓰는 중이면 잠깐 뒤 다시 — 사용자가 남기라고 한 노트라 바로 실패시키지 않는다
       for (let attempt = 0; ; attempt++) {
         try {
-          const note = addNote(db, { text, repoId, tags, paths, source: "mcp" });
+          const note = addNote(db, { text, repoId: bound?.id ?? null, tags, paths, source: "mcp" });
           return {
             recorded: true,
             id: note.id,
             createdAt: note.created_at,
             ...(note.paths !== "[]" ? { paths: parseNotePaths(note.paths).map((item) => item.path) } : {}),
+            ...(autoBound ? { autoBound: true } : {}),
+            ...(tooMany ? { note: `바뀐 소스 파일이 ${AUTO_BIND_MAX}개를 넘어 파일에 묶지 않았습니다` } : {}),
             ...(note.redacted ? { redacted: "비밀로 보이는 값(토큰·비밀번호 등)을 [redacted]로 바꿔 저장했습니다" } : {}),
           };
         } catch (error) {

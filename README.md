@@ -16,7 +16,7 @@ The goal is to let the AI point at the right file and commit with a single searc
 - Korean queries reach English identifiers: common dev terms are expanded to English ("충돌" → `conflict`, "횟수 제한" → `rate limit`)
 - Responses are kept minimal, because whatever lands in the conversation context is what you pay for
 - **Before you edit** (Claude Code hooks, opt-in): the notes bound to the file, the *why* bound to its commits, the files and tests that usually change with it, in a few lines, once per file per session — only what history knows and the code doesn't
-- **Notes bound to files**: `record_note` with `paths` keeps a decision, constraint or lesson on the files it concerns; it shows up before those files are edited and is flagged once the file has changed since
+- **Notes bound to files**: `record_note` with `paths` keeps a decision, constraint or lesson on the files it concerns; it shows up before those files are edited and is flagged once the file has changed since. Without `paths`, the note binds to the source files changed in the working tree (up to 5; `paths: []` opts out), and the response says so (`autoBound`)
 - **The why, bound to the commit**: commit trailers (`Constraint:`, `Rejected:`, `Tested:`, `Why:`…) and, with hooks on, the prompt you gave the agent, the checks it ran and the edits it dropped, all attached to the sha and searchable in your own words
 - No LLM, no embedding model, no GPU: search is keyword-based (SQLite FTS5) and the AI you already use does the reading
 

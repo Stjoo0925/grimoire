@@ -27,6 +27,7 @@ import { myEmails, resolveAuthors } from "./core/identity";
 import { indexCommitCode } from "./core/diffs";
 import { addRepo, discoverRepos, listRepos, matchRepos, relativeToRepo, removeRepo, resolveRepoFile, syncRepo, type RepoRow } from "./core/indexer";
 import { parseNotePaths } from "./core/note-doc";
+import { AUTO_BIND_MAX, autoBindPaths } from "./core/note-autobind";
 import { addNote } from "./core/notes";
 import { commitDetail, repoOverview, repoSummaries } from "./core/overview";
 import { search } from "./core/search";
@@ -200,15 +201,25 @@ async function main(argv: string[]): Promise<number> {
         const located = values.repo ? null : await resolveRepoFile(db, given.find((item) => path.isAbsolute(item)) ?? process.cwd());
         const repo = values.repo ? requireRepo(db, values.repo) : given.length > 0 ? located?.repo : undefined;
         if (given.length > 0 && !repo) throw new UsageError("--path를 묶을 레포를 알 수 없습니다 — --repo로 지정하세요");
-        const note = addNote(db, {
-          text: need(positionals.join(" "), "노트 내용"),
-          repoId: repo?.id ?? null,
-          tags: values.tag,
-          paths: repo ? given.map((item) => (path.isAbsolute(item) ? relativeToRepo(repo.path, item) : item)) : [],
-          source: "cli",
-        });
+        const text = need(positionals.join(" "), "노트 내용");
+        let bound = repo;
+        let bindPaths = repo ? given.map((item) => (path.isAbsolute(item) ? relativeToRepo(repo.path, item) : item)) : [];
+        let autoNote = "";
+        // --path를 안 줬으면 지금 작업 폴더에서 바뀐 소스 파일에 묶는다
+        if (given.length === 0) {
+          const target = values.repo ? repo : (await resolveRepoFile(db, process.cwd()))?.repo;
+          if (target) {
+            const auto = await autoBindPaths(db, target.id, text, values.repo ? target.path : process.cwd());
+            if (auto.paths.length > 0) {
+              bound = target;
+              bindPaths = auto.paths;
+              autoNote = " [바뀐 파일에 자동으로 묶음]";
+            } else if (auto.tooMany) autoNote = ` (바뀐 소스 파일이 ${AUTO_BIND_MAX}개를 넘어 파일에 묶지 않았습니다)`;
+          }
+        }
+        const note = addNote(db, { text, repoId: bound?.id ?? null, tags: values.tag, paths: bindPaths, source: "cli" });
         const paths = parseNotePaths(note.paths).map((item) => item.path);
-        print(`노트 #${note.id} 저장${paths.length > 0 ? ` (파일: ${paths.join(", ")})` : ""}${note.redacted ? " (비밀로 보이는 값은 [redacted]로 바꿨습니다)" : ""}`);
+        print(`노트 #${note.id} 저장${paths.length > 0 ? ` (파일: ${paths.join(", ")})` : ""}${autoNote}${note.redacted ? " (비밀로 보이는 값은 [redacted]로 바꿨습니다)" : ""}`);
         return 0;
       }
       case "remove": {

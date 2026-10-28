@@ -132,3 +132,14 @@ SWE-ContextBench (arXiv 2602.08316) · Which Metadata Matters for MCP Tool Selec
 정규화한 URL로 잇는 근거를 만들어 쟀다(레포 5개, 질의 555개). TerraLink-vite-V2 HEAD에서는 호출 195개 중 166개가 정의와 맞았지만,
 분할 평가에서 후보를 낸 질의가 2.7%였고 맞힌 것은 없었다 — R@10 +0.000(p=1). 마이그레이션 하나와 전 파일 다시 읽기를 더할 값이 없어
 합치지 않았다(브랜치 `worktree-agent-a455daaca6ea2d3f2`에 보관).
+
+## 10. 실사용 기준선 — `npm run usage` (2026-10-28, 배포 전)
+
+Claude Code 대화 기록(`~/.claude/projects/*/*.jsonl`)과 git 이력을 읽기만 해서 잰다. 수정 벤치가 아니라 실제 세션의 지표다.
+
+- 10-20 이후 세션 50개 중 15개가 grimoire 도구를 썼다: record_note 55, search_memory 20, file_context 2, list_repos 1.
+  `impact`·`/grimoire-impact`는 아직 배포 전이라 0회.
+- **재손질률**(세션 중 커밋이 48시간 안에 같은 파일의 fix 커밋으로 이어진 비율): 64%(51/80). 판정 가능한 커밋은 174개 중 80개다.
+  57개는 겹친 세션이라 어느 세션 것인지 모호하고, 37개는 아직 48시간이 지나지 않았다. fix 커밋이 잦은 레포라 절댓값은 부풀어 있다.
+  배포 뒤 `impact`를 먼저 부른 세션과 아닌 세션을 이 지표로 나눠 본다.
+- 노트 자동 묶기(`record_note`에 `paths`가 없으면 작업 폴더에서 바뀐 소스 파일, 5개까지)는 이 기록에서 노트가 파일에 묶이는 비율로 본다.

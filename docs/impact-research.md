@@ -109,3 +109,26 @@ p=0.017), 정밀도 0.14 → 0.65. 고른 개수를 맞춘 순위 자르기(0.16
 Ripple — From Seed to Scope (ICSE 2026) · TARMAQ (SANER 2016) · Learning to Rank Co-changed Methods (arXiv 2411.19099) ·
 SWE-ContextBench (arXiv 2602.08316) · Which Metadata Matters for MCP Tool Selection (arXiv 2610.14334) · Tool description edits
 (arXiv 2505.18135) · Aider repo map · code-review-graph · CodeRabbit Code Graph Analysis. grimoire 노트 #29~#46.
+
+## 8. 부르는 순간을 만든다 — `/grimoire-impact` 스킬 (2026-10-28)
+
+`grimoire install claude-code --skills`가 `~/.claude/skills/grimoire-impact/SKILL.md`를 쓴다. 커밋 전에 `impact`를 의도와 함께 한 번
+부르고, 후보는 검토만 하게 한다. 실제 Claude(sonnet)로 다중 파일 fix 사례에서 "이 변경 커밋해 줘"를 시켜 쟀다(스킬은 프로젝트
+`.claude/skills`에 넣어 실제 홈은 건드리지 않았다):
+
+| 스킬 설명 | 스킬 사용 | impact 호출 | 턴 | 비용 |
+|---|---|---|---|---|
+| 스킬 없음 | – | 0/2 | 3 | $0.11 |
+| "Use before committing, reviewing a diff…" | 0/2 | 0/2 | 3 | $0.11 |
+| **"MANDATORY before every git commit in this repository…"** | **3/3** | **3/3** | 9~11 | $0.15 |
+
+스킬은 모델에게 보였지만(설명을 그대로 인용했다) 권유형 설명으로는 고르지 않았다. 단정형으로 바꾸자 매번 골랐다 — 도구 설명 연구
+(arXiv 2505.18135)의 "가능하면 항상 불러라" 효과와 같은 방향이다. 대가는 커밋당 6~8턴·$0.04. 스킬은 직접 설치하는 선택 기능이다.
+호출로 실제 놓친 파일이 줄어드는지는 §6처럼 아직 보이지 않았다.
+
+## 9. 버린 것 — API 경로로 잇는 `route` 근거
+
+백엔드 라우트 정의(NestJS `@Controller`+`@Get`, Express, Spring, ASP.NET)와 프런트 호출(`fetch`·`axios`·`"/api/…"` 리터럴)을
+정규화한 URL로 잇는 근거를 만들어 쟀다(레포 5개, 질의 555개). TerraLink-vite-V2 HEAD에서는 호출 195개 중 166개가 정의와 맞았지만,
+분할 평가에서 후보를 낸 질의가 2.7%였고 맞힌 것은 없었다 — R@10 +0.000(p=1). 마이그레이션 하나와 전 파일 다시 읽기를 더할 값이 없어
+합치지 않았다(브랜치 `worktree-agent-a455daaca6ea2d3f2`에 보관).

@@ -10,10 +10,14 @@ import path from "node:path";
 
 export const SKILL_NAME = "grimoire-impact";
 
-/** 이 버전이 쓰는 SKILL.md — doctor가 설치된 것과 비교한다 */
+/**
+ * 이 버전이 쓰는 SKILL.md — doctor가 설치된 것과 비교한다.
+ * 설명은 단정형이어야 한다: "Use before committing…"으로는 "커밋해 줘"에서 0/4번 골랐고, "MANDATORY before every git commit…"으로는
+ * 3/3번 골라 impact를 불렀다(실제 Claude, 2026-10-28). 대가는 커밋당 약 6~8턴·$0.04.
+ */
 export const SKILL_CONTENT = `---
 name: ${SKILL_NAME}
-description: Use before committing, reviewing a diff, or opening a PR, and whenever the user asks "what else should change", "did I miss anything" or "what does this affect". Checks which other files the change likely needs, using this repo's git history (grimoire impact).
+description: MANDATORY before every git commit in this repository — run it right before you commit, even for small changes, and whenever you review a diff, open a PR, or the user asks "did I miss anything". Lists other files this change likely needs, from git history (grimoire impact).
 ---
 
 # Impact check before you commit

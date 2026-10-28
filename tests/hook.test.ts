@@ -193,11 +193,9 @@ test("PreToolUse(git commit): 보통 같이 바뀌는데 손대지 않은 파일
   assert.equal(await handleHook(context, bash('git commit -m "a"')), null, "같은 세션·같은 묶음은 한 번");
 
   // b.ts도 이미 손댔으면(작업 폴더에서 바뀜) 알리지 않는다 — 같은 명령의 git add는 작업 폴더 전부를 커밋으로 본다.
-  // 남는 것은 늘 같이 바뀌어 온 테스트 a.test.ts
+  // 남은 a.test.ts는 4/5(80%)라 문턱(신뢰도 0.9·지지도 5) 아래 — 조용
   fs.writeFileSync(path.join(repo.path, "src", "b.ts"), 'import "./a"; // 9\n');
-  const both = (await handleHook(context, bash("git add -A && git commit -m both", "c2")))?.json?.hookSpecificOutput.additionalContext ?? "";
-  assert.doesNotMatch(both, /^- src\/b\.ts/m);
-  assert.match(both, /- src\/a\.test\.ts \(/);
+  assert.equal(await handleHook(context, bash("git add -A && git commit -m both", "c2")), null);
   git(repo.path, ["reset", "-q"]);
   git(repo.path, ["checkout", "--", "."]);
 });
@@ -228,4 +226,19 @@ test("SessionStart: settings.json의 우리 훅이 낡았으면 다시 설치하
   fs.writeFileSync(settingsFile, JSON.stringify(mergeHooks({}, command)));
   const fresh = await handleHook({ db, env, me: [], settingsFile }, start);
   assert.doesNotMatch(fresh?.stdout ?? "", /install claude-code/);
+});
+
+test("PreToolUse(git commit) GRIMOIRE_COMMIT_IMPACT=all: 엄격한 규칙 대신 영향 후보 상위를 이유와 함께 준다 (실험)", async () => {
+  const db = memoryDb();
+  const repo = await addRepo(db, coupledRepo());
+  await syncRepo(db, repo);
+  const env = { GRIMOIRE_HOME: tempDir("grimoire-hook-home-"), GRIMOIRE_COMMIT_IMPACT: "all" };
+  // b.ts와 함께 고쳤으면 엄격한 규칙(a.test.ts 4/5)으로는 조용하지만, 영향 후보로는 a.test.ts가 나온다
+  fs.writeFileSync(path.join(repo.path, "src", "a.ts"), "export const a = 9;\n");
+  fs.writeFileSync(path.join(repo.path, "src", "b.ts"), 'import "./a"; // 9\n');
+  const out = await handleHook({ db, env, me: [] }, { hook_event_name: "PreToolUse", session_id: "x", cwd: repo.path, tool_name: "Bash", tool_input: { command: "git add -A && git commit -m x" } });
+  const text = out?.json?.hookSpecificOutput.additionalContext ?? "";
+  assert.match(text, /^Grimoire impact of this commit/);
+  assert.match(text, /^- src\/a\.test\.ts \(/m);
+  git(repo.path, ["checkout", "--", "."]);
 });

@@ -48,7 +48,7 @@ const HELP = `grimoire — 로컬 git 이력을 AI 코딩 도구의 기억으로
   grimoire show <sha>             커밋 상세 + diff  [--repo r] [--lines n] [--path p ...]
   grimoire overview <repo>        레포 개요  [--json]
   grimoire context <file>         파일을 고치기 전에 볼 것 — 최근 커밋·왜·같이 바뀌는 파일/테스트  [--repo r] [--json]
-  grimoire impact [file...]       바뀐 파일이 건드릴 곳 — import·공변경·테스트  (파일을 안 주면 커밋 안 된 변경)  [--repo r] [--limit n] [--json]
+  grimoire impact [file...]       바뀐 파일이 건드릴 곳 — import·공변경·테스트  (파일을 안 주면 커밋 안 된 변경)  [--intent "작업"] [--repo r] [--limit n] [--json]
   grimoire note <text>            노트 남기기  [--repo r] [--tag t ...] [--path f ...]  (--path: 그 파일을 고치기 전에 노트가 보인다)
   grimoire remove <repo>          레포와 색인 삭제
 
@@ -84,6 +84,7 @@ async function main(argv: string[]): Promise<number> {
     allowPositionals: true,
     options: {
       repo: { type: "string" },
+      intent: { type: "string" },
       author: { type: "string" },
       since: { type: "string" },
       until: { type: "string" },
@@ -182,7 +183,7 @@ async function main(argv: string[]): Promise<number> {
         const repo = values.repo ? requireRepo(db, values.repo) : located?.repo;
         if (!repo) throw new UsageError("어느 레포의 변경인지 알 수 없습니다 — 레포 안에서 부르거나 --repo로 지정하세요");
         const changed = given.length > 0 ? await Promise.all(given.map(async (item) => (await resolveRepoFile(db, item))?.relative ?? relativeToRepo(repo.path, item))) : await workingChanges(process.cwd());
-        const impact = impactOf(db, repo.id, changed, { limit: Number.parseInt(values.limit ?? "10", 10) || 10 });
+        const impact = impactOf(db, repo.id, changed, { limit: Number.parseInt(values.limit ?? "10", 10) || 10, intent: values.intent });
         if (values.json) return printJson(impact);
         print(formatImpact(impact, impact.items.length));
         return 0;

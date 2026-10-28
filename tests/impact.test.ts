@@ -160,3 +160,27 @@ test("impactbench: 이력에서 질의를 만들고(머지·대량·같은 변�
   assert.deepEqual(score, { hit5: 1, recall5: 0.5, recall10: 0.5, precision5: 0.2, rr: 1 / 3, covered: 1 });
   assert.deepEqual(meanScore([score, scoreQuery([], ["a"])]), { n: 2, hit5: 0.5, recall5: 0.25, recall10: 0.25, precision5: 0.1, rr: 0.167, covered: 0.5 });
 });
+
+test("toolsWithDescriptions: 벤치 전용 설명 바꿔 끼우기 — 그 도구만, 깨진 JSON·없는 도구는 무시", async () => {
+  const { toolsWithDescriptions, TOOLS } = await import("../src/mcp/tools.js");
+  const base = TOOLS.find((tool) => tool.name === "impact")!.description;
+  const swapped = toolsWithDescriptions({ GRIMOIRE_BENCH_TOOL_DESC: JSON.stringify({ impact: "Call before every git commit.", nope: "x" }) });
+  assert.equal(swapped.find((tool) => tool.name === "impact")!.description, "Call before every git commit.");
+  assert.equal(swapped.find((tool) => tool.name === "search_memory")!.description, TOOLS.find((tool) => tool.name === "search_memory")!.description);
+  assert.equal(toolsWithDescriptions({ GRIMOIRE_BENCH_TOOL_DESC: "{broken" }).find((tool) => tool.name === "impact")!.description, base);
+  assert.equal(toolsWithDescriptions({}).length, TOOLS.length);
+});
+
+test("impactOf intent: 작업 의도로 찾은 과거 커밋의 파일을 순위에 합치고, 근거로 그 커밋을 댄다", async () => {
+  const { db, repo } = await indexed();
+  // handler.ts만 바꿨다 — 구조로는 schema.sql과 이어지지 않지만, "컬럼"을 다룬 과거 커밋들이 schema.sql을 바꿨다
+  const plain = impactOf(db, repo.id, ["src/handler.ts"], { noteFiles: 0 }).items.map((item) => item.path);
+  assert.equal(plain.includes("db/schema.sql"), false);
+  const withIntent = impactOf(db, repo.id, ["src/handler.ts"], { noteFiles: 0, intent: "컬럼 추가" }).items;
+  const schema = withIntent.find((item) => item.path === "db/schema.sql");
+  assert.ok(schema, "의도로 찾은 파일이 들어와야 합니다");
+  assert.equal(schema!.score, 0, "의도 근거는 점수(문턱)에 넣지 않는다");
+  assert.match(schema!.reasons.find((reason) => reason.source === "intent")!.detail, /^changed in [0-9a-f]{7} "feat\(api\): 컬럼/);
+  // 바뀐 파일 자신과 지금 레포에 없는 파일은 넣지 않는다
+  assert.equal(withIntent.some((item) => item.path === "src/handler.ts"), false);
+});

@@ -132,7 +132,7 @@ export const TOOLS = [
     description: "Before review/commit: files a change likely affects (imports, co-change, tests).",
     inputSchema: {
       type: "object",
-      properties: { paths: { type: "array", items: { type: "string" }, description: "default: git diff" }, repo: { type: "string" } },
+      properties: { paths: { type: "array", items: { type: "string" }, description: "default: git diff" }, intent: { type: "string", description: "the task, in words" }, repo: { type: "string" } },
     },
     annotations: { readOnlyHint: true },
   },
@@ -173,6 +173,21 @@ export const TOOLS = [
     },
   },
 ] as const;
+
+/**
+ * 도구 설명 바꿔 끼우기 — 벤치 전용(e2e/taskbench.ts --tool-desc). `GRIMOIRE_BENCH_TOOL_DESC`가 {"도구": "설명"} JSON이면
+ * 그 도구의 description만 바꾼다. 설명 문구가 호출률을 크게 바꾼다는 연구(arXiv 2505.18135)를 우리 작업으로 재려고 둔다.
+ * 깨진 JSON이나 없는 도구는 무시한다.
+ */
+export function toolsWithDescriptions(env: NodeJS.ProcessEnv = process.env) {
+  let overrides: Record<string, unknown> = {};
+  try {
+    overrides = env.GRIMOIRE_BENCH_TOOL_DESC ? (JSON.parse(env.GRIMOIRE_BENCH_TOOL_DESC) as Record<string, unknown>) : {};
+  } catch {
+    overrides = {};
+  }
+  return TOOLS.map((tool) => (typeof overrides[tool.name] === "string" ? { ...tool, description: overrides[tool.name] as string } : tool));
+}
 
 /** detail=full에서 1위 커밋에 붙이는 diff 줄 수 */
 const FULL_DIFF_LINES = 120;
@@ -395,7 +410,7 @@ async function runTool(
           : // 경로를 안 주면 작업 폴더(워크트리면 그 폴더)의 커밋 안 된 변경
             await workingChanges(current && context.workspace?.root ? context.workspace.root : repo.path, signal);
       if (current) await context.workspace?.refresh?.(current, REFRESH_WAIT_MS);
-      return slimImpact(impactOf(db, repo.id, changed));
+      return slimImpact(impactOf(db, repo.id, changed, { intent: str(args.intent) }));
     }
     case "get_repo_overview": {
       const repo = repoFilter(args.repo);

@@ -14,6 +14,9 @@
  * 전략: 근거를 하나씩·합쳐서 (core/impact.ts의 sources). dir(같은 폴더)은 기준선 — 이것보다 못하면 쓸 이유가 없다.
  * 지표: hit@5(상위 5개에 정답이 하나라도), recall@5·@10, precision@5(맞힌 수/5), MRR, 후보를 하나라도 낸 비율(coverage).
  * 짝 비교: 기본 조합 vs import만 — 질의별 recall@10 차이의 윌콕슨 p.
+ *
+ * 커밋 직전 알림(core/impact.ts missingCompanions)도 같은 커밋으로 잰다: 빠진 것 없는 커밋에서 울리는 비율(오경보),
+ * 파일 하나를 빼고 커밋했다고 칠 때 그것을 되찾는 비율, 알린 것 중 그 변경의 파일인 비율(정밀도).
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -21,7 +24,7 @@ import { parseArgs } from "node:util";
 
 import { changeKey } from "../src/core/context";
 import { openDb } from "../src/core/db";
-import { DEFAULT_SOURCES, impactOf, type ImpactSource } from "../src/core/impact";
+import { DEFAULT_SOURCES, impactOf, missingCompanions, type ImpactSource } from "../src/core/impact";
 import { addRepo, syncRepo } from "../src/core/indexer";
 import { tempDir } from "../tests/helpers";
 import { pinnedClone, wilcoxon } from "./taskbench";
@@ -72,6 +75,32 @@ export function scoreQuery(predicted: string[], targets: string[]): Score {
     rr: first >= 0 ? 1 / (first + 1) : 0,
     covered: predicted.length > 0 ? 1 : 0,
   };
+}
+
+export interface AlertScore {
+  complete: number;
+  falseAlarm: number;
+  dropped: number;
+  recovered: number;
+  alerts: number;
+  correct: number;
+}
+
+/** 커밋 직전 알림 — 분할 뒤 커밋의 레포 안 파일 묶음마다 (alerts: 커밋 파일 → 알린 파일) */
+export function scoreAlerts(groups: string[][], alerts: (committed: string[]) => string[]): AlertScore {
+  const score: AlertScore = { complete: 0, falseAlarm: 0, dropped: 0, recovered: 0, alerts: 0, correct: 0 };
+  for (const files of groups) {
+    score.complete++;
+    if (alerts(files).length > 0) score.falseAlarm++;
+    for (const dropped of files) {
+      const alerted = alerts(files.filter((file) => file !== dropped));
+      score.dropped++;
+      score.alerts += alerted.length;
+      score.correct += alerted.filter((file) => file === dropped).length;
+      if (alerted.includes(dropped)) score.recovered++;
+    }
+  }
+  return score;
 }
 
 export function meanScore(scores: Score[]): Score & { n: number } {
@@ -130,7 +159,9 @@ async function main(): Promise<number> {
   const db = openDb(path.join(work, "impact.db"));
   const perRepo: Record<string, unknown> = {};
   const all: { repoId: number; query: Query }[] = [];
-  const pooled: Record<string, Score[]> = Object.fromEntries(Object.keys(STRATEGIES).map((name) => [name, []]));
+  const alertTotal: AlertScore = { complete: 0, falseAlarm: 0, dropped: 0, recovered: 0, alerts: 0, correct: 0 };
+  // "+intent": 기본 근거 + 그 커밋의 제목을 작업 의도로 (실제 쓰임에서는 사용자의 요청 — 제목은 그보다 정보가 많을 수 있다)
+  const pooled: Record<string, Score[]> = Object.fromEntries([...Object.keys(STRATEGIES), "+intent"].map((name) => [name, []]));
 
   for (const dir of values.repo) {
     const source = path.resolve(dir.replace(/^~(?=$|[\\/])/, process.env.USERPROFILE ?? process.env.HOME ?? "~"));
@@ -166,18 +197,40 @@ async function main(): Promise<number> {
       timing[strategy] = queries.length ? +((Date.now() - begin) / queries.length).toFixed(2) : 0;
       pooled[strategy].push(...scores[strategy]);
     }
+    // 커밋 직전 알림: 질의를 만든 커밋들의 레포 안 파일 묶음
+    const groups = [...new Map(queries.map((query) => [query.sha, [query.seed, ...query.targets].sort()])).values()];
+    const alerts = scoreAlerts(groups, (committed) => missingCompanions(db, repo.id, committed, new Set(committed)).map((item) => item.path));
+    for (const key of Object.keys(alertTotal) as (keyof AlertScore)[]) alertTotal[key] += alerts[key];
+    const subjects = new Map(commits.map((commit) => [commit.sha, commit.subject]));
+    const begin = Date.now();
+    scores["+intent"] = queries.map((query) =>
+      scoreQuery(impactOf(db, repo.id, [query.seed], { limit: 10, noteFiles: 0, intent: subjects.get(query.sha) }).items.map((item) => item.path), query.targets),
+    );
+    timing["+intent"] = queries.length ? +((Date.now() - begin) / queries.length).toFixed(2) : 0;
+    pooled["+intent"].push(...scores["+intent"]);
     const summary = Object.fromEntries(Object.entries(scores).map(([strategy, list]) => [strategy, { ...meanScore(list), msPerQuery: timing[strategy] }]));
     perRepo[name] = { split: split.slice(0, 10), evalCommits: commits.length, queries: queries.length, totalQueries: total, knownFiles: known.size, indexMs, summary };
     process.stdout.write(`\n## ${name} — 분할 ${split.slice(0, 10)}, 뒤 커밋 ${commits.length}개, 질의 ${queries.length}/${total}, 파일 ${known.size}개\n`);
     printTable(summary);
   }
 
+  const alertSummary = {
+    ...alertTotal,
+    falseAlarmRate: +(alertTotal.falseAlarm / Math.max(1, alertTotal.complete)).toFixed(3),
+    recoveredRate: +(alertTotal.recovered / Math.max(1, alertTotal.dropped)).toFixed(3),
+    precision: +(alertTotal.correct / Math.max(1, alertTotal.alerts)).toFixed(3),
+  };
   const pooledSummary = Object.fromEntries(Object.entries(pooled).map(([strategy, list]) => [strategy, meanScore(list)]));
   process.stdout.write(`\n## 전체 (질의 ${pooled.default.length}개)\n`);
   printTable(pooledSummary);
   const diffs = pooled.default.map((score, index) => score.recall10 - pooled[BASELINE][index].recall10);
   const p = wilcoxon(diffs);
+  const intentDiffs = pooled["+intent"].map((score, index) => score.recall10 - pooled.default[index].recall10);
+  process.stdout.write(`\n의도 합침: +intent vs default — recall@10 ${(pooledSummary["+intent"].recall10 - pooledSummary.default.recall10).toFixed(3)}, 윌콕슨 p=${wilcoxon(intentDiffs)}\n`);
   const verdict = { versus: BASELINE, recall10Delta: +(pooledSummary.default.recall10 - pooledSummary[BASELINE].recall10).toFixed(3), wilcoxonP: p };
+  process.stdout.write(
+    `\n커밋 직전 알림: 빠진 것 없는 커밋 ${alertSummary.complete}개 중 오경보 ${alertSummary.falseAlarmRate}, 하나 뺀 커밋 ${alertSummary.dropped}개에서 되찾음 ${alertSummary.recoveredRate}, 정밀도 ${alertSummary.precision}\n`,
+  );
   process.stdout.write(`\n판정: default vs ${BASELINE} — recall@10 ${verdict.recall10Delta >= 0 ? "+" : ""}${verdict.recall10Delta}, 윌콕슨 p=${p}\n`);
   if (values.grid) {
     const grid: { weights: Record<string, number>; score: Score & { n: number } }[] = [];
@@ -203,7 +256,7 @@ async function main(): Promise<number> {
     fs.mkdirSync(dirOut, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const file = path.join(dirOut, `impactbench-${stamp}${values.label ? `-${values.label}` : ""}.json`);
-    fs.writeFileSync(file, JSON.stringify({ label: values.label, ratio, repos: perRepo, pooled: pooledSummary, verdict }, null, 2));
+    fs.writeFileSync(file, JSON.stringify({ label: values.label, ratio, repos: perRepo, pooled: pooledSummary, alerts: alertSummary, verdict }, null, 2));
     process.stdout.write(`결과: ${file}\n`);
   }
   db.close();

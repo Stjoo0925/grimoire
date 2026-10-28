@@ -3,7 +3,7 @@
  *
  *   PreToolUse(Edit·Write·MultiEdit)  편집 직전: 그 파일에 묶인 노트·왜·공변경·테스트(context.ts, lean)를 400자 안에 `additionalContext`로.
  *                                     세션당 파일당 한 번, 이력에서만 알 수 있는 것이 없으면 아무것도 내지 않는다.
- *   PreToolUse(Bash: git commit)      커밋 직전: 이 커밋과 보통 같이 바뀌는데 손대지 않은 파일(impact.ts missingCompanions, 점수 ≥ 0.8, 셋까지).
+ *   PreToolUse(Bash: git commit)      커밋 직전: 이 커밋의 파일과 거의 늘 같이 바뀌어 왔는데 손대지 않은 파일(impact.ts missingCompanions, 공변경 ≥ 0.9·5회, 셋까지).
  *                                     에이전트는 작업 의도를 알고 있어 그것으로 거른다. 같은 파일 묶음은 세션에 한 번.
  *   UserPromptSubmit                  사용자 프롬프트를 세션 기록에 (capture.ts) — 본 에이전트의 것만
  *   PostToolUse(Bash·Edit·Write)      검증 명령·편집 파일을 세션 기록에, `git commit`이면 그때까지의 기록을 커밋에 묶는다 (서브에이전트 포함)
@@ -38,7 +38,7 @@ import { grimoireHome, type Env } from "../core/config";
 import { fileContext, formatFileContext, needsCochangeBackfill, TEST_PATH, HOOK_BUDGET } from "../core/context";
 import type { DB } from "../core/db";
 import { addedLines, commitTime, dirtyFiles, headSha, stagedFiles } from "../core/git";
-import { formatMissing, missingCompanions } from "../core/impact";
+import { commitImpact, formatMissing, IMPACT_HEAD, missingCompanions } from "../core/impact";
 import { outdatedHooks, readInstalledHooks } from "../setup/hook-config";
 
 /** git 요약 줄이 없을 때 "방금 만든 커밋"으로 보는 HEAD 커밋 시각의 한도 */
@@ -417,9 +417,23 @@ async function preCommit(context: HookContext, input: HookInput, command: string
   if (state.shown[key]) return null;
   state.shown[key] = "1";
   saveSession(context.env, sessionId, state);
-  const text = formatMissing(missingCompanions(context.db, resolved.repo.id, committed, new Set([...dirty, ...staged])), HOOK_BUDGET);
+  const touched = new Set([...dirty, ...staged]);
+  // GRIMOIRE_COMMIT_IMPACT=all: 실험 — 엄격한 빠진 짝 대신 영향 후보 상위 다섯을 늘 준다 (taskbench --hook-env로 잰다)
+  const text =
+    context.env.GRIMOIRE_COMMIT_IMPACT === "all"
+      ? formatMissing(commitImpact(context.db, resolved.repo.id, committed, touched, sessionIntent(context, sessionId, resolved.repo.id)), 600, IMPACT_HEAD)
+      : formatMissing(missingCompanions(context.db, resolved.repo.id, committed, touched), HOOK_BUDGET);
   if (!text) return null;
   return { json: { hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: text } } };
+}
+
+/** 이 세션의 작업 의도 — 마지막 커밋 뒤 사용자가 한 말(캡처된 프롬프트) 최근 셋. 없으면 undefined */
+function sessionIntent(context: HookContext, sessionId: string, repoId: number): string | undefined {
+  const prompts = pendingEvents(context.db, sessionId, repoId)
+    .filter((event) => event.kind === "prompt")
+    .map((event) => event.text)
+    .slice(-3);
+  return prompts.length > 0 ? prompts.join("\n") : undefined;
 }
 
 async function preToolUse(context: HookContext, input: HookInput): Promise<HookOutput | null> {

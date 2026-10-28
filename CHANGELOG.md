@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.0](https://github.com/Stjoo0925/grimoire/compare/v0.10.1...v0.11.0) (2026-10-28)
+
+
+### 기능
+
+* **setup:** Codex·Cursor에도 /grimoire-impact 스킬 ([#35](https://github.com/Stjoo0925/grimoire/issues/35)) ([a2eb621](https://github.com/Stjoo0925/grimoire/commit/a2eb621cfec09039253712cbd3d8c2b9c130e14a))
+
 ## [0.10.1](https://github.com/Stjoo0925/grimoire/compare/v0.10.0...v0.10.1) (2026-10-28)
 
 

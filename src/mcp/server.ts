@@ -37,6 +37,8 @@ const STARTUP_DELAY_MS = 3_000;
 const SHUTDOWN_WAIT_MS = 5_000;
 /** 클라이언트에게 작업 폴더(roots)를 묻고 기다리는 상한 — 답이 없으면 작업 레포 없이 간다 */
 const ROOTS_TIMEOUT_MS = 5_000;
+/** 진행 알림을 보낸 호출의 응답을 늦추는 틈 — 마지막 알림과 응답이 한 번에 읽히지 않게 (progressOf) */
+const PROGRESS_GAP_MS = 20;
 
 export async function runMcpServer(env = process.env): Promise<void> {
   const db = openDb(dbPath(env));
@@ -182,6 +184,10 @@ async function workspaceFromRoots(server: Server, env: Env, log: (line: string) 
  * 요청에 progressToken이 있으면 진행 알림을 보내는 함수(report)와, 보낸 알림이 다 나갈 때까지 기다리는 함수(settled).
  * 도구는 알림을 기다리지 않고 보내므로, 응답 전에 settled()로 기다려야 마지막 알림이 응답보다 먼저 나간다.
  * 보내기 실패는 무시한다(결과에는 영향 없음).
+ *
+ * 먼저 나가는 것만으로는 모자라다: MCP SDK 클라이언트는 알림을 microtask로 미뤄 처리하고 응답은 바로 처리하면서 진행 핸들러를 지운다.
+ * 마지막 알림과 응답이 한 덩어리로 읽히면 알림이 핸들러 없이 버려진다(macOS CI에서 [0,1,2] 대신 [0,1]). 알림을 보냈으면
+ * 응답을 한 번(PROGRESS_GAP_MS) 늦춰 따로 읽히게 한다 — 진행 알림을 쓰는 호출(add_repo)은 어차피 오래 걸린다.
  */
 export function progressOf(mcpReq: {
   _meta?: { progressToken?: string | number };
@@ -195,7 +201,9 @@ export function progressOf(mcpReq: {
       pending.push(mcpReq.notify({ method: "notifications/progress", params: { progressToken: token, progress, total, message } }).catch(() => undefined));
     },
     settled: async () => {
+      if (pending.length === 0) return;
       await Promise.all(pending);
+      await new Promise((resolve) => setTimeout(resolve, PROGRESS_GAP_MS));
     },
   };
 }

@@ -11,10 +11,12 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
+import { isGitCommit } from "./core/capture";
 import { dbPath, grimoireHome, type Env } from "./core/config";
 import { openDb } from "./core/db";
 import { myEmails } from "./core/identity";
 import { handleHook, type HookInput } from "./hook/runner";
+import { settingsPath } from "./setup/hook-config";
 
 /** 자체 타임아웃 — Claude Code의 timeout보다 짧게, 느린 디스크에서도 편집을 붙잡지 않게 */
 const SELF_TIMEOUT_MS = 3_000;
@@ -135,6 +137,11 @@ async function main(): Promise<void> {
     log(env, `bad stdin: ${error instanceof Error ? error.message : error}`);
     return;
   }
+  // 커밋이 아닌 Bash의 편집 직전 훅은 할 일이 없다 — Bash마다 불리므로 DB를 열기 전에 끝낸다
+  if (input.hook_event_name === "PreToolUse" && input.tool_name === "Bash") {
+    const command = input.tool_input?.command;
+    if (typeof command !== "string" || !isGitCommit(command)) return;
+  }
   // "나" — GRIMOIRE_ME가 있으면 그것, 없으면 git config user.email (CLI·MCP와 같은 규칙)
   const me = await myEmails(env);
   let db;
@@ -146,7 +153,7 @@ async function main(): Promise<void> {
     return;
   }
   try {
-    const output = await handleHook({ db, env, me }, input);
+    const output = await handleHook({ db, env, me, settingsFile: settingsPath() }, input);
     if (output?.json) process.stdout.write(JSON.stringify(output.json) + "\n");
     else if (output?.stdout) process.stdout.write(output.stdout + "\n");
     trace(env, input, output?.json?.hookSpecificOutput.additionalContext ?? output?.stdout ?? "");

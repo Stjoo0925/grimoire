@@ -11,32 +11,10 @@ import os from "node:os";
 import path from "node:path";
 
 import type { Env } from "../core/config";
+import { HOOK_EVENTS, MARKER, settingsPath, type HookGroup } from "./hook-config";
 import { FORWARDED_ENV, InstallError, planJson, writeJson } from "./install";
 
-export interface HookCommand {
-  type: "command";
-  command: string;
-  timeout?: number;
-}
-
-export interface HookGroup {
-  matcher?: string;
-  hooks: HookCommand[];
-}
-
-/** 이벤트별로 넣는 항목 — matcher는 도구 이름(PreToolUse·PostToolUse)이나 source(SessionStart) */
-export const HOOK_EVENTS: { event: string; matcher?: string; timeout: number }[] = [
-  { event: "PreToolUse", matcher: "Edit|Write|MultiEdit|NotebookEdit", timeout: 5 },
-  { event: "PostToolUse", matcher: "Bash|Edit|Write|MultiEdit|NotebookEdit", timeout: 10 },
-  { event: "UserPromptSubmit", timeout: 5 },
-  { event: "SessionStart", matcher: "startup|clear|compact", timeout: 5 },
-];
-
-const MARKER = /[\\/]hook\.js"?(\s|$)/;
-
-export function settingsPath(home = os.homedir()): string {
-  return path.join(home, ".claude", "settings.json");
-}
+export { HOOK_EVENTS, outdatedHooks, readInstalledHooks, settingsPath, type HookCommand, type HookGroup } from "./hook-config";
 
 /** 훅 명령 문자열 — `"<node>" "<hook.js>" --env K=V …` */
 export function hookCommand(hookPath: string, env: Env = process.env, nodePath = process.execPath): string {
@@ -105,22 +83,6 @@ export async function installHooks(options: HooksInstallOptions): Promise<HooksI
   const events = HOOK_EVENTS.map((item) => item.event);
   if (options.dryRun || plan.unchanged) return { file, backup: null, unchanged: plan.unchanged, command, events };
   return { file, backup: writeJson(plan), unchanged: false, command, events };
-}
-
-/** settings.json에 적힌 우리 훅 명령들 (doctor용). 없으면 빈 배열. */
-export function readInstalledHooks(file: string): { event: string; command: string }[] {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { hooks?: Record<string, HookGroup[]> };
-    const out: { event: string; command: string }[] = [];
-    for (const [event, groups] of Object.entries(parsed.hooks ?? {})) {
-      for (const group of Array.isArray(groups) ? groups : []) {
-        for (const hook of group.hooks ?? []) if (hook?.type === "command" && MARKER.test(hook.command ?? "")) out.push({ event, command: hook.command });
-      }
-    }
-    return out;
-  } catch {
-    return [];
-  }
 }
 
 /** 훅 명령 문자열에서 node와 hook.js 경로를 꺼낸다 (doctor가 존재 여부를 본다) */

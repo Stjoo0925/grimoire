@@ -13,7 +13,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { refreshWhy, storeTrailers } from "./capture";
-import { BLOB_BATCH_BYTES, extractSymbols, headerComment, listHeadFiles, readBlobs, splitIdentifier, type CodeSymbol, type HeadFile } from "./code";
+import { BLOB_BATCH_BYTES, extractRefNames, extractSymbols, headerComment, listHeadFiles, readBlobs, splitIdentifier, type CodeSymbol, type HeadFile } from "./code";
 import { addCochange, changeKey, cochangeInput, extractImportSpecs, needsCochangeBackfill, rebuildCochange, resolveImportSpecs } from "./context";
 import { deleteDoc, upsertDoc, pruneOrphanFts, type DB } from "./db";
 import {
@@ -37,6 +37,11 @@ import { agentSignal } from "./trailers";
 
 /** 한 번에 git에서 읽어 올 커밋 수 */
 const READ_BATCH = 500;
+/**
+ * 현재 코드 색인 규칙의 판 — 올리면 다음 동기화가 모든 파일을 한 번 다시 읽는다.
+ * 1: 정의-참조 그래프(file_defs·file_refs)와 경로 별칭 import (0.10.0)
+ */
+export const CODE_VERSION = 1;
 /** 검색 문서에 넣는 변경 파일 경로 수 상한 (대량 이동 커밋이 색인을 부풀리지 않게) */
 const DOC_PATHS_MAX = 200;
 /** 기술 스택을 읽을 매니페스트 파일 수 상한 (모노레포 대비) */
@@ -311,8 +316,8 @@ async function syncRepoNow(db: DB, repo: RepoRow, signal?: AbortSignal): Promise
   }
 
   // 넘겨받은 repo 행은 오래됐을 수 있다 — 기준점은 DB에서 다시 읽는다
-  const saved = db.prepare("SELECT tips, head_tree FROM repos WHERE id = ?").get(repo.id) as
-    | { tips: string | null; head_tree: string | null }
+  const saved = db.prepare("SELECT tips, head_tree, code_version FROM repos WHERE id = ?").get(repo.id) as
+    | { tips: string | null; head_tree: string | null; code_version: number }
     | undefined;
   // 서로 기다릴 필요 없는 git 호출은 함께 띄운다 — 프로세스 띄우기가 호출마다 20ms 안팎이라(Windows),
   // 바뀐 것 없는 재동기화는 거의 이 셋이 전부다 (npm run perf: 재동기화 시간)
@@ -339,7 +344,8 @@ async function syncRepoNow(db: DB, repo: RepoRow, signal?: AbortSignal): Promise
     return added;
   };
   // HEAD 트리가 그대로면 현재 코드·기술 스택도 그대로다. 커밋·기술 스택·코드 읽기는 서로 독립이라 함께 돌린다
-  const treeChanged = tree === null || tree !== saved?.head_tree;
+  // 코드 색인 규칙이 바뀐 레포(code_version < CODE_VERSION)는 트리가 그대로여도 한 번 다시 읽는다
+  const treeChanged = tree === null || tree !== saved?.head_tree || (saved?.code_version ?? 0) < CODE_VERSION;
   // 옛 DB(마이그레이션 직후)면 있는 커밋으로 공변경 표를 끝에 다시 만들고, 아니면 새 커밋을 하나씩 더한다 (context.ts)
   const backfill = needsCochangeBackfill(db, repo.id);
   const [added, tech, code] = await Promise.all([
@@ -366,6 +372,7 @@ async function syncRepoNow(db: DB, repo: RepoRow, signal?: AbortSignal): Promise
     }
 
     applyCode(db, repo, code);
+    if (treeChanged) db.prepare("UPDATE repos SET code_version = ? WHERE id = ?").run(CODE_VERSION, repo.id);
 
     db.prepare("UPDATE repos SET synced_at = ?, remote_url = ?, tips = ?, head_tree = ? WHERE id = ?").run(
       new Date().toISOString(),
@@ -440,6 +447,8 @@ interface ChangedFile {
   header: string;
   /** import 지정자(원문) — 경로는 트랜잭션 안에서 HEAD 파일 집합으로 푼다 (context.ts) */
   imports: string[];
+  /** 언급한 식별자 — 정의-참조 그래프 (code.ts extractRefNames) */
+  refs: string[];
 }
 
 interface CodeChanges {
@@ -478,7 +487,9 @@ async function readChangedCode(db: DB, repo: RepoRow, signal?: AbortSignal): Pro
       (row) => [row.path, row.blob],
     ),
   );
-  const stale = head.filter((file) => known.get(file.path) !== file.blob);
+  // 코드 색인 규칙이 바뀌었으면(CODE_VERSION) 한 번은 전부 다시 읽는다 — blob은 그대로라 노트의 stale 판정은 흔들리지 않는다
+  const version = (db.prepare("SELECT code_version FROM repos WHERE id = ?").get(repo.id) as { code_version: number } | undefined)?.code_version ?? 0;
+  const stale = version < CODE_VERSION ? head : head.filter((file) => known.get(file.path) !== file.blob);
   // 같은 내용(blob)의 파일은 한 번만 읽는다
   const unique = [...new Map(stale.map((file) => [file.blob, file])).values()];
   const extracted = new Map<string, Omit<ChangedFile, "path" | "blob">>();
@@ -491,11 +502,12 @@ async function readChangedCode(db: DB, repo: RepoRow, signal?: AbortSignal): Pro
         symbols: extractSymbols(content),
         header: headerComment(content),
         imports: extractImportSpecs(file.path, content),
+        refs: extractRefNames(content),
       });
     }
   }
   const present = new Set(head.map((file) => file.path));
-  const empty = { lines: 1, symbols: [], header: "", imports: [] };
+  const empty = { lines: 1, symbols: [], header: "", imports: [], refs: [] };
   return {
     changed: stale.map((file) => ({ path: file.path, blob: file.blob, ...(extracted.get(file.blob) ?? empty) })),
     removed: [...known.keys()].filter((file) => !present.has(file)),
@@ -511,6 +523,10 @@ function applyCode(db: DB, repo: RepoRow, code: CodeChanges): void {
   );
   const clearImports = db.prepare("DELETE FROM file_imports WHERE repo_id = ? AND path = ?");
   const insertImport = db.prepare("INSERT OR IGNORE INTO file_imports (repo_id, path, target) VALUES (?, ?, ?)");
+  const clearDefs = db.prepare("DELETE FROM file_defs WHERE repo_id = ? AND path = ?");
+  const insertDef = db.prepare("INSERT OR IGNORE INTO file_defs (repo_id, name, path) VALUES (?, ?, ?)");
+  const clearRefs = db.prepare("DELETE FROM file_refs WHERE repo_id = ? AND path = ?");
+  const insertRef = db.prepare("INSERT OR IGNORE INTO file_refs (repo_id, path, name) VALUES (?, ?, ?)");
   const now = new Date().toISOString();
   for (const file of code.changed) {
     const { symbols, header } = file;
@@ -518,6 +534,12 @@ function applyCode(db: DB, repo: RepoRow, code: CodeChanges): void {
     // 레포 안 import만 — "누가 나를 쓰나"(usedBy)와 공변경의 import 이웃 신호 (context.ts)
     clearImports.run(repo.id, file.path);
     for (const target of resolveImportSpecs(file.path, file.imports, code.present)) insertImport.run(repo.id, file.path, target);
+    // 정의-참조 그래프 — 라우트("GET /x")는 이름이 아니라 빼고, 자기가 정의한 이름은 참조에서 뺀다
+    clearDefs.run(repo.id, file.path);
+    clearRefs.run(repo.id, file.path);
+    const defined = new Set(symbols.map((symbol) => symbol.name).filter((name) => !name.includes(" ")));
+    for (const name of defined) insertDef.run(repo.id, name, file.path);
+    for (const name of file.refs) if (!defined.has(name)) insertRef.run(repo.id, file.path, name);
     upsertDoc(db, {
       kind: "file",
       ref: file.path,
@@ -535,6 +557,8 @@ function applyCode(db: DB, repo: RepoRow, code: CodeChanges): void {
   for (const file of code.removed) {
     remove.run(repo.id, file);
     clearImports.run(repo.id, file);
+    clearDefs.run(repo.id, file);
+    clearRefs.run(repo.id, file);
     deleteDoc(db, "file", file, repo.id);
   }
 }

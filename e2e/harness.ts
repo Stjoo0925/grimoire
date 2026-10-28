@@ -28,13 +28,13 @@ import { makeFixture, ME } from "./fixture";
 const GUI_PATH = process.platform === "win32" ? (process.env.PATH ?? "") : "/usr/bin:/bin:/usr/sbin:/sbin";
 const CONNECT_BUDGET_MS = 5_000;
 const SYNC_WAIT_MS = 10_000;
-const EXPECTED_TOOLS = ["search_memory", "show_commit", "file_context", "get_repo_overview", "list_repos", "add_repo", "record_note"];
-const READ_TOOLS = ["search_memory", "show_commit", "file_context", "get_repo_overview", "list_repos"];
+const EXPECTED_TOOLS = ["search_memory", "show_commit", "file_context", "impact", "get_repo_overview", "list_repos", "add_repo", "record_note"];
+const READ_TOOLS = ["search_memory", "show_commit", "file_context", "impact", "get_repo_overview", "list_repos"];
 /**
  * 도구 설명 글(도구·인자 description) 예산 — 설명이 다시 길어지는 것을 막는 용도다.
  * 영어로 옮기기 전 한국어 설명이 392자(도구 288 + 인자 104)였고, 영어판은 뜻이 잡히게 쓰고 약간의 여유를 둔다.
  */
-const TOOL_TEXT_BUDGET = 500; // 420(도구 6개) + file_context 한 문장
+const TOOL_TEXT_BUDGET = 600; // 420(도구 6개) + file_context 한 문장 + impact 한 문장·인자 하나
 
 interface ServerSpec {
   command: string;
@@ -246,7 +246,8 @@ async function runScenario(spec: ServerSpec): Promise<StepResult[]> {
     expect(summary.text.length < 3000, `검색 응답(summary) ${summary.text.length}자 — 예산 3000자`);
     const listed = (await live().client.listTools()).tools;
     const tools = JSON.stringify(listed);
-    expect(tools.length < 2600, `도구 정의 ${tools.length}자 — 예산 2600자`);
+    // 도구 8개 — impact 정의가 약 300자
+    expect(tools.length < 2900, `도구 정의 ${tools.length}자 — 예산 2900자`);
     // 설명 글은 따로 — annotations·인자 같은 구조가 늘어도 설명이 다시 길어지지 않게
     const text = listed.reduce(
       (sum, tool) =>
@@ -309,6 +310,14 @@ async function runScenario(spec: ServerSpec): Promise<StepResult[]> {
     expect(/(^| )src\/auth\(/.test(overview.json.dirs), `디렉터리: ${overview.json.dirs}`);
     // 픽스처 3개 중 동료 커밋 1개를 뺀 2개가 "나"
     expect(overview.json.commits === 3 && overview.json.mine === 2, `커밋 ${overview.json.commits} / 내 커밋 ${overview.json.mine}`);
+  });
+
+  await step("impact: 준 파일 또는 커밋 안 된 변경의 영향 범위", async () => {
+    const given = await call(live(), "impact", { repo: "shop-api", paths: ["src/auth/refresh.ts"] });
+    expect(!given.isError && given.json.changed[0] === "src/auth/refresh.ts" && Array.isArray(given.json.impact), given.text);
+    // 경로를 안 주면 작업 폴더의 변경 — 픽스처는 깨끗하다
+    const clean = await call(live(), "impact", { repo: "shop-api" });
+    expect(!clean.isError && clean.json.changed.length === 0, clean.text);
   });
 
   await step("record_note → 검색에 바로 걸림", async () => {

@@ -227,9 +227,10 @@ const PY_ABSOLUTE = /^\s*(?:from\s+([\w.]+)\s+import\b|import\s+([\w.]+))/gm;
 const RESOLVE_EXT = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".svelte", ".py"];
 
 /**
- * 파일 하나의 import 지정자(원문). 상대 경로(JS/TS)와 Python의 상대·절대 모듈만 — 외부 패키지는 여기서 버린다.
+ * 파일 하나의 import 지정자(원문). 상대 경로(JS/TS), 경로 별칭(`@/x`·`~/x`·`@shared/x`·baseUrl식 `components/x`),
+ * Python의 상대·절대 모듈. 외부 패키지는 푸는 자리에서 레포 안 파일과 맞지 않아 저절로 버려진다.
  * 내용을 읽는 자리(색인)와 경로를 푸는 자리(트랜잭션 안, HEAD 파일 집합이 있는 곳)가 달라 둘로 나눴다.
- * 꼴: "js:<spec>" · "pyrel:<dots>|<module>" · "pyabs:<module>"
+ * 꼴: "js:<spec>" · "alias:<spec>" · "pyrel:<dots>|<module>" · "pyabs:<module>"
  */
 export function extractImportSpecs(file: string, content: string): string[] {
   const ext = path.posix.extname(file).toLowerCase();
@@ -243,7 +244,14 @@ export function extractImportSpecs(file: string, content: string): string[] {
     return [...out];
   }
   if (!SOURCE_EXT.has(ext)) return [];
-  for (const pattern of IMPORT_PATTERNS) for (const match of content.matchAll(pattern)) if (match[1].startsWith(".")) out.add(`js:${match[1]}`);
+  for (const pattern of IMPORT_PATTERNS) {
+    for (const match of content.matchAll(pattern)) {
+      const spec = match[1];
+      if (spec.startsWith(".")) out.add(`js:${spec}`);
+      // 별칭·baseUrl 경로는 "/"가 있어야 한다 — 맨 패키지 이름("react")은 레포 파일일 리 없다
+      else if (spec.includes("/") && !/^[a-z]+:/i.test(spec)) out.add(`alias:${spec}`);
+    }
+  }
   return [...out];
 }
 
@@ -255,6 +263,8 @@ export function resolveImportSpecs(file: string, specs: string[], known: Set<str
     let target: string | null = null;
     if (spec.startsWith("js:")) {
       target = resolveCandidates(path.posix.normalize(path.posix.join(dir, spec.slice(3))), known);
+    } else if (spec.startsWith("alias:")) {
+      target = resolveAlias(dir, spec.slice(6), known);
     } else if (spec.startsWith("pyrel:")) {
       const [dots, module] = spec.slice(6).split("|");
       let base = dir;
@@ -272,6 +282,28 @@ export function resolveImportSpecs(file: string, specs: string[], known: Set<str
 /** 파일 하나의 레포 안 import 대상 경로 (둘을 이어 붙인 것 — 테스트·CLI용) */
 export function extractImports(file: string, content: string, known: Set<string>): string[] {
   return resolveImportSpecs(file, extractImportSpecs(file, content), known);
+}
+
+/**
+ * 경로 별칭 — tsconfig/vite 설정을 읽지 않고, 흔한 꼴을 이 파일의 조상 폴더(와 그 아래 src/)에서 찾는다.
+ * `@/x`·`~/x`·`#/x` → x, `@name/x` → name/x(tsconfig의 `@shared/*` 꼴; npm 범위 패키지는 레포에 그 폴더가 없어 안 맞는다),
+ * 그 밖의 `a/b` → a/b (baseUrl). 가장 가까운 조상부터 — 모노레포에서 frontend/의 `@/`가 backend/로 새지 않게.
+ */
+function resolveAlias(dir: string, spec: string, known: Set<string>): string | null {
+  const rest = /^[@~#]\//.test(spec) ? spec.slice(2) : spec.startsWith("@") ? spec.slice(1) : spec;
+  if (!rest || rest.startsWith(".")) return null;
+  const ancestors: string[] = [];
+  for (let current = dir; ; current = path.posix.dirname(current)) {
+    ancestors.push(current === "." ? "" : current);
+    if (current === "." || current === "/" || current === "") break;
+  }
+  for (const base of ancestors) {
+    for (const root of [base, base ? `${base}/src` : "src"]) {
+      const target = resolveCandidates(root ? `${root}/${rest}` : rest, known);
+      if (target) return target;
+    }
+  }
+  return null;
 }
 
 function resolveCandidates(base: string, known: Set<string>, python = false): string | null {

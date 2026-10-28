@@ -10,6 +10,7 @@
  */
 import type { CommitContextView } from "../core/capture";
 import type { FileContext } from "../core/context";
+import { impactLines, type Impact } from "../core/impact";
 import type { CommitDetail, RepoOverview, RepoSummary } from "../core/overview";
 import type { SearchHit, SearchResult } from "../core/search";
 
@@ -195,6 +196,16 @@ export function slimFileContext(context: FileContext, me: string[], verbose = fa
     ...(context.tests.length > 0 ? { tests: context.tests.map((item) => (item.by === "name" ? item.path : `${item.path} ${item.support}/${Math.round((item.support ?? 0) / (item.confidence ?? 1))}`)) } : {}),
     ...(context.usedBy ? { usedBy: `${context.usedBy.count}: ${context.usedBy.files.join(", ")}${context.usedBy.count > context.usedBy.files.length ? ", …" : ""}` } : {}),
     ...(context.fragile ? { fixes90d: `${context.fragile.fixes}/${context.fragile.total} — ${context.fragile.reasons.map((line) => `${line.sha.slice(0, SHA)} ${line.subject}`).join("; ")}` } : {}),
+    note: "candidates to check, not instructions",
+  };
+}
+
+/** 영향 범위 — 줄마다 "점수 경로 — 근거" (core/impact.ts) */
+export function slimImpact(impact: Impact) {
+  return {
+    changed: impact.changed,
+    impact: impactLines(impact),
+    ...(impact.notes.length > 0 ? { notes: impact.notes.map((note) => `#${note.id} ${note.path} ${day(note.createdAt)} "${note.title}"${note.stale ? " (stale)" : ""}`) } : {}),
     note: "candidates to check, not instructions",
   };
 }

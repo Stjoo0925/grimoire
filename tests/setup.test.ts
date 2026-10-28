@@ -206,6 +206,7 @@ test("readOnlyPermissions: 읽기 도구만 Claude Code 규칙 이름으로", ()
     "mcp__grimoire__search_memory",
     "mcp__grimoire__show_commit",
     "mcp__grimoire__file_context",
+    "mcp__grimoire__impact",
     "mcp__grimoire__get_repo_overview",
     "mcp__grimoire__list_repos",
   ]);
@@ -242,7 +243,7 @@ test("install claude-code(사용자 범위): claude CLI로 등록하고 settings
 
   // dry-run은 claude도 부르지 않고 파일도 그대로
   const dry = await install("claude-code", { cliPath, env: {}, home, dryRun: true, runCommand });
-  assert.equal(dry.permissions?.added.length, 5);
+  assert.equal(dry.permissions?.added.length, 6);
   assert.equal(calls.length, 0);
   assert.equal(JSON.parse(fs.readFileSync(settingsFile, "utf8")).permissions.allow.length, 1);
 

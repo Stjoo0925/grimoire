@@ -3,6 +3,7 @@
  *
  *   search_memory      — 과거 커밋·노트 검색 (근거 목록)
  *   show_commit        — 커밋(sha 하나 또는 shas 최대 5개)의 메시지·파일·diff
+ *   impact             — 바뀐 파일(기본: 커밋 안 된 변경)이 건드릴 곳 — import·공변경·테스트·같은 폴더 (core/impact.ts)
  *   get_repo_overview  — 레포의 기술 스택·활동·많이 건드린 곳·최근 주요 커밋
  *   list_repos         — 인덱싱된 레포 목록
  *   add_repo           — 레포(또는 디렉터리 아래 레포 전부) 등록 + 인덱싱
@@ -18,6 +19,7 @@ import path from "node:path";
 import { commitContextOf } from "../core/capture";
 import { isIndexable } from "../core/code";
 import { fileContext } from "../core/context";
+import { impactOf, workingChanges } from "../core/impact";
 import { isBusyError, type DB } from "../core/db";
 import { resolveAuthors } from "../core/identity";
 import { indexCommitCode } from "../core/diffs";
@@ -27,7 +29,7 @@ import { parseNotePaths } from "../core/note-doc";
 import { addNote, PATHS_MAX, TAG_CHARS, TAGS_MAX } from "../core/notes";
 import { commitDetail, repoOverview, repoSummaries } from "../core/overview";
 import { search, type SearchHit } from "../core/search";
-import { slimCommit, slimFileContext, slimOverview, slimRepos, slimSearch, type Detail } from "./format";
+import { slimCommit, slimFileContext, slimImpact, slimOverview, slimRepos, slimSearch, type Detail } from "./format";
 import { waitForWorkspace, type Background, type Workspace } from "./workspace";
 
 export interface ToolContext {
@@ -122,6 +124,15 @@ export const TOOLS = [
       type: "object",
       properties: { path: { type: "string" }, repo: { type: "string" }, verbose: { type: "boolean" } },
       required: ["path"],
+    },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: "impact",
+    description: "Before review/commit: files a change likely affects (imports, co-change, tests).",
+    inputSchema: {
+      type: "object",
+      properties: { paths: { type: "array", items: { type: "string" }, description: "default: git diff" }, repo: { type: "string" } },
     },
     annotations: { readOnlyHint: true },
   },
@@ -371,6 +382,20 @@ async function runTool(
       const relative = located?.relative ?? relativeToRepo(repo.path, target);
       if (current) await context.workspace?.refresh?.(current, REFRESH_WAIT_MS);
       return slimFileContext(fileContext(db, repo.id, relative), me, args.verbose === true);
+    }
+    case "impact": {
+      const given = Array.isArray(args.paths) ? args.paths.filter((item): item is string => typeof item === "string" && item.trim() !== "").slice(0, 50) : [];
+      // 절대경로는 그 경로가 속한 등록 레포(레포 밖 워크트리면 본 레포) 기준으로, 상대경로는 레포 기준 그대로
+      const located = await Promise.all(given.map((item) => (path.isAbsolute(item) ? resolveRepoFile(db, item, signal) : Promise.resolve(null))));
+      const repo = repoFilter(args.repo) ?? located.find(Boolean)?.repo ?? current;
+      if (!repo) throw new ToolError("repo가 필요합니다 (어느 레포의 변경인지 알 수 없습니다)");
+      const changed =
+        given.length > 0
+          ? given.map((item, index) => located[index]?.relative ?? relativeToRepo(repo.path, item))
+          : // 경로를 안 주면 작업 폴더(워크트리면 그 폴더)의 커밋 안 된 변경
+            await workingChanges(current && context.workspace?.root ? context.workspace.root : repo.path, signal);
+      if (current) await context.workspace?.refresh?.(current, REFRESH_WAIT_MS);
+      return slimImpact(impactOf(db, repo.id, changed));
     }
     case "get_repo_overview": {
       const repo = repoFilter(args.repo);

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.1](https://github.com/Stjoo0925/grimoire/compare/v0.11.0...v0.11.1) (2026-10-28)
+
+
+### 버그 수정
+
+* **mcp:** 마지막 진행 알림이 응답에 밀려 버려지지 않게 ([#37](https://github.com/Stjoo0925/grimoire/issues/37)) ([389b26e](https://github.com/Stjoo0925/grimoire/commit/389b26ef643234e5b94592b7af31a68b6f449d30))
+
 ## [0.11.0](https://github.com/Stjoo0925/grimoire/compare/v0.10.1...v0.11.0) (2026-10-28)
 
 

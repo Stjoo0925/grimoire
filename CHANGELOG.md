@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.1](https://github.com/Stjoo0925/grimoire/compare/v0.10.0...v0.10.1) (2026-10-28)
+
+
+### 버그 수정
+
+* **update:** 새 버전을 설치할 때 npm 캐시를 건너뛴다 ([#32](https://github.com/Stjoo0925/grimoire/issues/32)) ([2df1a69](https://github.com/Stjoo0925/grimoire/commit/2df1a69487a6914d3969d2deb0c1e341e46a1b55))
+
 ## [0.10.0](https://github.com/Stjoo0925/grimoire/compare/v0.9.0...v0.10.0) (2026-10-28)
 
 

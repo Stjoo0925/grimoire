@@ -148,7 +148,8 @@ test("grimoire update: npm 설치본이면 npm install -g로 그 버전을 깐�
     log: () => {},
   });
   assert.equal(code, 0);
-  assert.deepEqual(npm, ["install -g @stjoo0925/grimoire@0.3.0"]);
+  // --prefer-online: 막 나온 버전을 로컬 npm 캐시가 아직 몰라 ETARGET이 나는 것을 막는다
+  assert.deepEqual(npm, ["install -g --prefer-online @stjoo0925/grimoire@0.3.0"]);
 });
 
 test("grimoire update: --check·최신·로컬 변경이면 설치본을 건드리지 않는다", async () => {

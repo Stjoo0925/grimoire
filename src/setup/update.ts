@@ -31,8 +31,12 @@ export interface UpdateOptions {
 
 const STEP_TIMEOUT_MS = 10 * 60 * 1000;
 
+/**
+ * --prefer-online: 로컬 npm 캐시의 패키지 정보를 믿지 않고 레지스트리에 다시 묻는다. 새 버전이 막 나온 직후에는 캐시가 아직
+ * 옛 버전 목록을 들고 있어, 레지스트리에 있는 버전도 ETARGET("No matching version")으로 실패했다(0.10.0 배포 때 실제로 겪음).
+ */
 export function npmUpdateSteps(version: string): { command: string; args: string[] }[] {
-  return [{ command: "npm", args: ["install", "-g", `${PACKAGE_NAME}@${version}`] }];
+  return [{ command: "npm", args: ["install", "-g", "--prefer-online", `${PACKAGE_NAME}@${version}`] }];
 }
 
 export function updateSteps(tag: string): { command: string; args: string[] }[] {

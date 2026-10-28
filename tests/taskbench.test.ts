@@ -30,7 +30,7 @@ test("hookStats: 켜진 훅의 호출·주입·글자 수·이벤트별·파일�
   assert.equal(stats.leaked, 1);
   assert.equal(stats.errors, 1);
   assert.equal(stats.noteInjections, 0);
-  assert.deepEqual(hookStats(""), { calls: 0, injections: 0, chars: 0, noteInjections: 0, byEvent: {}, files: [], leaked: 0, errors: 0 });
+  assert.deepEqual(hookStats(""), { calls: 0, injections: 0, chars: 0, noteInjections: 0, commitAlerts: 0, alerted: [], byEvent: {}, files: [], leaked: 0, errors: 0 });
 });
 
 test("hookStats: 파일에 묶인 노트(`Notes: #` 줄)가 든 주입만 노트 주입으로 센다", () => {
@@ -175,4 +175,19 @@ test("summarize notes: bare·grimoire 대비 짝을 따로 내고, 노트가 뜬
   assert.equal(summary.pairedNotesVsGrimoire?.okPairs, 2);
   assert.equal(summary.pairedNotesVsGrimoire?.passDelta, 0.333);
   assert.equal(summary.paired.passDelta, -0.333);
+});
+
+test("hookStats: 커밋 직전 알림(Bash의 PreToolUse)을 세고 알린 파일을 모은다", () => {
+  const alert = JSON.stringify({
+    event: "PreToolUse",
+    tool: "Bash",
+    file: null,
+    enabled: true,
+    injected: true,
+    chars: 120,
+    text: "Grimoire: files that usually change with this commit but are untouched — check if the task needs them:\n- src/b.ts (co-changed with src/a.ts 5× (100%))\n- src/a.test.ts (test of src/a.ts)",
+  });
+  const stats = hookStats([alert, line({ injected: true, chars: 10, text: "src/a.ts" })].join("\n"));
+  assert.equal(stats.commitAlerts, 1);
+  assert.deepEqual(stats.alerted, ["src/b.ts", "src/a.test.ts"]);
 });

@@ -129,6 +129,10 @@ export interface HookStats {
   chars: number;
   /** 파일에 묶인 노트(`Notes:` 줄)가 든 주입 횟수 */
   noteInjections: number;
+  /** 커밋 직전 알림(Bash의 PreToolUse — 보통 같이 바뀌는데 손대지 않은 파일)을 넣은 횟수 */
+  commitAlerts: number;
+  /** 커밋 직전 알림이 가리킨 파일 (레포 기준 경로) */
+  alerted: string[];
   /** 이벤트별 주입 횟수 (PreToolUse=편집 직전, PostToolUse=막혔을 때 2단계, SessionStart=시작 요약) */
   byEvent: Record<string, number>;
   /** 편집 직전 맥락을 받은 파일 (작업 폴더 기준 경로) */
@@ -142,7 +146,7 @@ const NOTES_LINE = /^Notes: #/m;
 
 /** trace 파일 → 훅 통계. 파일이 없거나 깨진 줄은 건너뛴다 */
 export function hookStats(text: string, root?: string): HookStats {
-  const stats: HookStats = { calls: 0, injections: 0, chars: 0, noteInjections: 0, byEvent: {}, files: [], leaked: 0, errors: 0 };
+  const stats: HookStats = { calls: 0, injections: 0, chars: 0, noteInjections: 0, commitAlerts: 0, alerted: [], byEvent: {}, files: [], leaked: 0, errors: 0 };
   const files = new Set<string>();
   for (const raw of text.split("\n")) {
     if (!raw.trim()) continue;
@@ -162,6 +166,10 @@ export function hookStats(text: string, root?: string): HookStats {
     stats.injections++;
     stats.chars += line.chars;
     if (NOTES_LINE.test(line.text ?? "")) stats.noteInjections++;
+    if (line.event === "PreToolUse" && line.tool === "Bash") {
+      stats.commitAlerts++;
+      for (const match of (line.text ?? "").matchAll(/^- (\S+) \(/gm)) if (!stats.alerted.includes(match[1])) stats.alerted.push(match[1]);
+    }
     const event = line.event ?? "?";
     stats.byEvent[event] = (stats.byEvent[event] ?? 0) + 1;
     if (event === "PreToolUse" && line.file) {
@@ -194,6 +202,7 @@ const TEST_PATH = /(?:^|\/)(?:test(?:ing|s)?|e2e|__tests__|spec)\/|\.(?:test|spe
 const DEPENDENCY_FILE = /(^|\/)(package\.json|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|requirements[^/]*\.txt|pyproject\.toml|poetry\.lock|go\.mod|go\.sum|Cargo\.(toml|lock)|Gemfile(\.lock)?)$/;
 const FIX_SUBJECT = /\b(fix(es|ed)?|bug|regress|hotfix)\b|^(fix|hotfix)(\([^)]*\))?!?\s*:|수정|버그|Why:|Constraint:/i;
 const TEST_TIMEOUT_MS = 120_000;
+const SOURCE_FILE = /\.(ts|tsx|js|jsx|mjs|cjs|vue|svelte|py|go|rs|java|kt|cs|rb|php)$/;
 const MAX_FILES = 15;
 const MAX_NON_TEST_LINES = 100;
 /** 각 상태를 몇 번 돌려 뒤집히는 테스트를 거르나 */
@@ -202,7 +211,15 @@ const FLAKY_RUNS = 3;
 const expandHome = (value: string) => value.replace(/^~(?=$|[\\/])/, os.homedir());
 
 function git(cwd: string, args: string[]): string {
-  return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 * 1024 * 1024 });
+  // 에이전트가 남긴 git 프로세스가 아직 index.lock을 쥐고 있을 수 있다 — 채점이 그와 부딪히면 잠깐 기다렸다 다시
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 * 1024 * 1024 });
+    } catch (error) {
+      if (attempt >= 10 || !/index\.lock/.test(String((error as { stderr?: string }).stderr ?? ""))) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
+    }
+  }
 }
 
 function runShell(command: string, cwd: string): { ok: boolean; output: string } {
@@ -317,7 +334,7 @@ function changeKey(subject: string, files: string[]): string {
   return `${subject.replace(/\s*\(#\d+\)\s*$/, "").trim()}\0${[...files].sort().join("\n")}`;
 }
 
-function mine(repo: string, test: string, limit: number, existing: Task[], all = false, links: string[] = [], under = ""): Task[] {
+function mine(repo: string, test: string, limit: number, existing: Task[], all = false, links: string[] = [], under = "", minFiles = 1): Task[] {
   const known = new Set(existing.map((task) => task.sha));
   // --all: 브랜치·원격 브랜치의 커밋까지 — PR을 squash로 합치는 레포는 main만 보면 후보가 적다
   const log = git(repo, ["log", ...(all ? ["--all"] : []), "--no-merges", "--format=%H%x1f%P%x1f%s", "-n", "2000"]).trim().split("\n");
@@ -337,6 +354,8 @@ function mine(repo: string, test: string, limit: number, existing: Task[], all =
     const testFiles = changed.filter((file) => TEST_PATH.test(file));
     const files = changed.filter((file) => !TEST_PATH.test(file));
     if (testFiles.length === 0 || files.length === 0) continue;
+    // --min-files: 테스트 아닌 소스를 이만큼 이상 고친 fix만 — 영향 범위(놓친 파일)를 잴 여지가 있는 사례
+    if (files.filter((file) => SOURCE_FILE.test(file)).length < minFiles) continue;
     // --under: 테스트 명령이 도는 하위 폴더(예: backend/)의 사례만 — 다른 폴더 테스트는 그 명령으로 못 돌린다
     if (under && !changed.every((file) => file.startsWith(under))) continue;
     // 같은 변경이 커밋 둘로 남은 것(squash 머지 ↔ 브랜치 원본)은 한 번만
@@ -423,6 +442,12 @@ interface RunOptions {
   bare: boolean;
   budget: string;
   maxTurns: number;
+  /** 이 실행의 훅에 더 넘길 환경 변수 ("K=V") — 예: GRIMOIRE_COMMIT_IMPACT=all */
+  hookEnv?: string[];
+  /** MCP 도구 설명 바꿔 끼우기 — {"도구": "설명"} JSON (src/mcp/tools.ts toolsWithDescriptions) */
+  toolDesc?: string;
+  /** 끝에 git commit까지 하게 한다 — 커밋 직전 알림(hook/runner.ts preCommit)이 발화하는 조건. 두 모드에 똑같이 */
+  commit?: boolean;
   /** 준비 실행 — 같은 설정(도구·MCP·훅)으로 짧은 프롬프트만 보내 캐시 머리말을 데우고, 채점은 하지 않는다 */
   warmup?: boolean;
 }
@@ -451,12 +476,13 @@ async function runTask(task: Task, mode: Mode, seed: number, options: RunOptions
           execFileSync(process.execPath, [options.cli, "note", note.text, ...paths, "--tag", "taskbench"], { cwd: wt.dir, env: { ...process.env, ...env }, stdio: "ignore" });
         }
       }
-      fs.writeFileSync(mcpConfig, JSON.stringify({ mcpServers: { grimoire: { command: process.execPath, args: [options.cli, "mcp"], env } } }));
+      const serverEnv = options.toolDesc ? { ...env, GRIMOIRE_BENCH_TOOL_DESC: options.toolDesc } : env;
+      fs.writeFileSync(mcpConfig, JSON.stringify({ mcpServers: { grimoire: { command: process.execPath, args: [options.cli, "mcp"], env: serverEnv } } }));
       const hook = path.join(path.dirname(options.cli), "hook.js");
       const slash = (value: string) => value.split(path.sep).join("/");
       // GRIMOIRE_HOOKS=1: claude 프로세스에는 0을 줘 사용자 전역 grimoire 훅을 끄므로, 이 실행의 훅만 다시 켠다.
       // 캡처는 이 임시 DB에만 켠다 — "막혔을 때 2단계"는 캡처한 검증 실패로 발화하므로, 끄면 실제 사용자가 받는 것과 달라진다
-      const command = `"${slash(process.execPath)}" "${slash(hook)}" --env "GRIMOIRE_HOME=${slash(data)}" --env "GRIMOIRE_HOOKS=1"`;
+      const command = `"${slash(process.execPath)}" "${slash(hook)}" --env "GRIMOIRE_HOME=${slash(data)}" --env "GRIMOIRE_HOOKS=1"${(options.hookEnv ?? []).map((item) => ` --env "${item}"`).join("")}`;
       settings = path.join(data, "settings.json");
       // `grimoire install claude-code --hooks`와 같은 이벤트 목록 — 실제 설치본이 받는 것을 잰다
       const hooks = Object.fromEntries(
@@ -469,7 +495,7 @@ async function runTask(task: Task, mode: Mode, seed: number, options: RunOptions
     // 훅이 무엇을 넣었는지 — 두 모드 모두 기록한다. bare에서는 사용자 전역 훅이 꺼진 채(enabled: false) 불리는지,
     // 그래도 무언가 넣었는지(leaked)를 본다
     const traceFile = path.join(data, "hook-trace.jsonl");
-    const prompt = options.warmup ? WARMUP_PROMPT : `${task.prompt || task.subject}\n\n고친 뒤에는 \`${test}\`로 확인해 줘. 작업 폴더 밖은 건드리지 마.`;
+    const prompt = options.warmup ? WARMUP_PROMPT : `${task.prompt || task.subject}\n\n고친 뒤에는 \`${test}\`로 확인해 줘.${options.commit ? " 확인이 끝나면 바꾼 파일을 git add 하고 git commit 해 줘." : ""} 작업 폴더 밖은 건드리지 마.`;
     const run = await runClaude({
       prompt,
       cwd: wt.dir,
@@ -509,8 +535,13 @@ async function runTask(task: Task, mode: Mode, seed: number, options: RunOptions
     for (const file of task.testFiles) git(wt.dir, ["checkout", "-q", task.sha, "--", file]);
     const pass = runShell(test, wt.dir).ok;
     // 회귀: 부모에서 통과하던 것이 깨졌나 — 실제 fix 커밋 전체 테스트가 아니라 "부모 상태 테스트"를 에이전트 결과에 얹어 돌린다
-    for (const file of task.testFiles) git(wt.dir, ["checkout", "-q", task.parent, "--", file]);
-    const p2pBroken = !runShell(test, wt.dir).ok;
+    // fix가 새로 만든 테스트 파일은 부모에 없다 — 지우고, 부모에 있던 테스트만으로 돌린다(하나도 없으면 회귀를 잴 것이 없다)
+    const inParent = task.testFiles.filter((file) => spawnSync("git", ["cat-file", "-e", `${task.parent}:${file}`], { cwd: wt.dir }).status === 0);
+    for (const file of task.testFiles) {
+      if (inParent.includes(file)) git(wt.dir, ["checkout", "-q", task.parent, "--", file]);
+      else fs.rmSync(path.join(wt.dir, file), { force: true });
+    }
+    const p2pBroken = inParent.length > 0 && !runShell(testCommand(task.test, inParent, task.under), wt.dir).ok;
     const edited = editedFiles(run, wt.dir).filter((file) => !task.testFiles.includes(file));
     const finalDiff = git(wt.dir, ["diff", "--numstat", task.parent, "--"]).trim().split("\n").filter(Boolean);
     const finalLines = finalDiff.reduce((sum, row) => sum + (Number(row.split("\t")[0]) || 0) + (Number(row.split("\t")[1]) || 0), 0);
@@ -542,6 +573,10 @@ export function costNoWrite(row: Pick<RunRow, "costUsd" | "cacheWriteUsd">): num
   return Math.max(0, row.costUsd - row.cacheWriteUsd);
 }
 
+/** 사례 id → 실제 fix가 고친 파일 (요약에서 알림 정밀도를 셀 때). main이 채운다 */
+const FIX_FILES = new Map<string, string[]>();
+const fixFiles = (task: string) => FIX_FILES.get(task) ?? [];
+
 export function summarize(rows: RunRow[]) {
   const by = (mode: Mode) => rows.filter((row) => row.mode === mode && !row.error);
   const modes = Object.fromEntries(
@@ -572,6 +607,11 @@ export function summarize(rows: RunRow[]) {
           influencedRuns: list.filter(influenced).length,
           // 편집 직전에 파일에 묶인 노트가 실제로 뜬 실행 — notes 모드에서 K3가 닿았나
           noteRuns: list.filter(noteReached).length,
+          // 커밋 직전 알림 — 알린 실행 수, 알린 파일 중 실제 fix가 고친 파일의 비율(정밀도), 걸린 시간(채점 포함)
+          commitAlertRuns: list.filter((row) => row.hook.commitAlerts > 0).length,
+          alerted: list.reduce((sum, row) => sum + row.hook.alerted.length, 0),
+          alertedInFix: list.reduce((sum, row) => sum + row.hook.alerted.filter((file) => fixFiles(row.task).includes(file)).length, 0),
+          seconds: mean(list.map((row) => row.seconds)),
           leaked: list.reduce((sum, row) => sum + row.hook.leaked, 0),
         },
       ];
@@ -669,7 +709,11 @@ async function main(): Promise<number> {
       "max-turns": { type: "string" },
       bare: { type: "boolean" },
       label: { type: "string" },
+      "tool-desc": { type: "string" },
+      "hook-env": { type: "string" },
+      "min-files": { type: "string" },
       warmup: { type: "string" },
+      commit: { type: "boolean" },
     },
   });
   if (values.mine) {
@@ -677,7 +721,7 @@ async function main(): Promise<number> {
     const repo = path.resolve(expandHome(values.repo));
     const out = path.resolve(values.out ?? "bench/tasks.local.json");
     const existing: TaskFile = fs.existsSync(out) ? (JSON.parse(fs.readFileSync(out, "utf8")) as TaskFile) : { tasks: [] };
-    const tasks = mine(repo, values.test, Number.parseInt(values.limit ?? "40", 10) || 40, existing.tasks, values.all === true, (values.link ?? "").split(",").map((item) => item.trim()).filter(Boolean), underPrefix(values.under));
+    const tasks = mine(repo, values.test, Number.parseInt(values.limit ?? "40", 10) || 40, existing.tasks, values.all === true, (values.link ?? "").split(",").map((item) => item.trim()).filter(Boolean), underPrefix(values.under), Number.parseInt(values["min-files"] ?? "1", 10) || 1);
     fs.mkdirSync(path.dirname(out), { recursive: true });
     fs.writeFileSync(out, JSON.stringify({ tasks }, null, 2) + "\n");
     process.stdout.write(`${out}: 사례 ${tasks.length}개. 각 사례의 "prompt"를 증상 서술로 다듬으세요(비면 커밋 제목을 씁니다 — 수정 힌트가 샐 수 있습니다).\n`);
@@ -688,6 +732,7 @@ async function main(): Promise<number> {
   const spec = JSON.parse(fs.readFileSync(file, "utf8")) as TaskFile;
   const only = values.only?.split(",").map((item) => item.trim());
   const tasks = spec.tasks.filter((task) => !only || only.includes(task.id));
+  for (const task of tasks) FIX_FILES.set(task.id, [...task.files, ...task.testFiles]);
   const seeds = Math.max(1, Number.parseInt(values.seeds ?? "1", 10) || 1);
   const modes = (values.modes?.split(",").map((item) => item.trim()) as Mode[] | undefined) ?? DEFAULT_MODES;
   const unknown = modes.filter((mode) => !MODES.includes(mode));
@@ -698,7 +743,9 @@ async function main(): Promise<number> {
   }
   const cli = process.env.BENCH_CLI ? path.resolve(process.env.BENCH_CLI) : path.resolve(__dirname, "..", "..", "dist", "cli.js");
   if (!fs.existsSync(cli)) throw new Error(`${cli}가 없습니다 — npm run build를 먼저 하세요`);
-  const options: RunOptions = { cli, model: values.model, bare: values.bare === true, budget: values.budget ?? "2.00", maxTurns: Number.parseInt(values["max-turns"] ?? "60", 10) || 60 };
+  const options: RunOptions = { cli, model: values.model, bare: values.bare === true, budget: values.budget ?? "2.00", maxTurns: Number.parseInt(values["max-turns"] ?? "60", 10) || 60, commit: values.commit === true,
+    toolDesc: values["tool-desc"] ? fs.readFileSync(values["tool-desc"], "utf8") : undefined,
+    hookEnv: (values["hook-env"] ?? "").split(",").map((item) => item.trim()).filter((item) => /^[A-Z_]+=/.test(item)) };
   process.stdout.write(
     options.bare
       ? "--bare: 사용자 설정을 끈 깨끗한 비교 — ANTHROPIC_API_KEY로 돌아 토큰당 과금됩니다\n"
@@ -731,7 +778,7 @@ async function main(): Promise<number> {
         const row = await runTask(task, mode, seed, options);
         rows.push(row);
         process.stdout.write(
-          `   ${row.pass ? "✓" : "✗"}${row.p2pBroken ? " 회귀" : ""}  $${(row.costUsd ?? 0).toFixed(3)} (쓰기 뺌 $${(costNoWrite(row) ?? 0).toFixed(3)})  ${row.turns ?? "-"}턴  missed ${row.missed}  stray ${row.stray}  훅 ${row.hook.injections}/${row.hook.calls}${row.hook.noteInjections ? `  노트 ${row.hook.noteInjections}` : ""}  도구 ${row.grimoireToolCalls}${row.hook.leaked ? `  누수 ${row.hook.leaked}` : ""}  ${row.subtype ?? ""}${row.error ? `  ${row.error.slice(0, 80)}` : ""}\n`,
+          `   ${row.pass ? "✓" : "✗"}${row.p2pBroken ? " 회귀" : ""}  $${(row.costUsd ?? 0).toFixed(3)} (쓰기 뺌 $${(costNoWrite(row) ?? 0).toFixed(3)})  ${row.turns ?? "-"}턴  missed ${row.missed}  stray ${row.stray}  훅 ${row.hook.injections}/${row.hook.calls}${row.hook.noteInjections ? `  노트 ${row.hook.noteInjections}` : ""}${row.hook.commitAlerts ? `  커밋알림 ${row.hook.alerted.join(",")}` : ""}  도구 ${row.grimoireToolCalls}${row.hook.leaked ? `  누수 ${row.hook.leaked}` : ""}  ${row.subtype ?? ""}${row.error ? `  ${row.error.slice(0, 80)}` : ""}\n`,
         );
       }
     }

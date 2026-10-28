@@ -21,11 +21,13 @@ import { parseArgs } from "node:util";
 
 import { dbPath } from "./core/config";
 import { fileContext, formatFileContext } from "./core/context";
+import { formatImpact, impactOf, workingChanges } from "./core/impact";
 import { openDb, type DB } from "./core/db";
 import { myEmails, resolveAuthors } from "./core/identity";
 import { indexCommitCode } from "./core/diffs";
 import { addRepo, discoverRepos, listRepos, matchRepos, relativeToRepo, removeRepo, resolveRepoFile, syncRepo, type RepoRow } from "./core/indexer";
 import { parseNotePaths } from "./core/note-doc";
+import { AUTO_BIND_MAX, autoBindPaths } from "./core/note-autobind";
 import { addNote } from "./core/notes";
 import { commitDetail, repoOverview, repoSummaries } from "./core/overview";
 import { search } from "./core/search";
@@ -33,6 +35,8 @@ import { pendingUpdate, refreshUpdateCache, VERSION } from "./core/update";
 import { runMcpServer } from "./mcp/server";
 import { doctor, formatChecks } from "./setup/doctor";
 import { installHooks } from "./setup/hooks";
+import { refreshIntegrations } from "./setup/refresh";
+import { installSkill } from "./setup/skills";
 import { CLIENTS, install, InstallError, type ClientName } from "./setup/install";
 import { runUpdate } from "./setup/update";
 
@@ -47,6 +51,7 @@ const HELP = `grimoire — 로컬 git 이력을 AI 코딩 도구의 기억으로
   grimoire show <sha>             커밋 상세 + diff  [--repo r] [--lines n] [--path p ...]
   grimoire overview <repo>        레포 개요  [--json]
   grimoire context <file>         파일을 고치기 전에 볼 것 — 최근 커밋·왜·같이 바뀌는 파일/테스트  [--repo r] [--json]
+  grimoire impact [file...]       바뀐 파일이 건드릴 곳 — import·공변경·테스트  (파일을 안 주면 커밋 안 된 변경)  [--intent "작업"] [--repo r] [--limit n] [--json]
   grimoire note <text>            노트 남기기  [--repo r] [--tag t ...] [--path f ...]  (--path: 그 파일을 고치기 전에 노트가 보인다)
   grimoire remove <repo>          레포와 색인 삭제
 
@@ -55,6 +60,8 @@ MCP 연결:
                                   [--project <dir>] 프로젝트 범위  [--dry-run] 쓰지 않고 보기
                                   [--hooks] claude-code: 편집 직전 맥락 주입·세션 캡처 훅을 ~/.claude/settings.json에
                                   [--remove-hooks] 그 훅만 뺀다
+                                  [--skills] claude-code: 커밋 전·리뷰·PR 때 impact를 부르는 스킬을 ~/.claude/skills/grimoire-impact에
+                                  [--remove-skills] 그 스킬 폴더만 지운다
   grimoire doctor                 연결 문제 진단
   grimoire mcp                    MCP 서버 (stdio) — 보통 클라이언트가 직접 띄웁니다
 
@@ -82,6 +89,7 @@ async function main(argv: string[]): Promise<number> {
     allowPositionals: true,
     options: {
       repo: { type: "string" },
+      intent: { type: "string" },
       author: { type: "string" },
       since: { type: "string" },
       until: { type: "string" },
@@ -96,6 +104,8 @@ async function main(argv: string[]): Promise<number> {
       check: { type: "boolean" },
       hooks: { type: "boolean" },
       "remove-hooks": { type: "boolean" },
+      skills: { type: "boolean" },
+      "remove-skills": { type: "boolean" },
     },
   });
 
@@ -106,6 +116,7 @@ async function main(argv: string[]): Promise<number> {
     return checks.some((check) => check.level === "fail") ? 1 : 0;
   }
   if (command === "install") {
+    if (values.skills || values["remove-skills"]) return cmdInstallSkills(positionals[0], values["dry-run"], values["remove-skills"]);
     if (values.hooks || values["remove-hooks"]) return cmdInstallHooks(positionals[0], values["dry-run"], values["remove-hooks"]);
     return cmdInstall(positionals[0], values.project, values["dry-run"]);
   }
@@ -116,6 +127,12 @@ async function main(argv: string[]): Promise<number> {
   }
   if (command === "update") {
     return runUpdate({ check: values.check, dryRun: values["dry-run"] });
+  }
+  if (command === "setup-refresh") {
+    // 보통은 새 버전의 SessionStart 훅이 낡은 설정을 보고 떼어 낸 프로세스로 부른다(setup/refresh.ts)
+    const result = await refreshIntegrations({ cliDir: path.dirname(__filename) });
+    print(`훅: ${result.hooks} · 스킬: ${result.skill}`);
+    return 0;
   }
 
   const db = openDb(dbPath());
@@ -174,21 +191,42 @@ async function main(argv: string[]): Promise<number> {
         print(formatFileContext(context, { me: await myEmails(), budget: 2000 }) || `${context.path}: 이력에서 더 알려 줄 것이 없습니다`);
         return 0;
       }
+      case "impact": {
+        const given = positionals.map((item) => path.resolve(item));
+        const located = values.repo ? null : await resolveRepoFile(db, given[0] ?? process.cwd());
+        const repo = values.repo ? requireRepo(db, values.repo) : located?.repo;
+        if (!repo) throw new UsageError("어느 레포의 변경인지 알 수 없습니다 — 레포 안에서 부르거나 --repo로 지정하세요");
+        const changed = given.length > 0 ? await Promise.all(given.map(async (item) => (await resolveRepoFile(db, item))?.relative ?? relativeToRepo(repo.path, item))) : await workingChanges(process.cwd());
+        const impact = impactOf(db, repo.id, changed, { limit: Number.parseInt(values.limit ?? "10", 10) || 10, intent: values.intent });
+        if (values.json) return printJson(impact);
+        print(formatImpact(impact, impact.items.length));
+        return 0;
+      }
       case "note": {
         // --path가 있으면 레포가 필요하다 — --repo, 아니면 절대경로가 속한 레포, 아니면 현재 폴더의 레포
         const given = values.path ?? [];
         const located = values.repo ? null : await resolveRepoFile(db, given.find((item) => path.isAbsolute(item)) ?? process.cwd());
         const repo = values.repo ? requireRepo(db, values.repo) : given.length > 0 ? located?.repo : undefined;
         if (given.length > 0 && !repo) throw new UsageError("--path를 묶을 레포를 알 수 없습니다 — --repo로 지정하세요");
-        const note = addNote(db, {
-          text: need(positionals.join(" "), "노트 내용"),
-          repoId: repo?.id ?? null,
-          tags: values.tag,
-          paths: repo ? given.map((item) => (path.isAbsolute(item) ? relativeToRepo(repo.path, item) : item)) : [],
-          source: "cli",
-        });
+        const text = need(positionals.join(" "), "노트 내용");
+        let bound = repo;
+        let bindPaths = repo ? given.map((item) => (path.isAbsolute(item) ? relativeToRepo(repo.path, item) : item)) : [];
+        let autoNote = "";
+        // --path를 안 줬으면 지금 작업 폴더에서 바뀐 소스 파일에 묶는다
+        if (given.length === 0) {
+          const target = values.repo ? repo : (await resolveRepoFile(db, process.cwd()))?.repo;
+          if (target) {
+            const auto = await autoBindPaths(db, target.id, text, values.repo ? target.path : process.cwd());
+            if (auto.paths.length > 0) {
+              bound = target;
+              bindPaths = auto.paths;
+              autoNote = " [바뀐 파일에 자동으로 묶음]";
+            } else if (auto.tooMany) autoNote = ` (바뀐 소스 파일이 ${AUTO_BIND_MAX}개를 넘어 파일에 묶지 않았습니다)`;
+          }
+        }
+        const note = addNote(db, { text, repoId: bound?.id ?? null, tags: values.tag, paths: bindPaths, source: "cli" });
         const paths = parseNotePaths(note.paths).map((item) => item.path);
-        print(`노트 #${note.id} 저장${paths.length > 0 ? ` (파일: ${paths.join(", ")})` : ""}${note.redacted ? " (비밀로 보이는 값은 [redacted]로 바꿨습니다)" : ""}`);
+        print(`노트 #${note.id} 저장${paths.length > 0 ? ` (파일: ${paths.join(", ")})` : ""}${autoNote}${note.redacted ? " (비밀로 보이는 값은 [redacted]로 바꿨습니다)" : ""}`);
         return 0;
       }
       case "remove": {
@@ -280,6 +318,24 @@ async function cmdInstallHooks(client: string | undefined, dryRun: boolean | und
     }
     throw error;
   }
+}
+
+function cmdInstallSkills(client: string | undefined, dryRun: boolean | undefined, remove: boolean | undefined): number {
+  if (client !== "claude-code") throw new UsageError("스킬은 claude-code에만 설치합니다: grimoire install claude-code --skills");
+  const result = installSkill({ dryRun, remove });
+  if (dryRun) {
+    print(`[dry-run] ${result.file} ${remove ? "폴더를 지웁니다" : result.unchanged ? "— 이미 같은 내용입니다" : "을 씁니다"}`);
+    return 0;
+  }
+  if (result.unchanged) print(remove ? `설치돼 있지 않습니다: ${result.file}` : `이미 같은 스킬입니다: ${result.file}`);
+  else if (remove) print(`✓ 스킬을 지웠습니다: ${path.dirname(result.file)}`);
+  else {
+    print(`✓ Claude Code 스킬을 넣었습니다: ${result.file}`);
+    print("  커밋·리뷰·PR 때 Claude가 고르거나, /grimoire-impact로 직접 부릅니다. 새 세션부터 보입니다.");
+  }
+  if (result.backup) print(`  이전 파일 백업: ${result.backup}`);
+  if (!remove) print("  확인: grimoire doctor");
+  return 0;
 }
 
 async function cmdAdd(db: DB, paths: string[]): Promise<number> {

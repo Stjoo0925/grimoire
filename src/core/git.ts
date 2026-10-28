@@ -402,6 +402,15 @@ export async function addedLines(dir: string, sha: string, maxLines = 5_000): Pr
  * 작업 폴더에서 아직 커밋되지 않은 변경이 있는 파일(수정·추가·미추적, 레포 기준 경로). 못 읽으면 null.
  * 커밋 직후에 부르면 "이번 커밋에 안 들어갔지만 아직 작업 중인 파일"이 된다.
  */
+/** 스테이징된 파일 (레포 최상위 기준) — 읽지 못하면 null */
+export async function stagedFiles(dir: string): Promise<string[] | null> {
+  try {
+    return (await runGit(dir, ["-c", "core.quotepath=off", "diff", "--cached", "--name-only", "-z"])).split("\0").filter(Boolean);
+  } catch {
+    return null;
+  }
+}
+
 export async function dirtyFiles(dir: string): Promise<Set<string> | null> {
   let out: string;
   try {

@@ -310,6 +310,25 @@ const MIGRATIONS: (string | ((db: DB) => void))[] = [
     backfillNotePaths(db);
     cleanReleaseContext(db);
   },
+  // 12: 정의-참조 그래프(impact.ts) — 파일이 정의한 심볼 이름과 언급한 식별자. import 문이 없는 언어에서도 파일을 잇는다.
+  //     code_version이 CODE_VERSION(indexer.ts)보다 낮은 레포는 다음 동기화 때 파일을 한 번 다시 읽어 채운다(별칭 import도 이때 다시 푼다)
+  `
+  CREATE TABLE file_defs (
+    repo_id  INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    name     TEXT NOT NULL,
+    path     TEXT NOT NULL,
+    PRIMARY KEY (repo_id, name, path)
+  );
+  CREATE INDEX file_defs_path ON file_defs(repo_id, path);
+  CREATE TABLE file_refs (
+    repo_id  INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    path     TEXT NOT NULL,
+    name     TEXT NOT NULL,
+    PRIMARY KEY (repo_id, path, name)
+  );
+  CREATE INDEX file_refs_name ON file_refs(repo_id, name);
+  ALTER TABLE repos ADD COLUMN code_version INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 /**

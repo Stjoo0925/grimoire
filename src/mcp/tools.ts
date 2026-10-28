@@ -3,6 +3,7 @@
  *
  *   search_memory      — 과거 커밋·노트 검색 (근거 목록)
  *   show_commit        — 커밋(sha 하나 또는 shas 최대 5개)의 메시지·파일·diff
+ *   impact             — 바뀐 파일(기본: 커밋 안 된 변경)이 건드릴 곳 — import·공변경·테스트·같은 폴더 (core/impact.ts)
  *   get_repo_overview  — 레포의 기술 스택·활동·많이 건드린 곳·최근 주요 커밋
  *   list_repos         — 인덱싱된 레포 목록
  *   add_repo           — 레포(또는 디렉터리 아래 레포 전부) 등록 + 인덱싱
@@ -18,6 +19,8 @@ import path from "node:path";
 import { commitContextOf } from "../core/capture";
 import { isIndexable } from "../core/code";
 import { fileContext } from "../core/context";
+import { impactOf, workingChanges } from "../core/impact";
+import { AUTO_BIND_MAX, autoBindPaths } from "../core/note-autobind";
 import { isBusyError, type DB } from "../core/db";
 import { resolveAuthors } from "../core/identity";
 import { indexCommitCode } from "../core/diffs";
@@ -27,7 +30,7 @@ import { parseNotePaths } from "../core/note-doc";
 import { addNote, PATHS_MAX, TAG_CHARS, TAGS_MAX } from "../core/notes";
 import { commitDetail, repoOverview, repoSummaries } from "../core/overview";
 import { search, type SearchHit } from "../core/search";
-import { slimCommit, slimFileContext, slimOverview, slimRepos, slimSearch, type Detail } from "./format";
+import { slimCommit, slimFileContext, slimImpact, slimOverview, slimRepos, slimSearch, type Detail } from "./format";
 import { waitForWorkspace, type Background, type Workspace } from "./workspace";
 
 export interface ToolContext {
@@ -126,6 +129,15 @@ export const TOOLS = [
     annotations: { readOnlyHint: true },
   },
   {
+    name: "impact",
+    description: "Before review/commit: files a change likely affects (imports, co-change, tests).",
+    inputSchema: {
+      type: "object",
+      properties: { paths: { type: "array", items: { type: "string" }, description: "default: git diff" }, intent: { type: "string", description: "the task, in words" }, repo: { type: "string" } },
+    },
+    annotations: { readOnlyHint: true },
+  },
+  {
     name: "get_repo_overview",
     description: "Repo stack, activity, hotspots, key commits.",
     inputSchema: { type: "object", properties: { repo: { type: "string" } }, required: ["repo"] },
@@ -162,6 +174,21 @@ export const TOOLS = [
     },
   },
 ] as const;
+
+/**
+ * 도구 설명 바꿔 끼우기 — 벤치 전용(e2e/taskbench.ts --tool-desc). `GRIMOIRE_BENCH_TOOL_DESC`가 {"도구": "설명"} JSON이면
+ * 그 도구의 description만 바꾼다. 설명 문구가 호출률을 크게 바꾼다는 연구(arXiv 2505.18135)를 우리 작업으로 재려고 둔다.
+ * 깨진 JSON이나 없는 도구는 무시한다.
+ */
+export function toolsWithDescriptions(env: NodeJS.ProcessEnv = process.env) {
+  let overrides: Record<string, unknown> = {};
+  try {
+    overrides = env.GRIMOIRE_BENCH_TOOL_DESC ? (JSON.parse(env.GRIMOIRE_BENCH_TOOL_DESC) as Record<string, unknown>) : {};
+  } catch {
+    overrides = {};
+  }
+  return TOOLS.map((tool) => (typeof overrides[tool.name] === "string" ? { ...tool, description: overrides[tool.name] as string } : tool));
+}
 
 /** detail=full에서 1위 커밋에 붙이는 diff 줄 수 */
 const FULL_DIFF_LINES = 120;
@@ -372,6 +399,20 @@ async function runTool(
       if (current) await context.workspace?.refresh?.(current, REFRESH_WAIT_MS);
       return slimFileContext(fileContext(db, repo.id, relative), me, args.verbose === true);
     }
+    case "impact": {
+      const given = Array.isArray(args.paths) ? args.paths.filter((item): item is string => typeof item === "string" && item.trim() !== "").slice(0, 50) : [];
+      // 절대경로는 그 경로가 속한 등록 레포(레포 밖 워크트리면 본 레포) 기준으로, 상대경로는 레포 기준 그대로
+      const located = await Promise.all(given.map((item) => (path.isAbsolute(item) ? resolveRepoFile(db, item, signal) : Promise.resolve(null))));
+      const repo = repoFilter(args.repo) ?? located.find(Boolean)?.repo ?? current;
+      if (!repo) throw new ToolError("repo가 필요합니다 (어느 레포의 변경인지 알 수 없습니다)");
+      const changed =
+        given.length > 0
+          ? given.map((item, index) => located[index]?.relative ?? relativeToRepo(repo.path, item))
+          : // 경로를 안 주면 작업 폴더(워크트리면 그 폴더)의 커밋 안 된 변경
+            await workingChanges(current && context.workspace?.root ? context.workspace.root : repo.path, signal);
+      if (current) await context.workspace?.refresh?.(current, REFRESH_WAIT_MS);
+      return slimImpact(impactOf(db, repo.id, changed, { intent: str(args.intent) }));
+    }
     case "get_repo_overview": {
       const repo = repoFilter(args.repo);
       if (!repo) throw new ToolError("repo가 필요합니다");
@@ -428,16 +469,35 @@ async function runTool(
       const located = given.find((item) => path.isAbsolute(item));
       const repo = repoFilter(args.repo) ?? (located ? (await resolveRepoFile(db, located, signal))?.repo : undefined) ?? (given.length > 0 ? current : undefined);
       const repoId = repo?.id ?? null;
-      const paths = repo ? given.map((item) => (path.isAbsolute(item) ? relativeToRepo(repo.path, item) : item)) : [];
+      let paths = repo ? given.map((item) => (path.isAbsolute(item) ? relativeToRepo(repo.path, item) : item)) : [];
+      // paths를 아예 안 줬으면(빈 배열 []은 "묶지 않음") 지금 작업 폴더에서 바뀐 소스 파일에 묶는다
+      let bound = repo;
+      let autoBound = false;
+      let tooMany = false;
+      if (args.paths === undefined) {
+        const target = repo ?? current;
+        if (target) {
+          const dir = current && target.id === current.id && context.workspace?.root ? context.workspace.root : target.path;
+          const auto = await autoBindPaths(db, target.id, text, dir, signal);
+          tooMany = auto.tooMany;
+          if (auto.paths.length > 0) {
+            paths = auto.paths;
+            bound = target;
+            autoBound = true;
+          }
+        }
+      }
       // 다른 grimoire 프로세스가 쓰는 중이면 잠깐 뒤 다시 — 사용자가 남기라고 한 노트라 바로 실패시키지 않는다
       for (let attempt = 0; ; attempt++) {
         try {
-          const note = addNote(db, { text, repoId, tags, paths, source: "mcp" });
+          const note = addNote(db, { text, repoId: bound?.id ?? null, tags, paths, source: "mcp" });
           return {
             recorded: true,
             id: note.id,
             createdAt: note.created_at,
             ...(note.paths !== "[]" ? { paths: parseNotePaths(note.paths).map((item) => item.path) } : {}),
+            ...(autoBound ? { autoBound: true } : {}),
+            ...(tooMany ? { note: `바뀐 소스 파일이 ${AUTO_BIND_MAX}개를 넘어 파일에 묶지 않았습니다` } : {}),
             ...(note.redacted ? { redacted: "비밀로 보이는 값(토큰·비밀번호 등)을 [redacted]로 바꿔 저장했습니다" } : {}),
           };
         } catch (error) {

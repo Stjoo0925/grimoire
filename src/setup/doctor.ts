@@ -13,7 +13,8 @@ import { runGit } from "../core/git";
 import { myEmails } from "../core/identity";
 import { listRepos, worktreeRegistrations } from "../core/indexer";
 import { compareVersions, RELEASES_URL, refreshUpdateCache, updateCheckEnabled, VERSION } from "../core/update";
-import { hookCommandEnv, parseHookCommand, readInstalledHooks, settingsPath } from "./hooks";
+import { hookCommandEnv, outdatedHooks, parseHookCommand, readInstalledHooks, settingsPath } from "./hooks";
+import { skillState } from "./skills";
 import { CLIENTS, configPath, hasCommand, readInstalled, run, SERVER_NAME, staleDesktopConfigs } from "./install";
 
 export type Level = "ok" | "warn" | "fail";
@@ -247,7 +248,15 @@ async function clientChecks(options: DoctorOptions, env: Env): Promise<Check[]> 
         fix: "grimoire install claude-code --hooks",
       });
     } else {
-      checks.push({ level: "ok", title: `claude-code 훅: ${hooks.map((hook) => hook.event).join(", ")}`, detail: parsed.hook });
+      const stale = outdatedHooks(hooks);
+      if (stale.length > 0) {
+        checks.push({
+          level: "warn",
+          title: "claude-code 훅: 이 버전의 훅 설정과 다릅니다 — 새 훅(커밋 직전 알림 등)이 돌지 않습니다",
+          detail: `빠진 것: ${stale.join(", ")}`,
+          fix: "grimoire install claude-code --hooks",
+        });
+      } else checks.push({ level: "ok", title: `claude-code 훅: ${hooks.map((hook) => hook.event).join(", ")}`, detail: parsed.hook });
       // 훅은 설치 때 적힌 GRIMOIRE_HOME(없으면 기본 폴더)을 본다 — CLI와 다르면 훅이 쌓은 기억을 CLI·MCP가 못 본다
       const hookHome = dataHome(hookCommandEnv(hooks[0].command).GRIMOIRE_HOME);
       if (!samePath(hookHome, grimoireHome(env))) {
@@ -275,6 +284,16 @@ async function clientChecks(options: DoctorOptions, env: Env): Promise<Check[]> 
       title: "claude-code 훅: 없음 (선택) — 편집 직전 맥락 주입·세션 캡처를 쓰려면",
       fix: "grimoire install claude-code --hooks",
     });
+  }
+  // Claude Code 스킬 — 업데이트는 옛 코드로 돌아 스킬이 낡기 쉽다
+  const skill = skillState(options.home);
+  if (skill === "current") checks.push({ level: "ok", title: "claude-code 스킬: grimoire-impact" });
+  else if (skill === "stale") {
+    checks.push({ level: "warn", title: "claude-code 스킬: 설치된 grimoire-impact가 이 버전이 쓰는 내용과 다릅니다", fix: "grimoire install claude-code --skills" });
+  } else if (skill === "removed") {
+    checks.push({ level: "ok", title: "claude-code 스킬: 뺌 (--remove-skills) — 자동 갱신이 다시 넣지 않습니다", fix: "grimoire install claude-code --skills" });
+  } else {
+    checks.push({ level: "ok", title: "claude-code 스킬: 없음 (선택) — 커밋·리뷰·PR 때 impact를 부르게 하려면", fix: "grimoire install claude-code --skills" });
   }
   return checks;
 }

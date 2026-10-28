@@ -11,10 +11,12 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
+import { isGitCommit } from "./core/capture";
 import { dbPath, grimoireHome, type Env } from "./core/config";
 import { openDb } from "./core/db";
 import { myEmails } from "./core/identity";
 import { handleHook, type HookInput } from "./hook/runner";
+import { settingsPath } from "./setup/hook-config";
 
 /** 자체 타임아웃 — Claude Code의 timeout보다 짧게, 느린 디스크에서도 편집을 붙잡지 않게 */
 const SELF_TIMEOUT_MS = 3_000;
@@ -94,17 +96,22 @@ function trace(env: Env, input: HookInput, text: string, error?: string): void {
  * 업데이트 확인(네트워크)은 끈다. 띄우지 못해도 로그만 남긴다.
  */
 function backgroundSync(env: Env, repoPath: string): void {
+  background(env, ["sync", repoPath], "background sync");
+}
+
+/** cli.js 명령 하나를 떼어 낸 프로세스로 — 훅은 기다리지 않는다 */
+function background(env: Env, args: string[], label: string): void {
   try {
-    const child = spawn(process.execPath, [path.join(__dirname, "cli.js"), "sync", repoPath], {
+    const child = spawn(process.execPath, [path.join(__dirname, "cli.js"), ...args], {
       detached: true,
       stdio: "ignore",
       windowsHide: true,
       env: { ...env, GRIMOIRE_UPDATE_CHECK: "0" },
     });
-    child.on("error", (error) => log(env, `background sync: ${error.message}`));
+    child.on("error", (error) => log(env, `${label}: ${error.message}`));
     child.unref();
   } catch (error) {
-    log(env, `background sync: ${error instanceof Error ? error.message : error}`);
+    log(env, `${label}: ${error instanceof Error ? error.message : error}`);
   }
 }
 
@@ -135,6 +142,11 @@ async function main(): Promise<void> {
     log(env, `bad stdin: ${error instanceof Error ? error.message : error}`);
     return;
   }
+  // 커밋이 아닌 Bash의 편집 직전 훅은 할 일이 없다 — Bash마다 불리므로 DB를 열기 전에 끝낸다
+  if (input.hook_event_name === "PreToolUse" && input.tool_name === "Bash") {
+    const command = input.tool_input?.command;
+    if (typeof command !== "string" || !isGitCommit(command)) return;
+  }
   // "나" — GRIMOIRE_ME가 있으면 그것, 없으면 git config user.email (CLI·MCP와 같은 규칙)
   const me = await myEmails(env);
   let db;
@@ -146,11 +158,12 @@ async function main(): Promise<void> {
     return;
   }
   try {
-    const output = await handleHook({ db, env, me }, input);
+    const output = await handleHook({ db, env, me, settingsFile: settingsPath(), hookPath: path.join(__dirname, "hook.js") }, input);
     if (output?.json) process.stdout.write(JSON.stringify(output.json) + "\n");
     else if (output?.stdout) process.stdout.write(output.stdout + "\n");
     trace(env, input, output?.json?.hookSpecificOutput.additionalContext ?? output?.stdout ?? "");
     if (output?.syncRepo) backgroundSync(env, output.syncRepo);
+    if (output?.refreshSetup) background(env, ["setup-refresh"], "setup refresh");
   } catch (error) {
     log(env, `${input.hook_event_name ?? "?"}: ${error instanceof Error ? (error.stack ?? error.message) : error}`);
     trace(env, input, "", error instanceof Error ? error.message : String(error));

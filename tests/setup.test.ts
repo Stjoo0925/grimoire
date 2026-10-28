@@ -206,6 +206,7 @@ test("readOnlyPermissions: 읽기 도구만 Claude Code 규칙 이름으로", ()
     "mcp__grimoire__search_memory",
     "mcp__grimoire__show_commit",
     "mcp__grimoire__file_context",
+    "mcp__grimoire__impact",
     "mcp__grimoire__get_repo_overview",
     "mcp__grimoire__list_repos",
   ]);
@@ -242,7 +243,7 @@ test("install claude-code(사용자 범위): claude CLI로 등록하고 settings
 
   // dry-run은 claude도 부르지 않고 파일도 그대로
   const dry = await install("claude-code", { cliPath, env: {}, home, dryRun: true, runCommand });
-  assert.equal(dry.permissions?.added.length, 5);
+  assert.equal(dry.permissions?.added.length, 6);
   assert.equal(calls.length, 0);
   assert.equal(JSON.parse(fs.readFileSync(settingsFile, "utf8")).permissions.allow.length, 1);
 
@@ -454,4 +455,64 @@ test("doctor: 훅이 CLI와 다른 데이터 폴더를 보면 알리고, hook.lo
   const elsewhere = await doctor({ cliPath: fakeCli(), env: { GRIMOIRE_HOME: hookHome, GRIMOIRE_ME: "me@example.com" }, home, fetchImpl: offline, runCommand: noClaude });
   assert.ok(elsewhere.some((c) => c.level === "warn" && c.title.startsWith("claude-code 훅: 지금 CLI와 다른 위치의 grimoire")), formatChecks(elsewhere));
   assert.deepEqual(hookCommandEnv('"n" "h" --env "GRIMOIRE_HOME=C:/x y" --env "GRIMOIRE_ME=a@b"'), { GRIMOIRE_HOME: "C:/x y", GRIMOIRE_ME: "a@b" });
+});
+
+test("스킬: 설치는 올바른 frontmatter로 쓰고, 두 번째는 그대로이며, 제거는 그 폴더만 지운다", async () => {
+  const { installSkill, skillFile, SKILL_CONTENT } = await import("../src/setup/skills.js");
+  const home = tempDir();
+  const other = path.join(home, ".claude", "settings.json");
+  fs.mkdirSync(path.dirname(other), { recursive: true });
+  fs.writeFileSync(other, '{"a":1}');
+  const siblingSkill = path.join(home, ".claude", "skills", "other", "SKILL.md");
+  fs.mkdirSync(path.dirname(siblingSkill), { recursive: true });
+  fs.writeFileSync(siblingSkill, "x");
+
+  const dry = installSkill({ home, dryRun: true });
+  assert.equal(dry.unchanged, false);
+  assert.ok(!fs.existsSync(skillFile(home)), "dry-run은 쓰지 않는다");
+
+  const first = installSkill({ home });
+  assert.equal(first.unchanged, false);
+  assert.equal(first.backup, null);
+  const text = fs.readFileSync(skillFile(home), "utf8");
+  assert.equal(text, SKILL_CONTENT);
+  assert.ok(/^---\nname: grimoire-impact\ndescription: .+\n---\n/.test(text), "frontmatter에 name과 description");
+  assert.ok(text.includes("mcp__grimoire__impact"));
+  assert.ok(text.split("\n").length < 60);
+  assert.ok(!fs.readdirSync(path.dirname(skillFile(home))).some((name) => name.endsWith(".tmp")));
+
+  assert.equal(installSkill({ home }).unchanged, true);
+
+  // 다른 내용이 있으면 .bak을 남기고 덮는다
+  fs.writeFileSync(skillFile(home), "old");
+  assert.equal(installSkill({ home }).backup, `${skillFile(home)}.bak`);
+
+  assert.equal(installSkill({ home, remove: true }).unchanged, false);
+  assert.ok(!fs.existsSync(path.dirname(skillFile(home))));
+  assert.equal(fs.readFileSync(other, "utf8"), '{"a":1}');
+  assert.ok(fs.existsSync(siblingSkill));
+  assert.equal(installSkill({ home, remove: true }).unchanged, true);
+});
+
+test("doctor: 스킬이 없으면 안내하고, 낡았으면 경고하고, 같으면 ok", async () => {
+  const { installSkill, skillFile } = await import("../src/setup/skills.js");
+  const home = tempDir();
+  const cliPath = fakeCli();
+  const offline = (async () => {
+    throw new Error("down");
+  }) as unknown as typeof fetch;
+  const run = () => doctor({ cliPath, env: { GRIMOIRE_HOME: path.join(home, "g"), GRIMOIRE_ME: "me@example.com" }, home, fetchImpl: offline, runCommand: noClaude });
+  const skillCheck = (checks: Awaited<ReturnType<typeof run>>) => checks.find((c) => c.title.startsWith("claude-code 스킬"));
+
+  const missing = skillCheck(await run());
+  assert.equal(missing?.level, "ok");
+  assert.equal(missing?.fix, "grimoire install claude-code --skills");
+
+  installSkill({ home });
+  assert.equal(skillCheck(await run())?.title, "claude-code 스킬: grimoire-impact");
+
+  fs.writeFileSync(skillFile(home), "old version");
+  const stale = skillCheck(await run());
+  assert.equal(stale?.level, "warn");
+  assert.equal(stale?.fix, "grimoire install claude-code --skills");
 });

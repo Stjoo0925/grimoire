@@ -3,6 +3,8 @@
  *
  *   PreToolUse(Edit·Write·MultiEdit)  편집 직전: 그 파일에 묶인 노트·왜·공변경·테스트(context.ts, lean)를 400자 안에 `additionalContext`로.
  *                                     세션당 파일당 한 번, 이력에서만 알 수 있는 것이 없으면 아무것도 내지 않는다.
+ *   PreToolUse(Bash: git commit)      커밋 직전: 이 커밋의 파일과 거의 늘 같이 바뀌어 왔는데 손대지 않은 파일(impact.ts missingCompanions, 공변경 ≥ 0.9·5회, 셋까지).
+ *                                     에이전트는 작업 의도를 알고 있어 그것으로 거른다. 같은 파일 묶음은 세션에 한 번.
  *   UserPromptSubmit                  사용자 프롬프트를 세션 기록에 (capture.ts) — 본 에이전트의 것만
  *   PostToolUse(Bash·Edit·Write)      검증 명령·편집 파일을 세션 기록에, `git commit`이면 그때까지의 기록을 커밋에 묶는다 (서브에이전트 포함)
  *   SessionStart(startup·clear·compact) 기억이 있다는 한 줄 + 커밋 안 된 편집 (plain stdout). 최근 커밋 요약은 GRIMOIRE_START_SUMMARY=1일 때만
@@ -35,7 +37,9 @@ import { isIndexable } from "../core/code";
 import { grimoireHome, type Env } from "../core/config";
 import { fileContext, formatFileContext, needsCochangeBackfill, TEST_PATH, HOOK_BUDGET } from "../core/context";
 import type { DB } from "../core/db";
-import { addedLines, commitTime, dirtyFiles, headSha } from "../core/git";
+import { addedLines, commitTime, dirtyFiles, headSha, stagedFiles } from "../core/git";
+import { commitImpact, formatMissing, IMPACT_HEAD, missingCompanions } from "../core/impact";
+import { setupNeeded } from "../setup/hook-config";
 
 /** git 요약 줄이 없을 때 "방금 만든 커밋"으로 보는 HEAD 커밋 시각의 한도 */
 const FRESH_COMMIT_MS = 2 * 60_000;
@@ -47,6 +51,8 @@ export interface HookOutput {
   stdout?: string;
   /** 응답을 낸 뒤 백그라운드로 동기화할 레포 경로 — 훅은 기다리지 않는다(hook.ts가 떼어 낸 프로세스로 띄운다) */
   syncRepo?: string;
+  /** 훅·스킬 설정이 이 버전보다 낡았다 — hook.ts가 `grimoire setup-refresh`를 떼어 낸 프로세스로 띄운다 (setup/refresh.ts) */
+  refreshSetup?: boolean;
 }
 
 export interface HookInput {
@@ -162,6 +168,10 @@ export interface HookContext {
   me: string[];
   /** 레포 HEAD 트리를 읽는다 — 테스트에서 바꿔 끼운다 */
   headOf?: (repo: RepoRow) => string;
+  /** ~/.claude/settings.json — 주면 SessionStart가 우리 훅 설정이 낡았는지 본다(hook.ts가 채운다) */
+  settingsFile?: string;
+  /** 지금 도는 hook.js — settings.json에 등록된 것과 같을 때만 자동 갱신한다 */
+  hookPath?: string;
 }
 
 /**
@@ -350,11 +360,16 @@ export function needsBackgroundSync(db: DB, env: Env, repo: RepoRow, now = Date.
 async function sessionStart(context: HookContext, input: HookInput): Promise<HookOutput | null> {
   pruneSessions(context.env);
   pruneEvents(context.db);
+  // 업데이트는 옛 코드가 돌아 훅 설정·스킬을 새로 쓰지 못한다 — 새 버전의 이 훅이 알아보고 뒤에서 맞춘다(다음 세션부터).
+  // 등록 레포 밖의 세션에서도 맞춘다
+  const setup = context.settingsFile ? setupNeeded(context.env, path.dirname(path.dirname(context.settingsFile)), context.hookPath) : { hooks: false, skill: false };
+  const refresh = setup.hooks || setup.skill ? { refreshSetup: true } : null;
   const repo = await sessionRepo(context, input);
-  if (!repo) return null;
+  if (!repo) return refresh;
   const sync = needsBackgroundSync(context.db, context.env, repo) ? { syncRepo: repo.path } : null;
-  if (input.source === "resume") return sync;
+  if (input.source === "resume") return sync || refresh ? { ...sync, ...refresh } : null;
   const lines = [`Grimoire (${repo.name}): search_memory answers "where/how/why did I…"; record_note with paths keeps a decision on the files it concerns.`];
+  if (refresh) lines.push("Grimoire is updating its Claude Code hooks and /grimoire-impact skill to this version in the background — they take effect next session.");
   if (context.env.GRIMOIRE_START_SUMMARY === "1") {
     const mine = context.me.map((email) => email.toLowerCase());
     const recent = context.db
@@ -384,10 +399,53 @@ async function sessionStart(context: HookContext, input: HookInput): Promise<Hoo
     lines.splice(lines.length - 1, 1);
     text = lines.join("\n");
   }
-  return { stdout: text, ...sync };
+  return { stdout: text, ...sync, ...refresh };
+}
+
+/**
+ * 커밋 직전 빠진 짝. 커밋에 들어갈 파일은 스테이징된 것 — 같은 명령에 `git add`나 `-a`가 있으면 아직 스테이징 전이라
+ * 작업 폴더의 변경 전부로 본다(넓게 잡으면 알림이 줄 뿐 틀리지 않는다). 작업 폴더에서 이미 바뀐 파일은 알리지 않는다.
+ */
+async function preCommit(context: HookContext, input: HookInput, command: string): Promise<HookOutput | null> {
+  if (!input.cwd) return null;
+  const dir = commitDir(command, input.cwd);
+  const resolved = await resolveRepoFile(context.db, path.join(dir, "."));
+  if (!resolved) return null;
+  const [staged, dirty] = await Promise.all([stagedFiles(dir), dirtyFiles(dir)]);
+  if (!staged || !dirty) return null;
+  const addsToo = /\bgit\s+add\b/.test(command) || /\bcommit\b[^;&|]*\s(-a\b|--all\b|-[a-zA-Z]*a[a-zA-Z]*\b)/.test(command);
+  const committed = [...new Set(addsToo ? [...staged, ...dirty] : staged)].sort();
+  if (committed.length === 0) return null;
+  const sessionId = input.session_id ?? "unknown";
+  const state = loadSession(context.env, sessionId);
+  const key = `commit:${resolved.repo.id}:${committed.join("\n")}`;
+  if (state.shown[key]) return null;
+  state.shown[key] = "1";
+  saveSession(context.env, sessionId, state);
+  const touched = new Set([...dirty, ...staged]);
+  // GRIMOIRE_COMMIT_IMPACT=all: 실험 — 엄격한 빠진 짝 대신 영향 후보 상위 다섯을 늘 준다 (taskbench --hook-env로 잰다)
+  const text =
+    context.env.GRIMOIRE_COMMIT_IMPACT === "all"
+      ? formatMissing(commitImpact(context.db, resolved.repo.id, committed, touched, sessionIntent(context, sessionId, resolved.repo.id)), 600, IMPACT_HEAD)
+      : formatMissing(missingCompanions(context.db, resolved.repo.id, committed, touched), HOOK_BUDGET);
+  if (!text) return null;
+  return { json: { hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: text } } };
+}
+
+/** 이 세션의 작업 의도 — 마지막 커밋 뒤 사용자가 한 말(캡처된 프롬프트) 최근 셋. 없으면 undefined */
+function sessionIntent(context: HookContext, sessionId: string, repoId: number): string | undefined {
+  const prompts = pendingEvents(context.db, sessionId, repoId)
+    .filter((event) => event.kind === "prompt")
+    .map((event) => event.text)
+    .slice(-3);
+  return prompts.length > 0 ? prompts.join("\n") : undefined;
 }
 
 async function preToolUse(context: HookContext, input: HookInput): Promise<HookOutput | null> {
+  if (input.tool_name === "Bash") {
+    const command = input.tool_input?.command;
+    return typeof command === "string" && isGitCommit(command) ? preCommit(context, input, command) : null;
+  }
   if (!input.tool_name || !EDIT_TOOLS.has(input.tool_name)) return null;
   const file = editedPath(input);
   if (!file) return null;

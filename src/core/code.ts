@@ -148,6 +148,27 @@ const ROUTES: RegExp[] = [
 ];
 const NOISE = new Set(["if", "for", "while", "switch", "return", "constructor", "default", "function", "main", "init", "__init__"]);
 
+/** 파일 하나에서 남기는 참조 이름 수 상한 */
+export const MAX_REFS = 500;
+const REF_NAME = /\b[A-Za-z_][A-Za-z0-9_]{3,}\b/g;
+
+/**
+ * 이 파일이 언급하는 식별자 — 다른 파일이 정의한 심볼(extractSymbols)과 맞춰 "정의-참조" 그래프를 만든다(Aider repo map과 같은 생각).
+ * import 문이 없는 언어(C#의 namespace, Java 패키지, PHP 등)에서도 파일 사이를 잇는다. 대문자가 하나라도 든 이름만
+ * (PascalCase 타입, camelCase 함수, 상수) — 평범한 낱말(data, item, value)은 너무 흔해 잇는 힘이 없다.
+ * 레포 안 정의와 맞는 것만 쓰이므로(impact.ts) 언어 내장 이름(String, Promise)은 저절로 빠진다.
+ */
+export function extractRefNames(content: string): string[] {
+  const out = new Set<string>();
+  for (const match of content.matchAll(REF_NAME)) {
+    const name = match[0];
+    if (!/[A-Z]/.test(name)) continue;
+    out.add(name);
+    if (out.size >= MAX_REFS) break;
+  }
+  return [...out];
+}
+
 export function extractSymbols(content: string): CodeSymbol[] {
   const symbols: CodeSymbol[] = [];
   const seen = new Set<string>();

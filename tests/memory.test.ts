@@ -607,3 +607,38 @@ test("record_note supersedes: 옛 노트의 레포·경로를 물려받고, 같�
   await assert.rejects(callTool(context, "record_note", { text: "x", supersedes: 9999 }), ToolError);
   assert.ok(TOOLS.find((tool) => tool.name === "record_note")!.inputSchema.properties.supersedes, "스키마에 supersedes가 있어야 한다");
 });
+
+test("notes rules: 같은 경로에 같은 얘기의 규칙을 또 남기면 supersedes 없이도 갈아 끼운다, 다른 얘기면 하나 더", async () => {
+  const { notesForFile, titleTokens, duplicateRule } = await import("../src/core/notes.js");
+  const db = memoryDb();
+  const dir = makeRepo([{ message: "feat: 시작", files: { "src/ui/Button.tsx": "export const Button = 1;\n" } }], "dup-rule");
+  const repo = await addRepo(db, dir);
+  await syncRepo(db, repo);
+
+  assert.deepEqual([...titleTokens("규칙: 버튼은 ui/Button을 쓴다")], ["규칙", "버튼", "ui", "button", "쓴다"]);
+  const first = addNote(db, { text: "규칙: 버튼은 ui/Button을 쓴다", repoId: repo.id, tags: ["rule"], paths: ["src/ui/"], source: "cli" });
+  assert.equal(first.replaced, null);
+  // 같은 폴더, 같은 얘기(낱말 절반 이상 겹침) → 옛 규칙을 갈아 끼운다
+  const updated = addNote(db, { text: "규칙: 버튼은 ui/Button, 링크는 ui/Link", repoId: repo.id, tags: ["rule"], paths: ["src/ui/"], source: "mcp" });
+  assert.equal(updated.replaced?.id, first.id);
+  assert.equal((db.prepare("SELECT superseded_by FROM notes WHERE id = ?").get(first.id) as { superseded_by: number }).superseded_by, updated.id);
+  // 같은 폴더, 다른 얘기 → 하나 더
+  const other = addNote(db, { text: "규칙: ui는 forwardRef 필수", repoId: repo.id, tags: ["rule"], paths: ["src/ui/"], source: "mcp" });
+  assert.equal(other.replaced, null);
+  // 다른 경로(폴더 규칙 vs 파일 규칙)·규칙 아닌 노트는 중복이 아니다
+  assert.equal(addNote(db, { text: "규칙: 버튼은 ui/Button, 링크는 ui/Link", repoId: repo.id, tags: ["rule"], paths: ["src/ui/Button.tsx"], source: "mcp" }).replaced, null);
+  assert.equal(addNote(db, { text: "규칙: 버튼은 ui/Button, 링크는 ui/Link", repoId: repo.id, paths: ["src/ui/"], source: "mcp" }).replaced, null);
+  assert.equal(duplicateRule(db, repo.id, ["src/ui/"], "전혀 다른 제목"), null);
+  const ids = notesForFile(db, repo.id, "src/ui/Button.tsx").map((hint) => hint.id);
+  assert.ok(ids.includes(updated.id) && ids.includes(other.id) && !ids.includes(first.id), ids.join(","));
+
+  // 도구 응답에는 supersedes·replaced로 알린다
+  const recorded = (await callTool({ db, me: [], cwd: dir }, "record_note", { text: "규칙: ui는 forwardRef를 꼭 쓴다", tags: ["rule"], paths: ["src/ui/"], repo: "dup-rule" })) as {
+    supersedes?: number;
+    replaced?: string;
+    existingRules?: string[];
+  };
+  assert.equal(recorded.supersedes, other.id);
+  assert.equal(recorded.replaced, `#${other.id} "규칙: ui는 forwardRef 필수"`);
+  assert.ok(recorded.existingRules?.some((line) => line.startsWith(`#${updated.id} `)), "다른 얘기의 규칙은 여전히 알린다");
+});

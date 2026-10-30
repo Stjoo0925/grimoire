@@ -8,12 +8,14 @@
  *
  * 규칙(태그 `rule`): 컨벤션·"이 헬퍼를 써라" 같은 약속. 같은 파일의 다른 노트보다 먼저 보인다.
  * 규칙이 바뀌면 새 노트가 옛 노트를 대신한다(supersedes) — 옛 노트는 훅에서 사라지고 검색에만 "superseded by #N"으로 남는다.
- * 쌓기만 하고 안 지우면 서로 어긋난 규칙이 같이 뜨므로, 같은 경로에 규칙이 이미 있는데 supersedes 없이 또 남기면 호출부가 알린다.
+ * 쌓기만 하고 안 지우면 서로 어긋난 규칙이 같이 뜨므로: 같은 경로에 같은 얘기(제목 낱말이 절반 이상 겹침)인 규칙이 있으면
+ * supersedes를 안 줘도 그 노트를 갈아 끼운다(replaced). 같은 경로의 다른 얘기면 그대로 더하고 호출부가 있는 규칙을 알린다.
  */
 import { stripSystemBlocks } from "./capture";
 import { upsertDoc, type DB } from "./db";
 import { noteDocFields, normalizeNotePath, notePathsField, pathsInText, type NotePath } from "./note-doc";
 import { redact } from "./redact";
+import { stripParticle } from "./search";
 
 export type { NotePath } from "./note-doc";
 
@@ -62,6 +64,8 @@ export const PATHS_MAX = 20;
 export const NOTES_PER_FILE = 3;
 /** 규칙 노트의 태그 */
 export const RULE_TAG = "rule";
+/** 같은 경로의 규칙이 "같은 얘기"인 기준 — 제목 낱말 집합의 자카드 유사도 */
+export const DUPLICATE_RULE_SIMILARITY = 0.5;
 
 export function isDirPath(path: string): boolean {
   return path.endsWith("/");
@@ -106,7 +110,7 @@ export function resolveNotePaths(db: DB, repoId: number | null, text: string, gi
  * redacted: 비밀로 보이는 값을 지우고 저장했는가 — 노트는 검색 결과로 다시 모델에게 건네지므로, 원인 분석에 섞여 든
  * 연결 문자열·토큰도 세션 캡처와 같은 규칙(redact.ts)으로 지운다.
  */
-export function addNote(db: DB, input: NoteInput): NoteRow & { redacted: boolean } {
+export function addNote(db: DB, input: NoteInput): NoteRow & { redacted: boolean; replaced: NoteRow | null } {
   const raw = input.text.trim().slice(0, NOTE_MAX);
   if (!raw) throw new Error("노트 내용이 비어 있습니다");
   // 에이전트가 받은 맥락을 그대로 붙여 넣으면 클라이언트의 자동 블록(<system-reminder> 등)이 섞인다 — 프롬프트와 같은 규칙으로 뗀다
@@ -116,7 +120,7 @@ export function addNote(db: DB, input: NoteInput): NoteRow & { redacted: boolean
   const redacted = text !== unblocked;
 
   // 대신할 노트 — 있어야 하고, 이미 대신된 노트는 다시 대신할 수 없다(최신 노트를 가리키게)
-  const old = input.supersedes !== undefined ? getNote(db, input.supersedes) : undefined;
+  let old = input.supersedes !== undefined ? getNote(db, input.supersedes) : undefined;
   if (input.supersedes !== undefined) {
     if (!old) throw new Error(`대신할 노트 #${input.supersedes}이(가) 없습니다`);
     if (old.superseded_by !== null) throw new Error(`노트 #${old.id}은(는) 이미 #${old.superseded_by}(으)로 바뀌었습니다 — 그 노트를 대신하세요`);
@@ -127,6 +131,12 @@ export function addNote(db: DB, input: NoteInput): NoteRow & { redacted: boolean
   const repoId = input.repoId ?? old?.repo_id ?? null;
   const inherited = old && input.paths === undefined ? parseNotePathsOf(old).map((item) => item.path) : undefined;
   const paths = resolveNotePaths(db, repoId, text, input.paths ?? inherited);
+  // 규칙인데 대신할 노트를 안 줬다 — 같은 경로에 같은 얘기의 규칙이 있으면 그것을 갈아 끼운다(규칙이 바뀐 것이지 하나 더가 아니다)
+  let replaced: NoteRow | null = null;
+  if (!old && repoId !== null && hasRuleTag(tags)) {
+    const duplicate = duplicateRule(db, repoId, paths.map((item) => item.path), noteDocFields(text, "").title);
+    if (duplicate) old = replaced = duplicate;
+  }
   const createdAt = new Date().toISOString();
 
   return db.transaction(() => {
@@ -144,8 +154,42 @@ export function addNote(db: DB, input: NoteInput): NoteRow & { redacted: boolean
       paths: notePathsField(paths),
     });
     if (old) supersedeNote(db, old, id);
-    return { ...getNote(db, id)!, redacted };
+    return { ...getNote(db, id)!, redacted, replaced };
   })();
+}
+
+/** 제목의 낱말 집합 — 소문자, 글자·숫자 밖에서 나누고, 한국어 조사는 뗀다(search.ts와 같은 규칙) */
+export function titleTokens(title: string): Set<string> {
+  const tokens = new Set<string>();
+  for (const raw of title.toLowerCase().split(/[^\p{L}\p{N}]+/u)) {
+    if (raw.length < 2) continue;
+    tokens.add(stripParticle(raw) ?? raw);
+  }
+  return tokens;
+}
+
+function similarity(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let shared = 0;
+  for (const token of a) if (b.has(token)) shared++;
+  return shared / (a.size + b.size - shared);
+}
+
+/**
+ * 같은 경로 집합에 묶인 살아 있는 규칙 중 같은 얘기인 것 — 제목 낱말이 DUPLICATE_RULE_SIMILARITY 이상 겹치는 것 중 가장 비슷한 노트.
+ * 경로가 다르거나(한 폴더 규칙과 그 아래 파일 규칙은 다른 규칙이다) 얘기가 다르면 중복이 아니다.
+ */
+export function duplicateRule(db: DB, repoId: number, paths: string[], title: string): NoteRow | null {
+  const wanted = [...new Set(paths)].sort().join("\n");
+  const tokens = titleTokens(title);
+  let best: { note: NoteRow; score: number } | null = null;
+  for (const note of db.prepare("SELECT * FROM notes WHERE repo_id = ? AND superseded_by IS NULL ORDER BY created_at DESC, id DESC").all(repoId) as NoteRow[]) {
+    if (!hasRuleTag(note.tags)) continue;
+    if ([...new Set(parseNotePathsOf(note).map((item) => item.path))].sort().join("\n") !== wanted) continue;
+    const score = similarity(tokens, titleTokens(noteDocFields(note.text, "").title));
+    if (score >= DUPLICATE_RULE_SIMILARITY && (!best || score > best.score)) best = { note, score };
+  }
+  return best?.note ?? null;
 }
 
 export function getNote(db: DB, id: number): NoteRow | undefined {

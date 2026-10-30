@@ -26,7 +26,7 @@ import { resolveAuthors } from "../core/identity";
 import { indexCommitCode } from "../core/diffs";
 import { CancelledError } from "../core/git";
 import { addRepo, discoverRepos, listRepos, matchRepos, relativeToRepo, resolveRepoFile, syncRepo } from "../core/indexer";
-import { parseNotePaths } from "../core/note-doc";
+import { noteDocFields, parseNotePaths } from "../core/note-doc";
 import { addNote, getNote, hasRuleTag, PATHS_MAX, ruleNotes, TAG_CHARS, TAGS_MAX } from "../core/notes";
 import { commitDetail, repoOverview, repoSummaries } from "../core/overview";
 import { search, type SearchHit } from "../core/search";
@@ -237,6 +237,8 @@ export class ToolError extends Error {}
 
 const BUSY_MESSAGE = "다른 grimoire 프로세스가 DB를 쓰는 중입니다. 잠시 후 다시 시도하세요.";
 const CANCELLED_MESSAGE = "요청이 취소되었습니다";
+const noteTitle = (text: string) => noteDocFields(text, "").title;
+
 /** record_note가 DB 잠금에 걸렸을 때 다시 해 보는 횟수와 간격 */
 const NOTE_RETRIES = 2;
 const NOTE_RETRY_MS = 200;
@@ -511,6 +513,8 @@ async function runTool(
             createdAt: note.created_at,
             ...(notePaths.length > 0 ? { paths: notePaths } : {}),
             ...(supersedes !== undefined ? { supersedes } : {}),
+            // 같은 경로·같은 얘기의 규칙이 있어 그것을 갈아 끼웠다 — 하나 더 쌓인 것이 아니라 바뀐 것
+            ...(note.replaced ? { supersedes: note.replaced.id, replaced: `#${note.replaced.id} "${noteTitle(note.replaced.text)}"` } : {}),
             ...(others.length > 0
               ? {
                   existingRules: others.map((rule) => `#${rule.id} "${rule.title}"${rule.paths.length > 0 ? ` (${rule.paths.join(", ")})` : ""}`),

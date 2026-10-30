@@ -247,7 +247,7 @@ async function main(argv: string[]): Promise<number> {
         }
         const note = addNote(db, { text, repoId: bound?.id ?? null, tags: values.tag, paths: bindPaths, supersedes, source: "cli" });
         const paths = parseNotePaths(note.paths).map((item) => item.path);
-        print(`노트 #${note.id} 저장${paths.length > 0 ? ` (파일: ${paths.join(", ")})` : ""}${supersedes !== undefined ? ` — #${supersedes} 대신` : ""}${autoNote}${note.redacted ? " (비밀로 보이는 값은 [redacted]로 바꿨습니다)" : ""}`);
+        print(`노트 #${note.id} 저장${paths.length > 0 ? ` (파일: ${paths.join(", ")})` : ""}${supersedes !== undefined ? ` — #${supersedes} 대신` : note.replaced ? ` — 같은 규칙 #${note.replaced.id}을(를) 갈아 끼움` : ""}${autoNote}${note.redacted ? " (비밀로 보이는 값은 [redacted]로 바꿨습니다)" : ""}`);
         return 0;
       }
       case "remove": {

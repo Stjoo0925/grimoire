@@ -526,3 +526,84 @@ test("record_note paths: 절대경로는 레포 기준으로, repo를 안 주면
   await assert.rejects(callTool({ db, me: [], cwd: dir }, "record_note", { text: "x", paths: "a.ts" }), /문자열 배열/);
   assert.ok(TOOLS.find((tool) => tool.name === "record_note")!.inputSchema.properties.paths, "스키마에 paths가 있어야 한다");
 });
+
+test("notes rules: 폴더에 묶은 규칙은 아래 파일마다 먼저 보이고, 규칙이 바뀌면 supersedes로 갈아 끼워 옛 규칙은 훅에서 사라지고 검색에만 남는다", async () => {
+  const { notesForFile, ruleNotes } = await import("../src/core/notes.js");
+  const { formatFileContext, fileContext } = await import("../src/core/context.js");
+  const db = memoryDb();
+  const dir = makeRepo(
+    [{ message: "feat: 시작", files: { "src/core/a.ts": "export const a = 1;\n", "src/core/deep/b.ts": "export const b = 1;\n", "src/other.ts": "export const o = 1;\n" } }],
+    "ruled",
+  );
+  const repo = await addRepo(db, dir);
+  await syncRepo(db, repo);
+
+  // 폴더: 끝에 "/"가 없어도 레포의 폴더면 폴더로 묶는다. blob은 없다
+  const rule = addNote(db, { text: "규칙: core에서는 db를 직접 열지 않는다\nopenDb는 cli·mcp에서만", repoId: repo.id, tags: ["rule"], paths: ["src/core"], source: "cli" });
+  assert.deepEqual(JSON.parse(rule.paths), [{ path: "src/core/", blob: null }]);
+  const plain = addNote(db, { text: "교훈: a.ts는 순서에 민감", repoId: repo.id, paths: ["src/core/a.ts"], source: "cli" });
+
+  // 규칙이 먼저, 폴더 아래 깊은 파일에도, 폴더 밖 파일에는 없다
+  assert.deepEqual(
+    notesForFile(db, repo.id, "src/core/a.ts").map((hint) => [hint.id, hint.rule, hint.stale]),
+    [
+      [rule.id, true, false],
+      [plain.id, false, false],
+    ],
+  );
+  assert.deepEqual(notesForFile(db, repo.id, "src/core/deep/b.ts").map((hint) => hint.id), [rule.id]);
+  assert.equal(notesForFile(db, repo.id, "src/other.ts").length, 0);
+  assert.match(formatFileContext(fileContext(db, repo.id, "src/core/a.ts"), { lean: true }), new RegExp(`Notes: #${rule.id} rule "규칙: core에서는`));
+
+  // 규칙이 바뀌었다 — 새 노트가 옛 노트를 대신한다. paths·tags를 안 주면 물려받는다
+  const changed = addNote(db, { text: "규칙: core에서 db를 열 때는 openDbReadOnly만", repoId: repo.id, supersedes: rule.id, source: "mcp" });
+  assert.equal(changed.tags, "rule");
+  assert.deepEqual(JSON.parse(changed.paths), [{ path: "src/core/", blob: null }]);
+  assert.equal((db.prepare("SELECT superseded_by FROM notes WHERE id = ?").get(rule.id) as { superseded_by: number }).superseded_by, changed.id);
+  assert.deepEqual(notesForFile(db, repo.id, "src/core/a.ts").map((hint) => hint.id), [changed.id, plain.id], "옛 규칙은 더 안 보인다");
+  assert.deepEqual(ruleNotes(db, repo.id).map((item) => item.id), [changed.id]);
+  // 검색에는 남고, 대신한 노트가 표시된다
+  const hits = search(db, "core db", { kind: "note" }).hits;
+  assert.equal(hits.find((hit) => hit.ref === String(rule.id))?.supersededBy, changed.id);
+  assert.equal(hits.find((hit) => hit.ref === String(changed.id))?.supersededBy, undefined);
+  // 이미 대신된 노트는 다시 대신할 수 없다, 없는 노트도
+  assert.throws(() => addNote(db, { text: "x", supersedes: rule.id, source: "cli" }), /이미 #/);
+  assert.throws(() => addNote(db, { text: "x", supersedes: 9999, source: "cli" }), /없습니다/);
+
+  // 레포 전체 규칙(경로 없음)은 ruleNotes(…, [])로만, 파일 규칙은 그 파일(또는 조상 폴더)로
+  const wide = addNote(db, { text: "규칙: 커밋 제목은 한국어", repoId: repo.id, tags: ["rule"], paths: [], source: "cli" });
+  assert.deepEqual(ruleNotes(db, repo.id, []).map((item) => item.id), [wide.id]);
+  assert.deepEqual(ruleNotes(db, repo.id, ["src/core/deep/b.ts"]).map((item) => item.id), [changed.id]);
+  assert.deepEqual(ruleNotes(db, repo.id, ["src/other.ts"]).map((item) => item.id), []);
+});
+
+test("record_note supersedes: 옛 노트의 레포·경로를 물려받고, 같은 경로에 규칙이 이미 있으면 알린다", async () => {
+  const db = memoryDb();
+  const dir = makeRepo([{ message: "feat: 시작", files: { "src/ui/Button.tsx": "export const Button = 1;\n", "src/ui/Input.tsx": "export const Input = 1;\n" } }], "ruled-tool");
+  const repo = await addRepo(db, dir);
+  await syncRepo(db, repo);
+  const context = { db, me: [], cwd: dir };
+  type Recorded = { id: number; paths?: string[]; supersedes?: number; existingRules?: string[]; warning?: string };
+
+  const first = (await callTool(context, "record_note", { text: "규칙: 버튼은 ui/Button을 쓴다", tags: ["rule"], paths: ["src/ui/"], repo: "ruled-tool" })) as Recorded;
+  assert.deepEqual(first.paths, ["src/ui/"]);
+  assert.equal(first.existingRules, undefined);
+
+  // 같은 폴더에 규칙을 또 남기면(supersedes 없이) 있는 규칙을 알린다 — 저장은 된다
+  const second = (await callTool(context, "record_note", { text: "규칙: ui는 forwardRef 필수", tags: ["rule"], paths: ["src/ui/Input.tsx"], repo: "ruled-tool" })) as Recorded;
+  assert.deepEqual(second.existingRules, [`#${first.id} "규칙: 버튼은 ui/Button을 쓴다" (src/ui/)`]);
+  assert.match(second.warning!, /supersedes/);
+  // 규칙이 아닌 노트는 알리지 않는다
+  const plain = (await callTool(context, "record_note", { text: "메모", paths: ["src/ui/Input.tsx"], repo: "ruled-tool" })) as Recorded;
+  assert.equal(plain.existingRules, undefined);
+
+  // 바꿔 끼우기 — repo·paths를 안 줘도 옛 노트에서 물려받는다, 작업 폴더 밖에서 불러도
+  const replaced = (await callTool({ db, me: [], cwd: os.tmpdir() }, "record_note", { text: "규칙: 버튼은 ui/Button, 링크는 ui/Link", supersedes: first.id })) as Recorded;
+  assert.equal(replaced.supersedes, first.id);
+  assert.deepEqual(replaced.paths, ["src/ui/"]);
+  assert.equal(replaced.existingRules, undefined, "자기 자신과 다른 경로의 규칙(Input.tsx)은 어긋나지 않는다");
+  assert.equal((db.prepare("SELECT repo_id FROM notes WHERE id = ?").get(replaced.id) as { repo_id: number }).repo_id, repo.id);
+  await assert.rejects(callTool(context, "record_note", { text: "x", supersedes: "1" }), /정수/);
+  await assert.rejects(callTool(context, "record_note", { text: "x", supersedes: 9999 }), ToolError);
+  assert.ok(TOOLS.find((tool) => tool.name === "record_note")!.inputSchema.properties.supersedes, "스키마에 supersedes가 있어야 한다");
+});

@@ -53,9 +53,7 @@ const HELP = `grimoire — 로컬 git 이력을 AI 코딩 도구의 기억으로
   grimoire overview <repo>        레포 개요  [--json]
   grimoire context <file>         파일을 고치기 전에 볼 것 — 최근 커밋·왜·같이 바뀌는 파일/테스트  [--repo r] [--json]
   grimoire impact [file...]       바뀐 파일이 건드릴 곳 — import·공변경·테스트  (파일을 안 주면 커밋 안 된 변경)  [--intent "작업"] [--repo r] [--limit n] [--json]
-  grimoire note <text>            노트 남기기  [--repo r] [--tag t ...] [--path f ...] [--supersedes id]
-                                  (--path: 그 파일·폴더를 고치기 전에 노트가 보인다. --tag rule: 규칙, 먼저 보인다.
-                                   --supersedes: 규칙이 바뀌었을 때 옛 노트를 이 노트로 갈아 끼운다 — 경로·태그는 물려받는다)
+  grimoire note <text>            노트 남기기  [--repo r] [--tag t ...] [--path f ...]  (--path: 그 파일을 고치기 전에 노트가 보인다)
   grimoire remove <repo>          레포와 색인 삭제
 
 MCP 연결:
@@ -102,7 +100,6 @@ async function main(argv: string[]): Promise<number> {
       depth: { type: "string" },
       tag: { type: "string", multiple: true },
       path: { type: "string", multiple: true },
-      supersedes: { type: "string" },
       json: { type: "boolean" },
       project: { type: "string" },
       "dry-run": { type: "boolean" },
@@ -227,14 +224,11 @@ async function main(argv: string[]): Promise<number> {
         const repo = values.repo ? requireRepo(db, values.repo) : given.length > 0 ? located?.repo : undefined;
         if (given.length > 0 && !repo) throw new UsageError("--path를 묶을 레포를 알 수 없습니다 — --repo로 지정하세요");
         const text = need(positionals.join(" "), "노트 내용");
-        const supersedes = values.supersedes !== undefined ? Number.parseInt(values.supersedes, 10) : undefined;
-        if (supersedes !== undefined && !Number.isInteger(supersedes)) throw new UsageError("--supersedes는 노트 번호여야 합니다");
         let bound = repo;
-        let bindPaths: string[] | undefined = repo ? given.map((item) => (path.isAbsolute(item) ? relativeToRepo(repo.path, item) : item)) : [];
+        let bindPaths = repo ? given.map((item) => (path.isAbsolute(item) ? relativeToRepo(repo.path, item) : item)) : [];
         let autoNote = "";
-        // --path를 안 줬으면 지금 작업 폴더에서 바뀐 소스 파일에 묶는다 — 대신하는 노트가 있으면 그 노트의 경로를 물려받는다
-        if (given.length === 0 && supersedes !== undefined) bindPaths = undefined;
-        else if (given.length === 0) {
+        // --path를 안 줬으면 지금 작업 폴더에서 바뀐 소스 파일에 묶는다
+        if (given.length === 0) {
           const target = values.repo ? repo : (await resolveRepoFile(db, process.cwd()))?.repo;
           if (target) {
             const auto = await autoBindPaths(db, target.id, text, values.repo ? target.path : process.cwd());
@@ -245,9 +239,9 @@ async function main(argv: string[]): Promise<number> {
             } else if (auto.tooMany) autoNote = ` (바뀐 소스 파일이 ${AUTO_BIND_MAX}개를 넘어 파일에 묶지 않았습니다)`;
           }
         }
-        const note = addNote(db, { text, repoId: bound?.id ?? null, tags: values.tag, paths: bindPaths, supersedes, source: "cli" });
+        const note = addNote(db, { text, repoId: bound?.id ?? null, tags: values.tag, paths: bindPaths, source: "cli" });
         const paths = parseNotePaths(note.paths).map((item) => item.path);
-        print(`노트 #${note.id} 저장${paths.length > 0 ? ` (파일: ${paths.join(", ")})` : ""}${supersedes !== undefined ? ` — #${supersedes} 대신` : note.replaced ? ` — 같은 규칙 #${note.replaced.id}을(를) 갈아 끼움` : ""}${autoNote}${note.redacted ? " (비밀로 보이는 값은 [redacted]로 바꿨습니다)" : ""}`);
+        print(`노트 #${note.id} 저장${paths.length > 0 ? ` (파일: ${paths.join(", ")})` : ""}${autoNote}${note.redacted ? " (비밀로 보이는 값은 [redacted]로 바꿨습니다)" : ""}`);
         return 0;
       }
       case "remove": {
@@ -445,7 +439,7 @@ async function cmdSearch(
       if (hit.lastCommit) print(`    최근 변경: ${day(hit.lastCommit.date)} ${hit.lastCommit.sha.slice(0, 8)} ${hit.lastCommit.title}`);
       continue;
     }
-    const where = hit.kind === "note" ? `note #${hit.ref}${hit.supersededBy ? ` (→ #${hit.supersededBy}로 바뀜)` : ""}` : `${hit.repo} ${hit.ref.slice(0, 8)}`;
+    const where = hit.kind === "note" ? `note #${hit.ref}` : `${hit.repo} ${hit.ref.slice(0, 8)}`;
     print(`${day(hit.date)}  ${where}  ${hit.title}`);
     if (hit.files.length > 0) print(`    ${hit.files.slice(0, 4).join("  ")}${hit.files.length > 4 ? " …" : ""}`);
     if (hit.url) print(`    ${hit.url}`);

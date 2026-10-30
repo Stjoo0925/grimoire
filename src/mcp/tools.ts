@@ -26,8 +26,8 @@ import { resolveAuthors } from "../core/identity";
 import { indexCommitCode } from "../core/diffs";
 import { CancelledError } from "../core/git";
 import { addRepo, discoverRepos, listRepos, matchRepos, relativeToRepo, resolveRepoFile, syncRepo } from "../core/indexer";
-import { noteDocFields, parseNotePaths } from "../core/note-doc";
-import { addNote, getNote, hasRuleTag, PATHS_MAX, ruleNotes, TAG_CHARS, TAGS_MAX } from "../core/notes";
+import { parseNotePaths } from "../core/note-doc";
+import { addNote, PATHS_MAX, TAG_CHARS, TAGS_MAX } from "../core/notes";
 import { commitDetail, repoOverview, repoSummaries } from "../core/overview";
 import { search, type SearchHit } from "../core/search";
 import { slimCommit, slimFileContext, slimImpact, slimOverview, slimRepos, slimSearch, type Detail } from "./format";
@@ -161,7 +161,7 @@ export const TOOLS = [
   },
   {
     name: "record_note",
-    description: "Save a decision to keep; paths = files/dirs it concerns; tags ['rule'] = convention; supersedes = note id it replaces.",
+    description: "Save a decision to keep; paths = files it concerns.",
     inputSchema: {
       type: "object",
       properties: {
@@ -169,7 +169,6 @@ export const TOOLS = [
         repo: { type: "string" },
         tags: { type: "array", items: { type: "string", maxLength: TAG_CHARS }, maxItems: TAGS_MAX },
         paths: { type: "array", items: { type: "string" }, maxItems: PATHS_MAX },
-        supersedes: { type: "integer" },
       },
       required: ["text"],
     },
@@ -237,8 +236,6 @@ export class ToolError extends Error {}
 
 const BUSY_MESSAGE = "다른 grimoire 프로세스가 DB를 쓰는 중입니다. 잠시 후 다시 시도하세요.";
 const CANCELLED_MESSAGE = "요청이 취소되었습니다";
-const noteTitle = (text: string) => noteDocFields(text, "").title;
-
 /** record_note가 DB 잠금에 걸렸을 때 다시 해 보는 횟수와 간격 */
 const NOTE_RETRIES = 2;
 const NOTE_RETRY_MS = 200;
@@ -468,23 +465,16 @@ async function runTool(
       const tags = (args.tags ?? []).slice(0, TAGS_MAX).filter((tag): tag is string => typeof tag === "string");
       if (args.paths !== undefined && !Array.isArray(args.paths)) throw new ToolError("paths는 문자열 배열이어야 합니다");
       const given = (args.paths ?? []).slice(0, PATHS_MAX).filter((item): item is string => typeof item === "string" && item.trim() !== "");
-      // 대신할 노트 — 규칙이 바뀌었을 때. 옛 노트의 레포·경로·태그를 물려받는다(안 준 것만)
-      if (args.supersedes !== undefined && (typeof args.supersedes !== "number" || !Number.isInteger(args.supersedes))) throw new ToolError("supersedes는 노트 id(정수)여야 합니다");
-      const supersedes = typeof args.supersedes === "number" ? args.supersedes : undefined;
-      const old = supersedes !== undefined ? getNote(db, supersedes) : undefined;
-      if (supersedes !== undefined && !old) throw new ToolError(`대신할 노트 #${supersedes}이(가) 없습니다`);
-      const oldRepo = old && old.repo_id !== null ? listRepos(db).find((item) => item.id === old.repo_id) : undefined;
       // 파일을 묶는 노트는 레포가 있어야 한다 — repo를 안 줬으면 작업 레포(절대경로면 그 경로가 속한 레포)
       const located = given.find((item) => path.isAbsolute(item));
-      const repo = repoFilter(args.repo) ?? (located ? (await resolveRepoFile(db, located, signal))?.repo : undefined) ?? oldRepo ?? (given.length > 0 ? current : undefined);
+      const repo = repoFilter(args.repo) ?? (located ? (await resolveRepoFile(db, located, signal))?.repo : undefined) ?? (given.length > 0 ? current : undefined);
       const repoId = repo?.id ?? null;
-      let paths: string[] | undefined = repo ? given.map((item) => (path.isAbsolute(item) ? relativeToRepo(repo.path, item) : item)) : [];
-      // paths를 아예 안 줬으면(빈 배열 []은 "묶지 않음") 지금 작업 폴더에서 바뀐 소스 파일에 묶는다 — 대신하는 노트가 있으면 그 경로를 물려받는다
+      let paths = repo ? given.map((item) => (path.isAbsolute(item) ? relativeToRepo(repo.path, item) : item)) : [];
+      // paths를 아예 안 줬으면(빈 배열 []은 "묶지 않음") 지금 작업 폴더에서 바뀐 소스 파일에 묶는다
       let bound = repo;
       let autoBound = false;
       let tooMany = false;
-      if (args.paths === undefined && old) paths = undefined;
-      else if (args.paths === undefined) {
+      if (args.paths === undefined) {
         const target = repo ?? current;
         if (target) {
           const dir = current && target.id === current.id && context.workspace?.root ? context.workspace.root : target.path;
@@ -500,27 +490,12 @@ async function runTool(
       // 다른 grimoire 프로세스가 쓰는 중이면 잠깐 뒤 다시 — 사용자가 남기라고 한 노트라 바로 실패시키지 않는다
       for (let attempt = 0; ; attempt++) {
         try {
-          const note = addNote(db, { text, repoId: bound?.id ?? null, tags: args.tags === undefined && old ? undefined : tags, paths, supersedes, source: "mcp" });
-          const notePaths = parseNotePaths(note.paths).map((item) => item.path);
-          // 같은 경로에 살아 있는 규칙이 또 있는데 대신하지 않았다 — 규칙이 바뀐 것이면 어긋난 두 규칙이 나란히 뜬다. 호출부가 고르게 알린다
-          const others =
-            hasRuleTag(note.tags) && note.repo_id !== null
-              ? ruleNotes(db, note.repo_id, notePaths).filter((rule) => rule.id !== note.id && !(notePaths.length > 0 && rule.paths.length === 0))
-              : [];
+          const note = addNote(db, { text, repoId: bound?.id ?? null, tags, paths, source: "mcp" });
           return {
             recorded: true,
             id: note.id,
             createdAt: note.created_at,
-            ...(notePaths.length > 0 ? { paths: notePaths } : {}),
-            ...(supersedes !== undefined ? { supersedes } : {}),
-            // 같은 경로·같은 얘기의 규칙이 있어 그것을 갈아 끼웠다 — 하나 더 쌓인 것이 아니라 바뀐 것
-            ...(note.replaced ? { supersedes: note.replaced.id, replaced: `#${note.replaced.id} "${noteTitle(note.replaced.text)}"` } : {}),
-            ...(others.length > 0
-              ? {
-                  existingRules: others.map((rule) => `#${rule.id} "${rule.title}"${rule.paths.length > 0 ? ` (${rule.paths.join(", ")})` : ""}`),
-                  warning: "같은 경로에 규칙이 이미 있습니다 — 이 노트가 그중 하나를 바꾸는 것이면 supersedes: <id>로 다시 남겨 옛 규칙을 내리세요",
-                }
-              : {}),
+            ...(note.paths !== "[]" ? { paths: parseNotePaths(note.paths).map((item) => item.path) } : {}),
             ...(autoBound ? { autoBound: true } : {}),
             ...(tooMany ? { note: `바뀐 소스 파일이 ${AUTO_BIND_MAX}개를 넘어 파일에 묶지 않았습니다` } : {}),
             ...(note.redacted ? { redacted: "비밀로 보이는 값(토큰·비밀번호 등)을 [redacted]로 바꿔 저장했습니다" } : {}),

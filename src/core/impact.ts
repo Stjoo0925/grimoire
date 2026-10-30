@@ -327,7 +327,7 @@ export function formatImpact(impact: Impact, limit = 10): string {
   const lines = [`Grimoire impact: ${impact.changed.join(", ")}`];
   if (impact.items.length === 0) lines.push("이력과 import에서 더 알려 줄 것이 없습니다");
   else lines.push(...impactLines(impact, limit));
-  if (impact.notes.length > 0) lines.push(`Notes: ${impact.notes.map((note) => `#${note.id}${note.rule ? " rule" : ""} ${note.path} "${note.title}"${note.stale ? " (stale)" : ""}`).join(" · ")}`);
+  if (impact.notes.length > 0) lines.push(`Notes: ${impact.notes.map((note) => `#${note.id} ${note.path} "${note.title}"${note.stale ? " (stale)" : ""}`).join(" · ")}`);
   return lines.join("\n");
 }
 

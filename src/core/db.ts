@@ -329,11 +329,6 @@ const MIGRATIONS: (string | ((db: DB) => void))[] = [
   CREATE INDEX file_refs_name ON file_refs(repo_id, name);
   ALTER TABLE repos ADD COLUMN code_version INTEGER NOT NULL DEFAULT 0;
   `,
-  // 13: 노트 갈아 끼우기(notes.ts) — 규칙이 바뀌면 새 노트가 옛 노트를 대신한다. 대신된 노트는 훅·file_context·impact에 더는 안 보이고,
-  //     검색에는 "superseded by #N"으로 남아 "왜 바뀌었나"를 찾을 수 있다
-  `
-  ALTER TABLE notes ADD COLUMN superseded_by INTEGER REFERENCES notes(id) ON DELETE SET NULL;
-  `,
 ];
 
 /**

@@ -507,7 +507,7 @@ export function formatFileContext(context: FileContext, options: FormatOptions =
   if (context.notes.length > 0) {
     lines.push({
       key: "notes",
-      text: `Notes: ${context.notes.map((note) => `#${note.id}${note.rule ? " rule" : ""} "${shortSubject(note.title, 60)}" (${note.createdAt.slice(0, 10)}${note.stale ? ", file changed since" : ""})`).join(" · ")}`,
+      text: `Notes: ${context.notes.map((note) => `#${note.id} "${shortSubject(note.title, 60)}" (${note.createdAt.slice(0, 10)}${note.stale ? ", file changed since" : ""})`).join(" · ")}`,
       drop: 6,
     });
   }

@@ -218,8 +218,6 @@ export interface SearchHit {
   why?: string;
   /** kind='note'일 때: 누가 남겼나 — me(터미널 grimoire note) | ai(MCP record_note). AI가 쓴 노트를 사람의 결정과 구분하게 */
   by?: "me" | "ai";
-  /** kind='note'일 때: 이 노트를 대신한 노트 id — 옛 규칙이다 (notes.ts supersede) */
-  supersededBy?: number;
 }
 
 export interface SearchResult {
@@ -481,13 +479,10 @@ function toHit(
   }
 
   if (doc.kind === "note") {
-    const note = db.prepare("SELECT source, paths, superseded_by FROM notes WHERE id = ?").get(Number(doc.ref)) as
-      | { source: string; paths: string | null; superseded_by: number | null }
-      | undefined;
+    const note = db.prepare("SELECT source, paths FROM notes WHERE id = ?").get(Number(doc.ref)) as { source: string; paths: string | null } | undefined;
     return {
       ...base,
       by: note?.source === "cli" ? "me" : "ai",
-      ...(note?.superseded_by ? { supersededBy: note.superseded_by } : {}),
       author: null,
       snippet: snippet ?? doc.body.slice(0, 240),
       // 노트가 묶인 파일 (notes.ts)

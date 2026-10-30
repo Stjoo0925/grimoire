@@ -34,7 +34,7 @@ const READ_TOOLS = ["search_memory", "show_commit", "file_context", "impact", "g
  * 도구 설명 글(도구·인자 description) 예산 — 설명이 다시 길어지는 것을 막는 용도다.
  * 영어로 옮기기 전 한국어 설명이 392자(도구 288 + 인자 104)였고, 영어판은 뜻이 잡히게 쓰고 약간의 여유를 둔다.
  */
-const TOOL_TEXT_BUDGET = 700; // 420(도구 6개) + file_context 한 문장 + impact 한 문장·인자 둘(paths·intent) + record_note의 rule·supersedes 반 문장
+const TOOL_TEXT_BUDGET = 630; // 420(도구 6개) + file_context 한 문장 + impact 한 문장·인자 둘(paths·intent)
 
 interface ServerSpec {
   command: string;

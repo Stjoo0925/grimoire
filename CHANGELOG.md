@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/Stjoo0925/grimoire/compare/v0.11.1...v0.12.0) (2026-10-30)
+
+
+### 기능
+
+* **rules:** 규칙 파일의 규칙마다 그 글자를 쓴 커밋과 왜를 색인한다 ([#42](https://github.com/Stjoo0925/grimoire/issues/42)) ([f2c5001](https://github.com/Stjoo0925/grimoire/commit/f2c500190b89c50f9f4ef0ecb3af32cf3de32c8f))
+
 ## [0.11.1](https://github.com/Stjoo0925/grimoire/compare/v0.11.0...v0.11.1) (2026-10-28)
 
 

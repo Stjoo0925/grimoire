@@ -161,15 +161,15 @@ export const TOOLS = [
   },
   {
     name: "record_note",
-    description: "Save a decision to keep; paths = files/dirs it concerns. tags ['rule'] = convention; supersedes = note id this replaces when a rule changes.",
+    description: "Save a decision to keep; paths = files/dirs it concerns; tags ['rule'] = convention; supersedes = note id it replaces.",
     inputSchema: {
       type: "object",
       properties: {
         text: { type: "string", description: "line 1 = title" },
         repo: { type: "string" },
         tags: { type: "array", items: { type: "string", maxLength: TAG_CHARS }, maxItems: TAGS_MAX },
-        paths: { type: "array", items: { type: "string" }, maxItems: PATHS_MAX, description: "files or dirs (src/core/)" },
-        supersedes: { type: "integer", description: "note id this one replaces (old one leaves hooks, stays searchable)" },
+        paths: { type: "array", items: { type: "string" }, maxItems: PATHS_MAX },
+        supersedes: { type: "integer" },
       },
       required: ["text"],
     },

@@ -13,7 +13,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { refreshWhy, storeTrailers } from "./capture";
-import { BLOB_BATCH_BYTES, extractRefNames, extractSymbols, headerComment, listHeadFiles, readBlobs, splitIdentifier, type CodeSymbol, type HeadFile } from "./code";
+import { BLOB_BATCH_BYTES, extractRefNames, extractSymbols, headerComment, indexableFiles, listHeadTree, readBlobs, splitIdentifier, type CodeSymbol, type HeadFile } from "./code";
+import { blameLines, historyOrder, isRuleFile, parseRules, RULE_FILES_MAX, unitHistory, type RuleUnit } from "./rules";
 import { addCochange, changeKey, cochangeInput, extractImportSpecs, needsCochangeBackfill, rebuildCochange, resolveImportSpecs } from "./context";
 import { deleteDoc, upsertDoc, pruneOrphanFts, type DB } from "./db";
 import {
@@ -42,6 +43,10 @@ const READ_BATCH = 500;
  * 1: 정의-참조 그래프(file_defs·file_refs)와 경로 별칭 import (0.10.0)
  */
 export const CODE_VERSION = 1;
+/** 규칙 색인 규칙의 판 — 이보다 낮은 레포는 트리가 그대로여도 규칙 파일을 한 번 다시 읽는다 (rules.ts, 마이그레이션 13) */
+export const RULES_VERSION = 1;
+/** 규칙 파일 blame을 한꺼번에 몇 개까지 띄우나 */
+const BLAME_CONCURRENCY = 4;
 /** 검색 문서에 넣는 변경 파일 경로 수 상한 (대량 이동 커밋이 색인을 부풀리지 않게) */
 const DOC_PATHS_MAX = 200;
 /** 기술 스택을 읽을 매니페스트 파일 수 상한 (모노레포 대비) */
@@ -316,8 +321,8 @@ async function syncRepoNow(db: DB, repo: RepoRow, signal?: AbortSignal): Promise
   }
 
   // 넘겨받은 repo 행은 오래됐을 수 있다 — 기준점은 DB에서 다시 읽는다
-  const saved = db.prepare("SELECT tips, head_tree, code_version FROM repos WHERE id = ?").get(repo.id) as
-    | { tips: string | null; head_tree: string | null; code_version: number }
+  const saved = db.prepare("SELECT tips, head_tree, code_version, rules_version FROM repos WHERE id = ?").get(repo.id) as
+    | { tips: string | null; head_tree: string | null; code_version: number; rules_version: number }
     | undefined;
   // 서로 기다릴 필요 없는 git 호출은 함께 띄운다 — 프로세스 띄우기가 호출마다 20ms 안팎이라(Windows),
   // 바뀐 것 없는 재동기화는 거의 이 셋이 전부다 (npm run perf: 재동기화 시간)
@@ -348,10 +353,14 @@ async function syncRepoNow(db: DB, repo: RepoRow, signal?: AbortSignal): Promise
   const treeChanged = tree === null || tree !== saved?.head_tree || (saved?.code_version ?? 0) < CODE_VERSION;
   // 옛 DB(마이그레이션 직후)면 있는 커밋으로 공변경 표를 끝에 다시 만들고, 아니면 새 커밋을 하나씩 더한다 (context.ts)
   const backfill = needsCochangeBackfill(db, repo.id);
-  const [added, tech, code] = await Promise.all([
+  // 규칙 파일(rules.ts)은 트리가 바뀌었거나 규칙 색인이 처음(옛 DB)일 때만 본다 — HEAD 트리 목록은 코드와 한 번만 받는다
+  const rulesStale = treeChanged || (saved?.rules_version ?? 0) < RULES_VERSION;
+  const listing = treeChanged || rulesStale ? listHeadTree(repo.path, signal) : Promise.resolve([]);
+  const [added, tech, code, rules] = await Promise.all([
     writeFresh(backfill),
     treeChanged ? readTechStack(repo.path, signal) : null,
-    treeChanged ? readChangedCode(db, repo, signal) : { changed: [], removed: [], present: new Set<string>() },
+    treeChanged ? readChangedCode(db, repo, listing, signal) : { changed: [], removed: [], present: new Set<string>() },
+    rulesStale ? readChangedRules(db, repo, listing, signal) : null,
   ]);
   // git 실패를 기본값으로 삼키는 함수들이 있어, 취소됐으면 그 기본값을 쓰기 전에 멈춘다
   throwIfCancelled(signal);
@@ -373,6 +382,10 @@ async function syncRepoNow(db: DB, repo: RepoRow, signal?: AbortSignal): Promise
 
     applyCode(db, repo, code);
     if (treeChanged) db.prepare("UPDATE repos SET code_version = ? WHERE id = ?").run(CODE_VERSION, repo.id);
+    if (rules) {
+      applyRules(db, repo, rules);
+      db.prepare("UPDATE repos SET rules_version = ? WHERE id = ?").run(RULES_VERSION, repo.id);
+    }
 
     db.prepare("UPDATE repos SET synced_at = ?, remote_url = ?, tips = ?, head_tree = ? WHERE id = ?").run(
       new Date().toISOString(),
@@ -480,8 +493,8 @@ export function blobBatches(files: HeadFile[], maxBytes = BLOB_BATCH_BYTES): Hea
  * HEAD의 파일 중 blob이 바뀐 것만 읽는다 (트랜잭션 밖 — git 호출이 느릴 수 있어서).
  * 묶음별로 읽어 심볼·머리 주석을 바로 뽑고 내용은 버린다 — 트랜잭션 안에서는 INSERT만 한다.
  */
-async function readChangedCode(db: DB, repo: RepoRow, signal?: AbortSignal): Promise<CodeChanges> {
-  const head = await listHeadFiles(repo.path, signal);
+async function readChangedCode(db: DB, repo: RepoRow, listing: Promise<HeadFile[]>, signal?: AbortSignal): Promise<CodeChanges> {
+  const head = indexableFiles(await listing);
   const known = new Map(
     (db.prepare("SELECT path, blob FROM code_files WHERE repo_id = ?").all(repo.id) as { path: string; blob: string }[]).map(
       (row) => [row.path, row.blob],
@@ -560,6 +573,101 @@ function applyCode(db: DB, repo: RepoRow, code: CodeChanges): void {
     clearDefs.run(repo.id, file);
     clearRefs.run(repo.id, file);
     deleteDoc(db, "file", file, repo.id);
+  }
+}
+
+interface RuleFileChange {
+  path: string;
+  blob: string;
+  scope: string;
+  /** blame이 됐나 — 실패면 다음 동기화가 다시 읽는다 */
+  complete: boolean;
+  units: (RuleUnit & { origin: string | null; last: string | null })[];
+}
+
+interface RuleChanges {
+  changed: RuleFileChange[];
+  removed: string[];
+}
+
+/**
+ * 규칙 파일 중 blob이 바뀐 것만 읽어 규칙 단위로 나누고, 단위마다 출처·최근 변경 커밋을 blame으로 구한다 (트랜잭션 밖).
+ * 규칙 색인이 처음이면(rules_version) 전부 읽는다. 규칙 파일이 안 바뀐 동기화는 blame을 부르지 않는다.
+ */
+async function readChangedRules(db: DB, repo: RepoRow, listing: Promise<HeadFile[]>, signal?: AbortSignal): Promise<RuleChanges> {
+  // 심볼릭 링크(AGENTS.md -> CLAUDE.md)는 뺀다 — blob 내용이 링크 대상 경로라 그것이 "규칙"으로 들어갔다. 대상 파일이 따로 색인된다
+  const files = (await listing).filter((file) => !file.link && isRuleFile(file.path, file.size)).slice(0, RULE_FILES_MAX);
+  const known = new Map(
+    (db.prepare("SELECT path, blob, complete FROM rule_files WHERE repo_id = ?").all(repo.id) as { path: string; blob: string; complete: number }[]).map((row) => [
+      row.path,
+      row.complete ? row.blob : null,
+    ]),
+  );
+  const version = (db.prepare("SELECT rules_version FROM repos WHERE id = ?").get(repo.id) as { rules_version: number } | undefined)?.rules_version ?? 0;
+  const stale = version < RULES_VERSION ? files : files.filter((file) => known.get(file.path) !== file.blob);
+  const contents = await readBlobs(repo.path, [...new Set(stale.map((file) => file.blob))], signal);
+  const changed: RuleFileChange[] = [];
+  for (let start = 0; start < stale.length; start += BLAME_CONCURRENCY) {
+    const batch = stale.slice(start, start + BLAME_CONCURRENCY);
+    changed.push(
+      ...(await Promise.all(
+        batch.map(async (file) => {
+          const parsed = parseRules(contents.get(file.blob) ?? "");
+          if (parsed.units.length === 0) return { path: file.path, blob: file.blob, scope: parsed.scope, complete: true, units: [] };
+          const [blame, order] = await Promise.all([blameLines(repo.path, file.path, signal), historyOrder(repo.path, file.path, signal)]);
+          const units = parsed.units.map((unit) => {
+            const history = blame ? unitHistory(unit, blame, order) : null;
+            return { ...unit, origin: history?.origin ?? null, last: history?.last ?? null };
+          });
+          return { path: file.path, blob: file.blob, scope: parsed.scope, complete: blame !== null, units };
+        }),
+      )),
+    );
+  }
+  throwIfCancelled(signal);
+  const present = new Set(files.map((file) => file.path));
+  return { changed, removed: [...known.keys()].filter((file) => !present.has(file)) };
+}
+
+/** 규칙 색인을 갈아 끼운다 — 파일 단위로 지우고 다시 넣는다. 검색 문서 kind='rule', ref='경로:줄' */
+function applyRules(db: DB, repo: RepoRow, changes: RuleChanges): void {
+  const linesOf = db.prepare("SELECT line FROM rules WHERE repo_id = ? AND path = ?");
+  const clear = db.prepare("DELETE FROM rules WHERE repo_id = ? AND path = ?");
+  const insert = db.prepare(
+    "INSERT INTO rules (repo_id, path, line, end_line, heading, text, origin_sha, last_sha) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  );
+  const upsertFile = db.prepare(
+    `INSERT INTO rule_files (repo_id, path, blob, scope, complete) VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT (repo_id, path) DO UPDATE SET blob = excluded.blob, scope = excluded.scope, complete = excluded.complete`,
+  );
+  const commit = db.prepare("SELECT subject, authored_at FROM commits WHERE repo_id = ? AND sha = ?");
+  const drop = (file: string) => {
+    for (const row of linesOf.all(repo.id, file) as { line: number }[]) deleteDoc(db, "rule", `${file}:${row.line}`, repo.id);
+    clear.run(repo.id, file);
+  };
+  const now = new Date().toISOString();
+  for (const file of changes.changed) {
+    drop(file.path);
+    upsertFile.run(repo.id, file.path, file.blob, file.scope, file.complete ? 1 : 0);
+    for (const unit of file.units) {
+      insert.run(repo.id, file.path, unit.line, unit.endLine, unit.heading, unit.text, unit.origin, unit.last);
+      const origin = unit.origin ? (commit.get(repo.id, unit.origin) as { subject: string; authored_at: string } | undefined) : undefined;
+      const [first, ...rest] = unit.text.split("\n");
+      upsertDoc(db, {
+        kind: "rule",
+        ref: `${file.path}:${unit.line}`,
+        repoId: repo.id,
+        at: origin?.authored_at ?? now,
+        title: first.slice(0, 120),
+        // 제목·범위·들여온 커밋의 제목도 넣는다 — "왜 이 규칙"을 커밋에 쓴 말로 물어도 걸리게
+        body: [first.length > 120 ? first : "", ...rest, unit.heading, file.scope, origin?.subject ?? ""].filter(Boolean).join("\n"),
+        paths: `${file.path} ${splitIdentifier(file.path)}`,
+      });
+    }
+  }
+  for (const file of changes.removed) {
+    drop(file);
+    db.prepare("DELETE FROM rule_files WHERE repo_id = ? AND path = ?").run(repo.id, file);
   }
 }
 

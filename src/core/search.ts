@@ -175,7 +175,7 @@ export interface SearchFilters {
   since?: string;
   /** ISO 날짜 미만 */
   until?: string;
-  kind?: "commit" | "note" | "file";
+  kind?: "commit" | "note" | "file" | "rule";
 }
 
 export interface SearchOptions extends SearchFilters {
@@ -187,8 +187,17 @@ export interface SearchOptions extends SearchFilters {
   preferRepoId?: number;
 }
 
+/** 규칙 단위를 들여온·바꾼 커밋 (rules.ts) */
+export interface RuleCommit {
+  sha: string;
+  date: string;
+  subject: string;
+  /** 그 커밋에 묶인 의도 한 줄 (capture.ts) */
+  why?: string;
+}
+
 export interface SearchHit {
-  kind: "commit" | "note" | "file";
+  kind: "commit" | "note" | "file" | "rule";
   repo: string | null;
   repoPath: string | null;
   /** 커밋 sha 또는 note id */
@@ -218,6 +227,8 @@ export interface SearchHit {
   why?: string;
   /** kind='note'일 때: 누가 남겼나 — me(터미널 grimoire note) | ai(MCP record_note). AI가 쓴 노트를 사람의 결정과 구분하게 */
   by?: "me" | "ai";
+  /** kind='rule'일 때: 규칙 파일의 줄과 그 규칙을 들여온 커밋(origin), 그 뒤 마지막으로 바꾼 커밋(changed, origin과 다를 때만) */
+  rule?: { line: number; heading: string; scope: string; origin: RuleCommit | null; changed: RuleCommit | null };
 }
 
 export interface SearchResult {
@@ -425,7 +436,7 @@ function toHit(
     )
     .get(docId) as
     | {
-        kind: "commit" | "note" | "file";
+        kind: "commit" | "note" | "file" | "rule";
         ref: string;
         at: string;
         repo_id: number | null;
@@ -475,6 +486,29 @@ function toHit(
       symbols: picked.map((symbol) => `${symbol.name}:${symbol.line}`),
       lines: file?.lines,
       lastCommit: last ?? null,
+    };
+  }
+
+  if (doc.kind === "rule") {
+    const [file, line] = splitRuleRef(doc.ref);
+    const rule = db
+      .prepare(
+        `SELECT r.heading, r.text, r.origin_sha, r.last_sha, f.scope FROM rules r
+           LEFT JOIN rule_files f ON f.repo_id = r.repo_id AND f.path = r.path
+          WHERE r.repo_id = ? AND r.path = ? AND r.line = ?`,
+      )
+      .get(doc.repo_id, file, line) as { heading: string; text: string; origin_sha: string | null; last_sha: string | null; scope: string | null } | undefined;
+    if (!rule || doc.repo_id === null) return null;
+    const origin = rule.origin_sha ? ruleCommit(db, doc.repo_id, rule.origin_sha) : null;
+    const changed = rule.last_sha && rule.last_sha !== rule.origin_sha ? ruleCommit(db, doc.repo_id, rule.last_sha) : null;
+    return {
+      ...base,
+      author: null,
+      snippet: rule.text,
+      files: [file],
+      filesChanged: null,
+      url: null,
+      rule: { line, heading: rule.heading, scope: rule.scope ?? "", origin, changed },
     };
   }
 
@@ -529,4 +563,19 @@ function touchedSymbols(json: string | null, terms: string[]): { file: string; n
   } catch {
     return [];
   }
+}
+
+/** 규칙 문서의 ref "경로:줄" → [경로, 줄]. 경로에 ":"가 있어도 마지막 것만 줄로 본다 */
+export function splitRuleRef(ref: string): [string, number] {
+  const at = ref.lastIndexOf(":");
+  return [ref.slice(0, at), Number(ref.slice(at + 1))];
+}
+
+/** 규칙의 출처·변경 커밋 — 커밋이 아직 색인되지 않았으면 sha만 */
+export function ruleCommit(db: DB, repoId: number, sha: string): RuleCommit {
+  const row = db.prepare("SELECT authored_at, subject FROM commits WHERE repo_id = ? AND sha = ?").get(repoId, sha) as
+    | { authored_at: string; subject: string }
+    | undefined;
+  const why = whyLine(db, repoId, sha);
+  return { sha, date: row?.authored_at ?? "", subject: row?.subject ?? "", ...(why ? { why } : {}) };
 }

@@ -1,5 +1,6 @@
 import type { DB } from "./db";
 import { isIndexable } from "./code";
+import { isRuleFile } from "./rules";
 import { workingChanges } from "./impact";
 import { resolveNotePaths } from "./notes";
 
@@ -20,7 +21,7 @@ export async function autoBindPaths(db: DB, repoId: number, text: string, dir: s
   if (resolveNotePaths(db, repoId, text).length > 0) return { paths: [], tooMany: false };
   let changed: string[];
   try {
-    changed = (await workingChanges(dir, signal)).filter((file) => isIndexable(file, 0));
+    changed = (await workingChanges(dir, signal)).filter((file) => isIndexable(file, 0) || isRuleFile(file));
   } catch {
     return { paths: [], tooMany: false };
   }

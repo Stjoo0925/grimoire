@@ -329,6 +329,31 @@ const MIGRATIONS: (string | ((db: DB) => void))[] = [
   CREATE INDEX file_refs_name ON file_refs(repo_id, name);
   ALTER TABLE repos ADD COLUMN code_version INTEGER NOT NULL DEFAULT 0;
   `,
+  // 13: 레포 규칙(rules.ts) — 규칙 파일(CLAUDE.md·.claude/rules·AGENTS.md…)의 규칙 단위와 그 출처 커밋(blame). 규칙의 원본은 파일이고
+  //     여기는 색인일 뿐이다(docs/rules-research.md). rules_version이 RULES_VERSION(indexer.ts)보다 낮은 레포는 다음 동기화가 채운다
+  `
+  CREATE TABLE rule_files (
+    repo_id  INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    path     TEXT NOT NULL,
+    blob     TEXT NOT NULL,
+    scope    TEXT NOT NULL DEFAULT '',
+    -- 0이면 blame이 실패해 출처를 모른다 — 다음 동기화가 다시 읽는다
+    complete INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (repo_id, path)
+  );
+  CREATE TABLE rules (
+    repo_id     INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    path        TEXT NOT NULL,
+    line        INTEGER NOT NULL,
+    end_line    INTEGER NOT NULL,
+    heading     TEXT NOT NULL DEFAULT '',
+    text        TEXT NOT NULL,
+    origin_sha  TEXT,
+    last_sha    TEXT,
+    PRIMARY KEY (repo_id, path, line)
+  );
+  ALTER TABLE repos ADD COLUMN rules_version INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 /**
@@ -384,7 +409,7 @@ function migrate(db: DB): void {
 export function upsertDoc(
   db: DB,
   doc: {
-    kind: "commit" | "note" | "file";
+    kind: "commit" | "note" | "file" | "rule";
     ref: string;
     repoId: number | null;
     at: string;

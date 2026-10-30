@@ -35,7 +35,9 @@ import {
 } from "../core/capture";
 import { isIndexable } from "../core/code";
 import { grimoireHome, type Env } from "../core/config";
-import { fileContext, formatFileContext, needsCochangeBackfill, TEST_PATH, HOOK_BUDGET } from "../core/context";
+import { fileContext, formatFileContext, needsCochangeBackfill, shortSubject, TEST_PATH, HOOK_BUDGET } from "../core/context";
+import { notesForFile } from "../core/notes";
+import { isRuleFile, isRuleWorthCommit, unitsRemovedBy, unitsTouchedBy, type RuleUnit } from "../core/rules";
 import type { DB } from "../core/db";
 import { addedLines, commitTime, dirtyFiles, headSha, stagedFiles } from "../core/git";
 import { commitImpact, formatMissing, IMPACT_HEAD, missingCompanions } from "../core/impact";
@@ -432,6 +434,72 @@ async function preCommit(context: HookContext, input: HookInput, command: string
   return { json: { hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: text } } };
 }
 
+/** 규칙 파일 편집 직전에 보여 주는 규칙 수 */
+const RULES_SHOWN = 3;
+
+/** Edit·MultiEdit의 old_string들. 없으면 null(Write 등) */
+function oldStrings(input: HookInput): string[] | null {
+  const tool = input.tool_input ?? {};
+  if (typeof tool.old_string === "string") return [tool.old_string];
+  if (Array.isArray(tool.edits)) {
+    return tool.edits.map((edit) => (edit && typeof (edit as { old_string?: unknown }).old_string === "string" ? (edit as { old_string: string }).old_string : "")).filter(Boolean);
+  }
+  return null;
+}
+
+/**
+ * 규칙 파일(CLAUDE.md·.claude/rules…) 편집 직전 — 지금 바꾸거나 지우는 규칙이 어느 커밋에서 왜 들어왔는지, 그리고 이 파일에 묶인 노트.
+ * 규칙 텍스트는 다시 넣지 않는다(클라이언트가 이미 싣는다). 출처 커밋의 제목이 이유를 담을 만한 것(isRuleWorthCommit)인 규칙만, 같은 세션·HEAD에서
+ * 규칙마다 한 번. 줄 것이 없으면 아무것도 (docs/rules-research.md §4-5).
+ */
+function ruleFileEdit(context: HookContext, input: HookInput, repo: RepoRow, relative: string): HookOutput | null {
+  const rows = context.db
+    .prepare("SELECT line, end_line AS endLine, heading, text, origin_sha AS origin FROM rules WHERE repo_id = ? AND path = ? ORDER BY line")
+    .all(repo.id, relative) as (RuleUnit & { origin: string | null })[];
+  const olds = oldStrings(input);
+  const content = input.tool_input?.content;
+  const touched =
+    olds !== null
+      ? rows.filter((row) => olds.some((old) => unitsTouchedBy([row], old).length > 0))
+      : typeof content === "string"
+        ? (unitsRemovedBy(rows, content) as typeof rows)
+        : [];
+  const commitOf = context.db.prepare("SELECT subject, authored_at AS date FROM commits WHERE repo_id = ? AND sha = ?");
+  const sessionId = input.session_id ?? "unknown";
+  const state = loadSession(context.env, sessionId);
+  const head = context.headOf ? context.headOf(repo) : (repo.head_tree ?? "");
+  const lines: string[] = [];
+  for (const row of touched) {
+    if (lines.length >= RULES_SHOWN || !row.origin) continue;
+    const key = `rule:${repo.id}:${relative}:${row.line}`;
+    if (state.shown[key] === head) continue;
+    const commit = commitOf.get(repo.id, row.origin) as { subject: string; date: string } | undefined;
+    if (!commit || !isRuleWorthCommit(commit.subject)) continue;
+    state.shown[key] = head;
+    const why = whyLine(context.db, repo.id, row.origin, 80);
+    const title = row.text.split("\n")[0];
+    lines.push(
+      `L${row.line} "${shortSubject(title, 50)}" ← ${row.origin.slice(0, 10)} ${commit.date.slice(0, 10)} "${shortSubject(commit.subject, 50)}"${why && !isSymptomOnly(why) ? ` — why: ${why}` : ""}`,
+    );
+  }
+  // 이 규칙 파일에 묶인 노트 — 이 편집 뒤에는 오래됐다고 표시된다. 맞지 않게 되면 고치라고 같은 자리에서 알린다
+  const notesKey = `rulenotes:${repo.id}:${relative}`;
+  const notes = state.shown[notesKey] === head ? [] : notesForFile(context.db, repo.id, relative);
+  if (notes.length > 0) state.shown[notesKey] = head;
+  if (lines.length === 0 && notes.length === 0) return null;
+  saveSession(context.env, sessionId, state);
+  const out = [`Grimoire: ${relative}${lines.length > 0 ? " — the rules you're changing came from:" : ""}`, ...lines];
+  if (notes.length > 0) {
+    out.push(`Notes on this file (update any this change makes wrong): ${notes.map((note) => `#${note.id} "${shortSubject(note.title, 50)}"${note.stale ? " (stale)" : ""}`).join(" · ")}`);
+  }
+  let text = out.join("\n");
+  while (text.length > HOOK_BUDGET && out.length > 2) {
+    out.splice(out.length - (notes.length > 0 ? 2 : 1), 1);
+    text = out.join("\n");
+  }
+  return { json: { hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: text.slice(0, HOOK_BUDGET) } } };
+}
+
 /** 이 세션의 작업 의도 — 마지막 커밋 뒤 사용자가 한 말(캡처된 프롬프트) 최근 셋. 없으면 undefined */
 function sessionIntent(context: HookContext, sessionId: string, repoId: number): string | undefined {
   const prompts = pendingEvents(context.db, sessionId, repoId)
@@ -453,6 +521,7 @@ async function preToolUse(context: HookContext, input: HookInput): Promise<HookO
   const resolved = await resolveRepoFile(context.db, file);
   if (!resolved) return null;
   const { repo, relative } = resolved;
+  if (isRuleFile(relative)) return ruleFileEdit(context, input, repo, relative);
   // 테스트·생성·비소스 파일은 건너뛴다 — 맥락을 줄 가치가 낮고 매 편집마다 글자를 쓴다
   if (TEST_PATH.test(relative) || !isIndexable(relative, 0)) return null;
 

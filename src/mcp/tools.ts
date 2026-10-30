@@ -86,7 +86,7 @@ export const TOOLS = [
   {
     name: "search_memory",
     description:
-      "Find code (file symbol:line), past commits, notes. 'Where is X?' 'How did I do X?' Cite file:line/sha.",
+      "Find code (file symbol:line), past commits, notes, rules. 'Where is X?' 'How did I do X?' Cite file:line/sha.",
     inputSchema: {
       type: "object",
       properties: {
@@ -95,7 +95,7 @@ export const TOOLS = [
         author: { type: "string", description: "me | email" },
         since: { type: "string", format: "date" },
         until: { type: "string", format: "date" },
-        kind: { type: "string", enum: ["file", "commit", "note"] },
+        kind: { type: "string", enum: ["file", "commit", "note", "rule"] },
         limit: { type: "number", description: "default 8" },
         detail: { type: "string", enum: ["index", "summary", "full"], description: "summary: +bodies, changed fns; full: +diff" },
       },
@@ -336,7 +336,7 @@ async function runTool(
     case "search_memory": {
       const query = str(args.query);
       if (!query) throw new ToolError("query가 필요합니다");
-      const kind = args.kind === "commit" || args.kind === "note" || args.kind === "file" ? args.kind : undefined;
+      const kind = args.kind === "commit" || args.kind === "note" || args.kind === "file" || args.kind === "rule" ? args.kind : undefined;
       const authors = resolveAuthors(str(args.author), me);
       if (authors && authors.length === 0) {
         throw new ToolError("내 이메일을 알 수 없습니다. GRIMOIRE_ME 또는 git config user.email을 설정하세요.");

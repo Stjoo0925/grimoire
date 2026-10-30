@@ -68,6 +68,22 @@ export function slimSearch(result: SearchResult, me: string[], detail: Detail = 
         last: hit.lastCommit ? `${hit.lastCommit.sha.slice(0, SHA)} ${day(hit.lastCommit.date)} ${hit.lastCommit.title}` : undefined,
       };
     }
+    if (hit.kind === "rule" && hit.rule) {
+      // 규칙의 원본은 파일이다 — 위치·본문과, 이 규칙을 들여온 커밋(그때의 왜)·마지막으로 바꾼 커밋 (rules.ts)
+      const commit = (item: NonNullable<typeof hit.rule.origin>) =>
+        `${item.sha.slice(0, SHA)}${item.date ? ` ${day(item.date)}` : ""}${item.subject ? ` ${item.subject}` : ""}`;
+      return {
+        rule: `${hit.files[0]}:${hit.rule.line}`,
+        repo: hit.repo ?? undefined,
+        ...(hit.rule.heading ? { section: hit.rule.heading } : {}),
+        ...(hit.rule.scope ? { scope: hit.rule.scope } : {}),
+        text: snippet(hit.snippet, SUMMARY_BODY_CHARS),
+        ...(hit.rule.origin ? { added: commit(hit.rule.origin) } : {}),
+        ...(hit.rule.origin?.why ? { why: hit.rule.origin.why } : {}),
+        ...(hit.rule.changed ? { changed: commit(hit.rule.changed) } : {}),
+        ...(hit.rule.changed?.why ? { changedWhy: hit.rule.changed.why } : {}),
+      };
+    }
     if (hit.kind === "note") {
       // AI가 남긴 노트는 사람이 내린 결정과 구분한다 — 결과에 섞인 지시가 노트로 굳어 돌아오는 경로를 드러내게
       return {

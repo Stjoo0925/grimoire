@@ -439,6 +439,14 @@ async function cmdSearch(
       if (hit.lastCommit) print(`    최근 변경: ${day(hit.lastCommit.date)} ${hit.lastCommit.sha.slice(0, 8)} ${hit.lastCommit.title}`);
       continue;
     }
+    if (hit.kind === "rule" && hit.rule) {
+      // 규칙: 파일:줄과 본문 첫 줄, 이 규칙을 들여온 커밋과 그때의 왜
+      print(`${hit.repo}  ${hit.files[0]}:${hit.rule.line}  ${hit.title}`);
+      const origin = hit.rule.origin;
+      if (origin) print(`    들여온 커밋: ${origin.sha.slice(0, 8)}${origin.date ? ` ${day(origin.date)}` : ""} ${origin.subject}${origin.why ? ` — 왜: ${origin.why}` : ""}`);
+      if (hit.rule.changed) print(`    최근 변경: ${hit.rule.changed.sha.slice(0, 8)}${hit.rule.changed.date ? ` ${day(hit.rule.changed.date)}` : ""} ${hit.rule.changed.subject}`);
+      continue;
+    }
     const where = hit.kind === "note" ? `note #${hit.ref}` : `${hit.repo} ${hit.ref.slice(0, 8)}`;
     print(`${day(hit.date)}  ${where}  ${hit.title}`);
     if (hit.files.length > 0) print(`    ${hit.files.slice(0, 4).join("  ")}${hit.files.length > 4 ? " …" : ""}`);

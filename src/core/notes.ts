@@ -3,7 +3,8 @@
  *
  * 노트는 파일에 묶일 수 있다(paths). 그 파일을 고치기 직전 훅과 file_context가 노트를 보여 주고(docs/signal-design.md §5-1 K3),
  * 노트를 남긴 뒤 파일이 바뀌었으면 "오래됐을 수 있음"으로 표시한다 — 묶을 때의 blob을 함께 적어 두고 지금 HEAD의 blob과 비교한다.
- * paths를 주지 않아도 본문에 적힌 레포 파일 경로(code_files에 있는 것)는 자동으로 묶는다.
+ * paths를 주지 않아도 본문에 적힌 레포 파일 경로(code_files·rule_files에 있는 것)는 자동으로 묶는다 — "CLAUDE.md의 커밋 규칙은…"이라고 쓰면
+ * 그 노트는 CLAUDE.md에 묶이고, CLAUDE.md가 바뀌면 오래됐을 수 있다고 표시된다.
  */
 import { stripSystemBlocks } from "./capture";
 import { upsertDoc, type DB } from "./db";
@@ -54,7 +55,9 @@ export const NOTES_PER_FILE = 3;
 export function resolveNotePaths(db: DB, repoId: number | null, text: string, given: string[] = []): NotePath[] {
   const known = new Map<string, string>();
   if (repoId !== null) {
-    for (const row of db.prepare("SELECT path, blob FROM code_files WHERE repo_id = ?").all(repoId) as { path: string; blob: string }[]) known.set(row.path, row.blob);
+    // 소스 파일과 규칙 파일(rules.ts) — 규칙 파일에 묶은 노트도 그 파일이 바뀌면 stale이 된다(규칙이 바뀌면 그 규칙에 대한 노트는 오래됐다)
+    const rows = db.prepare("SELECT path, blob FROM code_files WHERE repo_id = ? UNION ALL SELECT path, blob FROM rule_files WHERE repo_id = ?").all(repoId, repoId);
+    for (const row of rows as { path: string; blob: string }[]) known.set(row.path, row.blob);
   }
   const paths = [...new Set([...given.map(normalizeNotePath).filter(Boolean), ...pathsInText(text, new Set(known.keys()))])].slice(0, PATHS_MAX);
   return paths.map((path) => ({ path, blob: known.get(path) ?? null }));
@@ -112,7 +115,12 @@ export function notesForFile(db: DB, repoId: number, file: string, limit = NOTES
     )
     .all(repoId, file, limit) as { id: number; text: string; created_at: string; blob: string | null }[];
   if (rows.length === 0) return [];
-  const current = (db.prepare("SELECT blob FROM code_files WHERE repo_id = ? AND path = ?").get(repoId, file) as { blob: string } | undefined)?.blob ?? null;
+  const current =
+    (
+      db.prepare("SELECT blob FROM code_files WHERE repo_id = ? AND path = ? UNION ALL SELECT blob FROM rule_files WHERE repo_id = ? AND path = ?").get(repoId, file, repoId, file) as
+        | { blob: string }
+        | undefined
+    )?.blob ?? null;
   return rows.map((row) => ({
     id: row.id,
     title: noteDocFields(row.text, "").title,

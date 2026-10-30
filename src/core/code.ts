@@ -44,6 +44,16 @@ export function isIndexable(file: string, size: number): boolean {
 
 /** HEAD 트리의 색인 대상 파일 (경로·blob sha·크기) */
 export async function listHeadFiles(dir: string, signal?: AbortSignal): Promise<HeadFile[]> {
+  return indexableFiles(await listHeadTree(dir, signal));
+}
+
+/** HEAD 트리의 색인 대상 소스 파일 — listHeadTree를 한 번 부르고 코드와 규칙 파일(rules.ts)이 함께 쓴다 */
+export function indexableFiles(tree: HeadFile[]): HeadFile[] {
+  return tree.filter((file) => isIndexable(file.path, file.size)).slice(0, MAX_FILES);
+}
+
+/** HEAD 트리의 모든 파일(경로·blob sha·크기). 커밋이 없는 레포면 빈 목록 */
+export async function listHeadTree(dir: string, signal?: AbortSignal): Promise<HeadFile[]> {
   let out: string;
   try {
     out = await runGit(dir, ["ls-tree", "-r", "-l", "-z", "HEAD"], undefined, signal, GIT_BULK_TIMEOUT_MS);
@@ -56,10 +66,9 @@ export async function listHeadFiles(dir: string, signal?: AbortSignal): Promise<
     // "<mode> blob <sha> <size>\t<path>"
     const match = /^\d+ blob ([0-9a-f]{40,64})\s+(\d+)\t(.+)$/.exec(entry);
     if (!match) continue;
-    const size = Number(match[2]);
-    if (isIndexable(match[3], size)) files.push({ path: match[3], blob: match[1], size });
+    files.push({ path: match[3], blob: match[1], size: Number(match[2]) });
   }
-  return files.slice(0, MAX_FILES);
+  return files;
 }
 
 /**

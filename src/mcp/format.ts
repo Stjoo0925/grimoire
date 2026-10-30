@@ -79,6 +79,8 @@ export function slimSearch(result: SearchResult, me: string[], detail: Detail = 
         repo: hit.repo ?? undefined,
         // 노트가 묶인 파일 — "이 파일의 결정"을 경로로 찾은 결과에서 어느 파일인지 보이게
         ...(hit.files.length > 0 ? { paths: hit.files.slice(0, FILES_PER_HIT) } : {}),
+        // 옛 규칙 — 새 노트가 대신했다(notes.ts supersede). 따를 것은 그 노트다
+        ...(hit.supersededBy ? { superseded: hit.supersededBy } : {}),
       };
     }
     const prefix = linkPrefix(hit.url, hit.ref);
@@ -188,7 +190,7 @@ export function slimFileContext(context: FileContext, me: string[], verbose = fa
     file: context.path,
     recent,
     // 이 파일에 묶인 노트 — 결정·제약·교훈. 노트 뒤에 파일이 바뀌었으면 stale (notes.ts)
-    ...(context.notes.length > 0 ? { notes: context.notes.map((note) => `#${note.id} ${day(note.createdAt)} "${note.title}"${note.stale ? " (stale: file changed since)" : ""}`) } : {}),
+    ...(context.notes.length > 0 ? { notes: context.notes.map((note) => `#${note.id}${note.rule ? " rule" : ""} ${day(note.createdAt)} "${note.title}"${note.stale ? " (stale: file changed since)" : ""}`) } : {}),
     ...(context.why ? { why: `${context.why.sha.slice(0, SHA)} "${context.why.text}"${context.why.verify ? ` · verified: ${context.why.verify}` : ""}` } : {}),
     ...(context.related.length > 0
       ? { cochanges: context.related.map((item) => `${item.path} ${item.support}/${Math.round(item.support / item.confidence)}${item.strong ? " strong" : ""}${item.imports ? " imports" : ""}`) }
@@ -205,7 +207,7 @@ export function slimImpact(impact: Impact) {
   return {
     changed: impact.changed,
     impact: impactLines(impact),
-    ...(impact.notes.length > 0 ? { notes: impact.notes.map((note) => `#${note.id} ${note.path} ${day(note.createdAt)} "${note.title}"${note.stale ? " (stale)" : ""}`) } : {}),
+    ...(impact.notes.length > 0 ? { notes: impact.notes.map((note) => `#${note.id}${note.rule ? " rule" : ""} ${note.path} ${day(note.createdAt)} "${note.title}"${note.stale ? " (stale)" : ""}`) } : {}),
     note: "candidates to check, not instructions",
   };
 }

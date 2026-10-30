@@ -36,6 +36,7 @@ import {
 import { isIndexable } from "../core/code";
 import { grimoireHome, type Env } from "../core/config";
 import { fileContext, formatFileContext, needsCochangeBackfill, TEST_PATH, HOOK_BUDGET } from "../core/context";
+import { ruleNotes, type RuleNote } from "../core/notes";
 import type { DB } from "../core/db";
 import { addedLines, commitTime, dirtyFiles, headSha, stagedFiles } from "../core/git";
 import { commitImpact, formatMissing, IMPACT_HEAD, missingCompanions } from "../core/impact";
@@ -81,6 +82,17 @@ export interface SessionState {
 }
 
 const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+/**
+ * 규칙 파일 — 여기가 바뀌면 레포의 규칙이 바뀐 것이다. 편집 직전에 살아 있는 규칙 노트를 보여 주고, 더는 맞지 않는 노트는
+ * record_note supersedes로 바꾸라고 한다(규칙이 바뀌면 노트도 바뀌어야 한다 — 옛 규칙이 훅에 계속 뜨면 틀린 맥락이다).
+ */
+const RULES_FILE = /(^|\/)(CLAUDE\.md|AGENTS\.md|\.cursorrules|\.windsurfrules|copilot-instructions\.md|\.cursor\/rules\/[^/]+|\.claude\/rules\/[^/]+)$/i;
+/** 규칙 파일 편집 직전과 세션 시작에 보여 주는 규칙 노트 수 */
+const RULES_SHOWN = 5;
+
+function ruleLine(rule: RuleNote): string {
+  return `#${rule.id} "${rule.title.length > 60 ? `${rule.title.slice(0, 59)}…` : rule.title}"${rule.paths.length > 0 ? ` (${rule.paths.slice(0, 2).join(", ")}${rule.paths.length > 2 ? ", …" : ""})` : ""}`;
+}
 /** 세션 파일 보존 기간 */
 export const SESSION_TTL_DAYS = 14;
 
@@ -385,6 +397,11 @@ async function sessionStart(context: HookContext, input: HookInput): Promise<Hoo
       lines.push(`${commit.sha.slice(0, 10)} ${commit.date.slice(0, 10)} "${commit.subject.length > 70 ? `${commit.subject.slice(0, 69)}…` : commit.subject}"${why && !isSymptomOnly(why) ? ` — why: ${why}` : ""}`);
     }
   }
+  // 레포 전체 규칙(태그 rule, 경로 없음) — 어느 파일을 고칠 때도 뜰 자리가 없어 세션 시작에 제목만. 폴더·파일 규칙은 편집 직전에 뜬다
+  const rules = ruleNotes(context.db, repo.id, [], RULES_SHOWN + 1);
+  if (rules.length > 0) {
+    lines.push(`Rules (repo-wide; when one changes, record_note supersedes:<id>): ${rules.slice(0, RULES_SHOWN).map(ruleLine).join(" · ")}${rules.length > RULES_SHOWN ? " · …" : ""}`);
+  }
   // 이 레포에서 커밋에 묶이지 않은 채 남은 편집(이전 세션들) — 끝내지 못한 작업의 흔적. 코드로는 복원할 수 없는 사실이라 남긴다
   const uncommitted = context.db
     .prepare(
@@ -432,6 +449,26 @@ async function preCommit(context: HookContext, input: HookInput, command: string
   return { json: { hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: text } } };
 }
 
+/**
+ * 규칙 파일(CLAUDE.md 등) 편집 직전 — 이 레포의 살아 있는 규칙 노트를 보여 주고, 바뀌는 규칙의 노트는 supersedes로 바꾸라고 한다.
+ * 세션당 한 번. 규칙 노트가 없으면 조용하다.
+ */
+function rulesFileEdit(context: HookContext, repoId: number, relative: string, sessionId: string): HookOutput | null {
+  const rules = ruleNotes(context.db, repoId, undefined, RULES_SHOWN + 1);
+  if (rules.length === 0) return null;
+  const state = loadSession(context.env, sessionId);
+  const key = `rules:${repoId}`;
+  if (state.shown[key]) return null;
+  state.shown[key] = "1";
+  saveSession(context.env, sessionId, state);
+  const shown = rules.slice(0, RULES_SHOWN);
+  const text = [
+    `Grimoire: ${relative} is a rules file. Rule notes in this repo: ${shown.map(ruleLine).join(" · ")}${rules.length > RULES_SHOWN ? " · …" : ""}`,
+    "If a rule you change here is one of these, record_note with supersedes:<id> and the new wording (paths/tags are kept) so the old rule stops showing before edits.",
+  ].join("\n");
+  return { json: { hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: text } } };
+}
+
 /** 이 세션의 작업 의도 — 마지막 커밋 뒤 사용자가 한 말(캡처된 프롬프트) 최근 셋. 없으면 undefined */
 function sessionIntent(context: HookContext, sessionId: string, repoId: number): string | undefined {
   const prompts = pendingEvents(context.db, sessionId, repoId)
@@ -453,10 +490,11 @@ async function preToolUse(context: HookContext, input: HookInput): Promise<HookO
   const resolved = await resolveRepoFile(context.db, file);
   if (!resolved) return null;
   const { repo, relative } = resolved;
+  const sessionId = input.session_id ?? "unknown";
+  if (RULES_FILE.test(relative)) return rulesFileEdit(context, repo.id, relative, sessionId);
   // 테스트·생성·비소스 파일은 건너뛴다 — 맥락을 줄 가치가 낮고 매 편집마다 글자를 쓴다
   if (TEST_PATH.test(relative) || !isIndexable(relative, 0)) return null;
 
-  const sessionId = input.session_id ?? "unknown";
   const state = loadSession(context.env, sessionId);
   const head = context.headOf ? context.headOf(repo) : (repo.head_tree ?? "");
   const key = `${repo.id}:${relative}`;

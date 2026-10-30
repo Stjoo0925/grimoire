@@ -37,7 +37,7 @@ import { isIndexable } from "../core/code";
 import { grimoireHome, type Env } from "../core/config";
 import { fileContext, formatFileContext, needsCochangeBackfill, shortSubject, TEST_PATH, HOOK_BUDGET } from "../core/context";
 import { notesForFile } from "../core/notes";
-import { isRuleFile, isRuleWorthCommit, unitsRemovedBy, unitsTouchedBy, type RuleUnit } from "../core/rules";
+import { isRuleFile, isRuleWorthCommit, removedUnits, RULE_FILE_MAX_BYTES, squash, touchedUnits } from "../core/rules";
 import type { DB } from "../core/db";
 import { addedLines, commitTime, dirtyFiles, headSha, stagedFiles } from "../core/git";
 import { commitImpact, formatMissing, IMPACT_HEAD, missingCompanions } from "../core/impact";
@@ -447,57 +447,83 @@ function oldStrings(input: HookInput): string[] | null {
   return null;
 }
 
+/** 지금 디스크의 파일 내용 — 규칙 파일은 작다(RULE_FILE_MAX_BYTES). 없거나 크면 null */
+function readSmall(file: string): string | null {
+  try {
+    if (fs.statSync(file).size > RULE_FILE_MAX_BYTES) return null;
+    return fs.readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+}
+
 /**
  * 규칙 파일(CLAUDE.md·.claude/rules…) 편집 직전 — 지금 바꾸거나 지우는 규칙이 어느 커밋에서 왜 들어왔는지, 그리고 이 파일에 묶인 노트.
- * 규칙 텍스트는 다시 넣지 않는다(클라이언트가 이미 싣는다). 출처 커밋의 제목이 이유를 담을 만한 것(isRuleWorthCommit)인 규칙만, 같은 세션·HEAD에서
- * 규칙마다 한 번. 줄 것이 없으면 아무것도 (docs/rules-research.md §4-5).
+ * 바꾸는 규칙은 old_string을 지금 파일에서 찾아 그 줄 범위로 정한다(글자 비교로 짐작하지 않는다). 줄 번호도 지금 파일 기준이고,
+ * 출처는 같은 글자의 색인된 규칙에서 가져온다 — 커밋 안 한 편집으로 이미 바뀐 규칙은 출처가 없어 말하지 않는다.
+ * 규칙 텍스트는 다시 넣지 않는다(클라이언트가 이미 싣는다). 출처 커밋 제목이 이유를 담을 만한 것(isRuleWorthCommit)만.
+ * 400자 안에 실제로 나간 규칙만 "보였다"로 적는다 — 잘린 규칙은 다음 편집 때 다시 기회가 있다. 줄 것이 없으면 아무것도 (rules-research §4-5).
  */
-function ruleFileEdit(context: HookContext, input: HookInput, repo: RepoRow, relative: string): HookOutput | null {
-  const rows = context.db
-    .prepare("SELECT line, end_line AS endLine, heading, text, origin_sha AS origin FROM rules WHERE repo_id = ? AND path = ? ORDER BY line")
-    .all(repo.id, relative) as (RuleUnit & { origin: string | null })[];
+function ruleFileEdit(context: HookContext, input: HookInput, repo: RepoRow, relative: string, file: string): HookOutput | null {
+  const content = readSmall(file);
+  if (content === null) return null;
   const olds = oldStrings(input);
-  const content = input.tool_input?.content;
-  const touched =
-    olds !== null
-      ? rows.filter((row) => olds.some((old) => unitsTouchedBy([row], old).length > 0))
-      : typeof content === "string"
-        ? (unitsRemovedBy(rows, content) as typeof rows)
-        : [];
+  const next = input.tool_input?.content;
+  const changed = olds !== null ? touchedUnits(content, olds) : typeof next === "string" ? removedUnits(content, next) : [];
+  const indexed = new Map<string, string>();
+  for (const row of context.db.prepare("SELECT text, origin_sha AS origin FROM rules WHERE repo_id = ? AND path = ? AND origin_sha IS NOT NULL ORDER BY line").all(repo.id, relative) as {
+    text: string;
+    origin: string;
+  }[]) {
+    const key = squash(row.text);
+    if (!indexed.has(key)) indexed.set(key, row.origin);
+  }
   const commitOf = context.db.prepare("SELECT subject, authored_at AS date FROM commits WHERE repo_id = ? AND sha = ?");
   const sessionId = input.session_id ?? "unknown";
   const state = loadSession(context.env, sessionId);
   const head = context.headOf ? context.headOf(repo) : (repo.head_tree ?? "");
-  const lines: string[] = [];
-  for (const row of touched) {
-    if (lines.length >= RULES_SHOWN || !row.origin) continue;
-    const key = `rule:${repo.id}:${relative}:${row.line}`;
+  const rules: { key: string; text: string }[] = [];
+  for (const unit of changed) {
+    if (rules.length >= RULES_SHOWN) break;
+    const origin = indexed.get(squash(unit.text));
+    if (!origin) continue;
+    const key = `rule:${repo.id}:${relative}:${origin}:${squash(unit.text).slice(0, 80)}`;
     if (state.shown[key] === head) continue;
-    const commit = commitOf.get(repo.id, row.origin) as { subject: string; date: string } | undefined;
+    const commit = commitOf.get(repo.id, origin) as { subject: string; date: string } | undefined;
     if (!commit || !isRuleWorthCommit(commit.subject)) continue;
-    state.shown[key] = head;
-    const why = whyLine(context.db, repo.id, row.origin, 80);
-    const title = row.text.split("\n")[0];
-    lines.push(
-      `L${row.line} "${shortSubject(title, 50)}" ← ${row.origin.slice(0, 10)} ${commit.date.slice(0, 10)} "${shortSubject(commit.subject, 50)}"${why && !isSymptomOnly(why) ? ` — why: ${why}` : ""}`,
-    );
+    const why = whyLine(context.db, repo.id, origin, 80);
+    rules.push({
+      key,
+      text: `L${unit.line} "${shortSubject(unit.text.split("\n")[0], 50)}" ← ${origin.slice(0, 10)} ${commit.date.slice(0, 10)} "${shortSubject(commit.subject, 50)}"${why && !isSymptomOnly(why) ? ` — why: ${why}` : ""}`,
+    });
   }
   // 이 규칙 파일에 묶인 노트 — 이 편집 뒤에는 오래됐다고 표시된다. 맞지 않게 되면 고치라고 같은 자리에서 알린다
   const notesKey = `rulenotes:${repo.id}:${relative}`;
   const notes = state.shown[notesKey] === head ? [] : notesForFile(context.db, repo.id, relative);
-  if (notes.length > 0) state.shown[notesKey] = head;
-  if (lines.length === 0 && notes.length === 0) return null;
+  const notesLine =
+    notes.length > 0
+      ? `Notes on this file (update any this change makes wrong): ${notes.map((note) => `#${note.id} "${shortSubject(note.title, 50)}"${note.stale ? " (stale)" : ""}`).join(" · ")}`
+      : null;
+  const render = (kept: typeof rules, withNotes: boolean) =>
+    [`Grimoire: ${relative}${kept.length > 0 ? " — the rules you're changing came from:" : ""}`, ...kept.map((rule) => rule.text), ...(withNotes && notesLine ? [notesLine] : [])].join("\n");
+  // 넘치면 뒤의 규칙부터 뺀다. 노트 줄은 남긴다 — "규칙이 바뀌면 그 규칙에 대한 노트도 고친다"를 알리는 자리다
+  let kept = rules;
+  let text = render(kept, true);
+  while (text.length > HOOK_BUDGET && kept.length > 1) {
+    kept = kept.slice(0, -1);
+    text = render(kept, true);
+  }
+  let withNotes = Boolean(notesLine);
+  if (text.length > HOOK_BUDGET && kept.length > 0 && withNotes) {
+    withNotes = false;
+    text = render(kept, false);
+  }
+  if (kept.length === 0 && !withNotes) return null;
+  if (text.length > HOOK_BUDGET) text = `${text.slice(0, HOOK_BUDGET - 1)}…`;
+  for (const rule of kept) state.shown[rule.key] = head;
+  if (withNotes) state.shown[notesKey] = head;
   saveSession(context.env, sessionId, state);
-  const out = [`Grimoire: ${relative}${lines.length > 0 ? " — the rules you're changing came from:" : ""}`, ...lines];
-  if (notes.length > 0) {
-    out.push(`Notes on this file (update any this change makes wrong): ${notes.map((note) => `#${note.id} "${shortSubject(note.title, 50)}"${note.stale ? " (stale)" : ""}`).join(" · ")}`);
-  }
-  let text = out.join("\n");
-  while (text.length > HOOK_BUDGET && out.length > 2) {
-    out.splice(out.length - (notes.length > 0 ? 2 : 1), 1);
-    text = out.join("\n");
-  }
-  return { json: { hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: text.slice(0, HOOK_BUDGET) } } };
+  return { json: { hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: text } } };
 }
 
 /** 이 세션의 작업 의도 — 마지막 커밋 뒤 사용자가 한 말(캡처된 프롬프트) 최근 셋. 없으면 undefined */
@@ -521,7 +547,7 @@ async function preToolUse(context: HookContext, input: HookInput): Promise<HookO
   const resolved = await resolveRepoFile(context.db, file);
   if (!resolved) return null;
   const { repo, relative } = resolved;
-  if (isRuleFile(relative)) return ruleFileEdit(context, input, repo, relative);
+  if (isRuleFile(relative)) return ruleFileEdit(context, input, repo, relative, file);
   // 테스트·생성·비소스 파일은 건너뛴다 — 맥락을 줄 가치가 낮고 매 편집마다 글자를 쓴다
   if (TEST_PATH.test(relative) || !isIndexable(relative, 0)) return null;
 

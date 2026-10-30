@@ -83,7 +83,8 @@ function frontmatter(lines: string[]): { scope: string; skip: number } {
 
 /**
  * 마크다운을 규칙 단위로 나눈다 — 목록 항목 하나(더 깊이 들여쓴 하위 항목·이어지는 줄 포함)가 하나, 목록이 아닌 문단 하나가 하나.
- * 제목은 단위가 아니라 그 아래 단위의 맥락. 코드 블록은 앞 단위에 붙고, 앞 단위가 없으면 버린다.
+ * 제목(# 꼴과 밑줄 꼴 모두)은 단위가 아니라 그 아래 단위의 맥락. 코드 블록은 빈 줄을 사이에 두어도 앞 단위의 범위에 붙고(내용은 본문에
+ * 넣지 않는다), 앞 단위가 없으면 버린다. 코드 블록은 여는 것과 같은 문자로, 같거나 더 긴 울타리만 닫는다.
  */
 export function parseRules(content: string): ParsedRules {
   const lines = content.replace(/\r\n?/g, "\n").split("\n");
@@ -92,34 +93,38 @@ export function parseRules(content: string): ParsedRules {
   const headings: string[] = [];
   type Open = { line: number; endLine: number; indent: number | null; heading: string; parts: string[] };
   let current: Open | null = null as Open | null;
-  let last: Open | null = null as Open | null;
-  let fence: string | null = null;
+  /** 마지막으로 닫힌 단위(units 안의 그 객체) — 빈 줄 뒤의 코드 블록이 범위를 늘린다 */
+  let previous: RuleUnit | null = null as RuleUnit | null;
+  let fence: { char: string; length: number } | null = null as { char: string; length: number } | null;
 
   const close = () => {
     if (!current) return;
-    last = current;
     const text = current.parts.join("\n").trim().slice(0, UNIT_MAX_CHARS);
+    previous = null;
     if (text.replace(/\s/g, "").length >= UNIT_MIN_CHARS && units.length < RULE_UNITS_MAX) {
-      units.push({ line: current.line, endLine: current.endLine, heading: current.heading, text });
+      previous = { line: current.line, endLine: current.endLine, heading: current.heading, text };
+      units.push(previous);
     }
     current = null;
+  };
+  const extend = (number: number) => {
+    if (current) current.endLine = number;
+    else if (previous) previous.endLine = number;
   };
 
   for (let index = skip; index < lines.length; index++) {
     const raw = lines[index];
     const number = index + 1;
     if (fence) {
-      // 코드 블록 안 — 앞 단위의 범위만 늘린다(내용은 본문에 넣지 않는다)
-      const owner = current ?? last;
-      if (owner) owner.endLine = number;
-      if (raw.trim().startsWith(fence)) fence = null;
+      extend(number);
+      const closing = /^\s*(`{3,}|~{3,})\s*$/.exec(raw);
+      if (closing && closing[1][0] === fence.char && closing[1].length >= fence.length) fence = null;
       continue;
     }
-    const opening = FENCE.exec(raw);
+    const opening = /^\s*(`{3,}|~{3,})/.exec(raw);
     if (opening) {
-      fence = opening[1];
-      const owner = current ?? last;
-      if (owner) owner.endLine = number;
+      fence = { char: opening[1][0], length: opening[1].length };
+      extend(number);
       continue;
     }
     if (!raw.trim()) {
@@ -127,11 +132,15 @@ export function parseRules(content: string): ParsedRules {
       continue;
     }
     const heading = HEADING.exec(raw);
-    if (heading) {
-      close();
-      last = null;
-      headings.length = heading[1].length - 1;
-      headings[heading[1].length - 1] = heading[2];
+    // 밑줄 꼴 제목("Title" 다음 줄 "====" 또는 "----") — 한 줄짜리 문단 바로 뒤에서만
+    const underline = /^\s*(=+|-{2,})\s*$/.exec(raw);
+    if (heading || (underline && current && current.indent === null && current.parts.length === 1)) {
+      const level = heading ? heading[1].length : underline![1][0] === "=" ? 1 : 2;
+      const title = heading ? heading[2] : current!.parts[0];
+      current = null;
+      previous = null;
+      headings.length = level - 1;
+      headings[level - 1] = title;
       continue;
     }
     const item = LIST_ITEM.exec(raw);
@@ -205,25 +214,47 @@ export const blameStats = { calls: 0 };
  * (claude-code-action의 CLAUDE.md, 117줄 → 25줄 재작성)에서 규칙 대부분의 출처가 "Initial commit"이 됐다. git이 증명하는 것은
  * "이 글자를 쓴 커밋"까지다 (docs/rules-research.md §7).
  */
-export async function blameLines(dir: string, file: string, signal?: AbortSignal): Promise<Map<number, BlameLine>> {
+export async function blameLines(dir: string, file: string, signal?: AbortSignal): Promise<Map<number, BlameLine> | null> {
   blameStats.calls++;
   try {
     return parseBlame(await runGit(dir, ["blame", "--porcelain", "-w", "-M", "HEAD", "--", file], undefined, signal, BLAME_TIMEOUT_MS));
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    return null;
+  }
+}
+
+/**
+ * 이 파일을 건드린 커밋의 이력 순서 — sha → 순번(0이 가장 새것). 출처·최근 변경은 날짜가 아니라 이 순서로 고른다:
+ * rebase·`git am`으로 쌓은 커밋은 committer-time이 같거나 거꾸로일 수 있다. 실패하면 빈 Map(날짜로 대신한다).
+ */
+export async function historyOrder(dir: string, file: string, signal?: AbortSignal): Promise<Map<string, number>> {
+  try {
+    const out = await runGit(dir, ["rev-list", "--topo-order", "--full-history", "HEAD", "--", file], undefined, signal, BLAME_TIMEOUT_MS);
+    return new Map(out.split("\n").filter(Boolean).map((sha, index) => [sha.trim(), index]));
   } catch (error) {
     if (signal?.aborted) throw error;
     return new Map();
   }
 }
 
-/** 단위의 출처(줄들 중 가장 이른 커밋 — 지금 글자가 처음 쓰인 때)와 최근 변경(가장 늦은 커밋). 줄 정보가 없으면 null */
-export function unitHistory(unit: RuleUnit, blame: Map<number, BlameLine>): { origin: string; last: string } | null {
+/**
+ * 단위의 출처(줄들 중 가장 이른 커밋 — 지금 글자가 처음 쓰인 때)와 최근 변경(가장 늦은 커밋). 줄 정보가 없으면 null.
+ * 이르고 늦음은 이력 순서(historyOrder)로, 순서를 모르는 커밋끼리만 committer-time으로 견준다.
+ */
+export function unitHistory(unit: RuleUnit, blame: Map<number, BlameLine>, order: Map<string, number> = new Map()): { origin: string; last: string } | null {
+  // 순번이 클수록 옛것. 순서를 모르면 날짜를 쓴다(순서를 아는 커밋보다 뒤로 미루지 않도록 같은 축에 두지 않는다)
+  const older = (a: BlameLine, b: BlameLine) => {
+    const [x, y] = [order.get(a.sha), order.get(b.sha)];
+    return x !== undefined && y !== undefined ? x > y : a.time < b.time;
+  };
   let origin: BlameLine | null = null;
   let latest: BlameLine | null = null;
   for (let line = unit.line; line <= unit.endLine; line++) {
     const entry = blame.get(line);
     if (!entry) continue;
-    if (!origin || entry.time < origin.time) origin = entry;
-    if (!latest || entry.time > latest.time) latest = entry;
+    if (!origin || older(entry, origin)) origin = entry;
+    if (!latest || older(latest, entry)) latest = entry;
   }
   return origin && latest ? { origin: origin.sha, last: latest.sha } : null;
 }
@@ -249,37 +280,35 @@ export function squash(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
-/** 단위의 줄 하나하나(목록 기호를 뗀) — 고치는 내용(old_string)과 겹치는지 볼 때 */
-function unitLines(unit: RuleUnit): string[] {
-  return unit.text
-    .split("\n")
-    .map((line) => squash(line.replace(LIST_ITEM, "$2")))
-    .filter((line) => line.length >= UNIT_MIN_CHARS);
+/** 내용 안에서 text가 나오는 모든 자리의 줄 범위(1부터) — Edit의 old_string은 파일 안에서 하나뿐이지만 replace_all이면 여럿일 수 있다 */
+function lineRanges(content: string, text: string): [number, number][] {
+  const ranges: [number, number][] = [];
+  if (!text) return ranges;
+  const lineAt = (offset: number) => {
+    let count = 1;
+    for (let index = content.indexOf("\n"); index !== -1 && index < offset; index = content.indexOf("\n", index + 1)) count++;
+    return count;
+  };
+  for (let at = content.indexOf(text); at !== -1; at = content.indexOf(text, at + text.length)) {
+    ranges.push([lineAt(at), lineAt(at + text.length - 1)]);
+  }
+  return ranges;
 }
 
-/** 고치는 내용을 규칙 본문과 같은 꼴로 — 줄마다 목록 기호를 떼고 공백을 하나로 (규칙 단위는 첫 줄의 목록 기호를 떼고 저장한다) */
-function comparable(text: string): string {
-  return squash(
-    text
-      .replace(/\r\n?/g, "\n")
-      .split("\n")
-      .map((line) => line.replace(LIST_ITEM, "$2"))
-      .join("\n"),
-  );
+/**
+ * Edit·MultiEdit가 바꾸는 규칙 단위 — old_string을 지금 파일 내용에서 찾아 그 줄 범위와 겹치는 단위만. 글자 비교로 짐작하지 않는다
+ * (짧은 낱말·표 구분선 같은 흔한 줄이 엉뚱한 단위에 걸렸다). 줄 번호는 지금 파일 기준 — 커밋 안 한 편집이 앞에 줄을 더했어도 맞다.
+ * old_string이 지금 내용에 없으면(파일이 바뀌었으면) 아무것도.
+ */
+export function touchedUnits(content: string, oldStrings: string[]): RuleUnit[] {
+  const normalized = content.replace(/\r\n?/g, "\n");
+  const ranges = oldStrings.flatMap((old) => lineRanges(normalized, old.replace(/\r\n?/g, "\n")));
+  if (ranges.length === 0) return [];
+  return parseRules(normalized).units.filter((unit) => ranges.some(([start, end]) => unit.line <= end && unit.endLine >= start));
 }
 
-/** Edit의 old_string과 겹치는 규칙 단위 — 단위의 한 줄이 old_string 안에 있거나, old_string(줄의 일부여도)이 단위 안에 있으면 */
-export function unitsTouchedBy(units: RuleUnit[], oldText: string): RuleUnit[] {
-  const target = comparable(oldText);
-  if (target.length < 3) return [];
-  return units.filter((unit) => {
-    const body = comparable(unit.text);
-    return (target.length >= UNIT_MIN_CHARS && body.includes(target)) || unitLines(unit).some((line) => target.includes(line));
-  });
-}
-
-/** Write로 통째로 쓸 때 새 내용에서 사라지는 규칙 단위 — 단위의 어느 줄이라도 새 내용에 없으면 바뀌거나 지워진 것이다 */
-export function unitsRemovedBy(units: RuleUnit[], newContent: string): RuleUnit[] {
-  const after = comparable(newContent);
-  return units.filter((unit) => unitLines(unit).some((line) => !after.includes(line)));
+/** Write가 통째로 쓸 때 사라지거나 바뀌는 규칙 단위 — 지금 내용의 단위 중, 새 내용의 단위 가운데 같은 글자(공백만 다른 것 포함)가 없는 것 */
+export function removedUnits(content: string, newContent: string): RuleUnit[] {
+  const after = new Set(parseRules(newContent).units.map((unit) => squash(unit.text)));
+  return parseRules(content).units.filter((unit) => !after.has(squash(unit.text)));
 }

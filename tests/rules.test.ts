@@ -9,7 +9,7 @@ import { test } from "node:test";
 import { openDb } from "../src/core/db";
 import { addRepo, syncRepo } from "../src/core/indexer";
 import { addNote, notesForFile } from "../src/core/notes";
-import { blameStats, isRuleFile, parseBlame, parseRules, unitsRemovedBy, unitsTouchedBy } from "../src/core/rules";
+import { blameStats, isRuleFile, parseBlame, parseRules, removedUnits, touchedUnits, unitHistory } from "../src/core/rules";
 import { search } from "../src/core/search";
 import { slimSearch } from "../src/mcp/format";
 import { callTool, TOOLS } from "../src/mcp/tools";
@@ -171,20 +171,49 @@ test("parseBlame: 같은 커밋의 둘째 묶음은 committer-time을 앞에서 
   ]);
 });
 
-test("unitsTouchedBy·unitsRemovedBy: 겹치는 규칙만, 짧은 낱말로는 걸지 않는다", () => {
+test("touchedUnits·removedUnits: 편집 자리의 줄 범위로 정한다 — 짧은 조각도, 흔한 줄은 엉뚱한 단위에 안 걸린다", () => {
   const { units } = parseRules(CLAUDE_V1);
   const [korean, merge, exports] = units;
-  assert.deepEqual(unitsTouchedBy(units, "- 머지와 배포는 사용자가 말할 때만 한다\n"), [merge]);
-  assert.deepEqual(unitsTouchedBy(units, "말할 때만"), [], "8자 미만의 조각은 단위 안에 있어도 걸지 않는다");
-  assert.deepEqual(unitsTouchedBy(units, "사용자가 말할 때만 한다"), [merge], "단위 안의 긴 조각");
-  assert.deepEqual(unitsTouchedBy(units, "- 커밋 제목은 한국어로 쓴다\n- 머지와 배포는 사용자가 말할 때만 한다"), [korean, merge], "두 단위에 걸친 편집");
-  assert.deepEqual(unitsTouchedBy(units, "## Commits"), [], "제목만 고치면 규칙이 아니다");
-  assert.deepEqual(unitsTouchedBy(units, "the"), []);
-  // 실제 레포에서 놓친 꼴: 목록 기호로 시작해 줄 중간에서 끝나는 편집
-  assert.deepEqual(unitsTouchedBy(units, "- 머지와 배포는 사용자가"), [merge]);
-  assert.deepEqual(unitsTouchedBy(units, "* 커밋 제목은 한국어로"), [korean], "다른 목록 기호여도");
-  assert.deepEqual(unitsRemovedBy(units, CLAUDE_V1.replace("Default export는 쓰지 않는다. 이름 있는 export만.\n", "")), [exports]);
-  assert.deepEqual(unitsRemovedBy(units, CLAUDE_V1.replace(/\n/g, "\r\n")), [], "줄 끝만 바뀌면 사라진 규칙은 없다");
+  const lines = (found: { line: number }[]) => found.map((unit) => unit.line);
+  assert.deepEqual(lines(touchedUnits(CLAUDE_V1, ["- 머지와 배포는 사용자가 말할 때만 한다\n"])), [merge.line]);
+  assert.deepEqual(lines(touchedUnits(CLAUDE_V1, ["말할 때만"])), [merge.line], "짧은 조각도 — Edit의 old_string은 파일에서 하나뿐이다");
+  assert.deepEqual(lines(touchedUnits(CLAUDE_V1, ["- 머지와 배포는 사용자가"])), [merge.line], "목록 기호로 시작해 줄 중간에서 끝나는 편집");
+  assert.deepEqual(lines(touchedUnits(CLAUDE_V1, ["한국어로 쓴다\n- 머지와"])), [korean.line, merge.line], "두 단위에 걸친 편집");
+  assert.deepEqual(touchedUnits(CLAUDE_V1, ["## Commits"]), [], "제목만 고치면 규칙이 아니다");
+  assert.deepEqual(touchedUnits(CLAUDE_V1, ["이 파일에 없는 글"]), [], "지금 내용에 없는 old_string");
+  // 리뷰에서 잡힌 꼴: 표 구분선처럼 흔한 줄 — 고친 표만
+  const tables = "## A\n| a | b |\n|---|---|\n| 1 | 2 |\n\n## B\n| c | d |\n|---|---|\n| 3 | 4 |\n";
+  assert.deepEqual(lines(touchedUnits(tables, ["| c | d |\n|---|---|"])), [7]);
+  // Write: 사라지거나 바뀐 단위만 — 뒤에 글을 덧붙여 바꾼 규칙도
+  assert.deepEqual(lines(removedUnits(CLAUDE_V1, CLAUDE_V1.replace("Default export는 쓰지 않는다. 이름 있는 export만.\n", ""))), [exports.line]);
+  assert.deepEqual(lines(removedUnits(CLAUDE_V1, CLAUDE_V1.replace("말할 때만 한다", "말할 때만 한다, 예외 없이"))), [merge.line]);
+  assert.deepEqual(removedUnits(CLAUDE_V1, CLAUDE_V1.replace(/\n/g, "\r\n")), [], "줄 끝만 바뀌면 사라진 규칙은 없다");
+});
+
+test("parseRules 리뷰 반례: 빈 줄 뒤 코드 블록은 앞 단위에, 네 개짜리 울타리는 세 개로 안 닫힘, 밑줄 꼴 제목", () => {
+  const fenced = parseRules("- 테스트는 이 명령으로 돌린다\n\n```\nnpm test\n```\n");
+  assert.deepEqual(fenced.units.map((unit) => [unit.line, unit.endLine]), [[1, 5]], "빈 줄 뒤의 코드 블록도 앞 단위의 범위");
+  const nested = parseRules("- 코드가 든 규칙 하나 여기에\n````md\n```\ninner\n```\n````\n- 다음 규칙도 따로 있다\n");
+  assert.deepEqual(nested.units.map((unit) => [unit.line, unit.endLine, unit.text]), [
+    [1, 6, "코드가 든 규칙 하나 여기에"],
+    [7, 7, "다음 규칙도 따로 있다"],
+  ]);
+  const setext = parseRules("Commit rules\n============\n\n- 커밋 제목은 한국어로 쓴다\nSub\n---\n");
+  assert.deepEqual(setext.units.map((unit) => [unit.line, unit.heading, unit.text]), [[4, "Commit rules", "커밋 제목은 한국어로 쓴다\nSub\n---"]]);
+  const setextAlone = parseRules("Commit rules\n============\n\nSection two\n---\n- 규칙 하나가 여기에 있다\n");
+  assert.deepEqual(setextAlone.units.map((unit) => [unit.heading, unit.text]), [["Commit rules > Section two", "규칙 하나가 여기에 있다"]]);
+});
+
+test("unitHistory: 출처·최근 변경은 날짜가 아니라 이력 순서 — committer-time이 같아도(rebase·git am) 맞다", () => {
+  const [c1, c2] = ["1".repeat(40), "2".repeat(40)];
+  const blame = new Map([
+    [1, { sha: c2, time: 500 }],
+    [2, { sha: c1, time: 500 }],
+  ]);
+  const unit = { line: 1, endLine: 2, heading: "", text: "x" };
+  assert.deepEqual(unitHistory(unit, blame, new Map([[c2, 0], [c1, 1]])), { origin: c1, last: c2 });
+  // 순서를 모르면 날짜로
+  assert.deepEqual(unitHistory(unit, new Map([[1, { sha: c2, time: 600 }], [2, { sha: c1, time: 500 }]])), { origin: c1, last: c2 });
 });
 
 test("규칙 색인: 출처는 지금 글자를 쓴 커밋(줄들 중 가장 이른 것), 최근 변경은 가장 늦은 것, 공백만 바꾼 커밋은 건너뛴다 (§5-1)", async () => {
@@ -371,4 +400,53 @@ test("업그레이드: 스키마 12 DB가 열리고, 트리가 그대로여도 �
   assert.equal((db.prepare("SELECT COUNT(*) AS n FROM rules").get() as { n: number }).n, 4);
   assert.equal(search(db, "모킹", { kind: "rule" }).hits.length, 1);
   db.close();
+});
+
+test("리뷰 반례: 심볼릭 링크 규칙 파일(AGENTS.md -> CLAUDE.md)은 색인하지 않는다, blame이 실패한 파일은 다음 동기화가 다시 읽는다", async () => {
+  const db = memoryDb();
+  const dir = ruledRepo();
+  fs.symlinkSync("CLAUDE.md", path.join(dir, "AGENTS.md"));
+  addCommit(dir, { message: "feat: AGENTS.md 링크", files: {} });
+  const repo = await addRepo(db, dir);
+  await syncRepo(db, repo);
+  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM rule_files WHERE path = 'AGENTS.md'").get() as { n: number }).n, 0);
+  assert.ok(search(db, "CLAUDE", { kind: "rule" }).hits.every((hit) => !hit.ref.startsWith("AGENTS.md")));
+
+  db.prepare("UPDATE rule_files SET complete = 0 WHERE path = 'CLAUDE.md'").run();
+  const before = blameStats.calls;
+  await syncRepo(db, repo);
+  assert.equal(blameStats.calls, before, "트리가 그대로면 규칙을 보지 않는다 — 다음에 트리가 바뀔 때 다시 읽는다");
+  addCommit(dir, { message: "feat: 코드만", files: { "src/a.ts": "export const a = 3;\n" } });
+  await syncRepo(db, repo);
+  assert.equal(blameStats.calls, before + 1, "blame이 실패했던 파일만 다시");
+  assert.equal((db.prepare("SELECT complete FROM rule_files WHERE path = 'CLAUDE.md'").get() as { complete: number }).complete, 1);
+});
+
+test("리뷰 반례: 400자에 잘린 규칙은 '보였다'로 적지 않고, 커밋 안 한 편집으로 줄이 밀려도 지금 줄 번호를 댄다", async () => {
+  const long = (n: number) => `- 규칙 ${n}: ${"아주 긴 설명이 붙은 규칙 문장이다 ".repeat(4)}`;
+  const body = ["# Rules", long(1), long(2), long(3), ""].join("\n");
+  const dir = makeRepo([{ message: "feat: 긴 규칙 셋을 정한다", files: { "CLAUDE.md": body }, date: "2026-01-01T10:00:00+09:00" }], "long-rules");
+  const db = memoryDb();
+  const repo = await addRepo(db, dir);
+  await syncRepo(db, repo);
+  addNote(db, { text: "결정: CLAUDE.md의 규칙 3은 임시다", repoId: repo.id, source: "cli" });
+  const env = { GRIMOIRE_HOME: tempDir("grimoire-rule-budget-") };
+  const context = { db, env, me: [] };
+
+  const all = await handleHook(context, editRule(repo.path, `${long(1)}\n${long(2)}\n${long(3)}`, "b1"));
+  const text = all!.json!.hookSpecificOutput.additionalContext;
+  assert.ok(text.length <= 400, `${text.length}자`);
+  assert.match(text, /\nNotes on this file/, "노트 줄은 남긴다");
+  const shown = (text.match(/\nL\d+ /g) ?? []).length;
+  assert.ok(shown >= 1 && shown < 3, text);
+  // 잘린 규칙 3은 다음 편집 때 나온다
+  const later = await handleHook(context, editRule(repo.path, long(3), "b1"));
+  assert.match(later!.json!.hookSpecificOutput.additionalContext, /\nL4 "규칙 3:/);
+
+  // 커밋 안 한 편집이 앞에 두 줄을 더했다 — 규칙 2는 지금 파일에서 5번째 줄
+  fs.writeFileSync(path.join(dir, "CLAUDE.md"), ["# Rules", "- 새로 넣은 규칙이 하나 있다", "", long(1), long(2), long(3), ""].join("\n"));
+  const shifted = await handleHook(context, editRule(repo.path, long(2), "b2"));
+  assert.match(shifted!.json!.hookSpecificOutput.additionalContext, /\nL5 "규칙 2:/);
+  const fresh = await handleHook(context, editRule(repo.path, "- 새로 넣은 규칙이 하나 있다", "b3"));
+  assert.ok(!fresh!.json!.hookSpecificOutput.additionalContext.includes("\nL"), "커밋 안 한 새 규칙은 출처가 없다 — 노트만(이 세션 처음)");
 });

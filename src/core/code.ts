@@ -35,6 +35,8 @@ export interface HeadFile {
   path: string;
   blob: string;
   size: number;
+  /** 심볼릭 링크(mode 120000) — blob 내용은 링크가 가리키는 경로다 */
+  link?: boolean;
 }
 
 export function isIndexable(file: string, size: number): boolean {
@@ -64,9 +66,9 @@ export async function listHeadTree(dir: string, signal?: AbortSignal): Promise<H
   const files: HeadFile[] = [];
   for (const entry of out.split("\0")) {
     // "<mode> blob <sha> <size>\t<path>"
-    const match = /^\d+ blob ([0-9a-f]{40,64})\s+(\d+)\t(.+)$/.exec(entry);
+    const match = /^(\d+) blob ([0-9a-f]{40,64})\s+(\d+)\t(.+)$/.exec(entry);
     if (!match) continue;
-    files.push({ path: match[3], blob: match[1], size: Number(match[2]) });
+    files.push({ path: match[4], blob: match[2], size: Number(match[3]), ...(match[1] === "120000" ? { link: true } : {}) });
   }
   return files;
 }

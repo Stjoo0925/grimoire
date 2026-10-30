@@ -337,6 +337,8 @@ const MIGRATIONS: (string | ((db: DB) => void))[] = [
     path     TEXT NOT NULL,
     blob     TEXT NOT NULL,
     scope    TEXT NOT NULL DEFAULT '',
+    -- 0이면 blame이 실패해 출처를 모른다 — 다음 동기화가 다시 읽는다
+    complete INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (repo_id, path)
   );
   CREATE TABLE rules (

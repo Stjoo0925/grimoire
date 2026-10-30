@@ -14,7 +14,7 @@ import path from "node:path";
 
 import { refreshWhy, storeTrailers } from "./capture";
 import { BLOB_BATCH_BYTES, extractRefNames, extractSymbols, headerComment, indexableFiles, listHeadTree, readBlobs, splitIdentifier, type CodeSymbol, type HeadFile } from "./code";
-import { blameLines, isRuleFile, parseRules, RULE_FILES_MAX, unitHistory, type RuleUnit } from "./rules";
+import { blameLines, historyOrder, isRuleFile, parseRules, RULE_FILES_MAX, unitHistory, type RuleUnit } from "./rules";
 import { addCochange, changeKey, cochangeInput, extractImportSpecs, needsCochangeBackfill, rebuildCochange, resolveImportSpecs } from "./context";
 import { deleteDoc, upsertDoc, pruneOrphanFts, type DB } from "./db";
 import {
@@ -580,6 +580,8 @@ interface RuleFileChange {
   path: string;
   blob: string;
   scope: string;
+  /** blame이 됐나 — 실패면 다음 동기화가 다시 읽는다 */
+  complete: boolean;
   units: (RuleUnit & { origin: string | null; last: string | null })[];
 }
 
@@ -593,9 +595,13 @@ interface RuleChanges {
  * 규칙 색인이 처음이면(rules_version) 전부 읽는다. 규칙 파일이 안 바뀐 동기화는 blame을 부르지 않는다.
  */
 async function readChangedRules(db: DB, repo: RepoRow, listing: Promise<HeadFile[]>, signal?: AbortSignal): Promise<RuleChanges> {
-  const files = (await listing).filter((file) => isRuleFile(file.path, file.size)).slice(0, RULE_FILES_MAX);
+  // 심볼릭 링크(AGENTS.md -> CLAUDE.md)는 뺀다 — blob 내용이 링크 대상 경로라 그것이 "규칙"으로 들어갔다. 대상 파일이 따로 색인된다
+  const files = (await listing).filter((file) => !file.link && isRuleFile(file.path, file.size)).slice(0, RULE_FILES_MAX);
   const known = new Map(
-    (db.prepare("SELECT path, blob FROM rule_files WHERE repo_id = ?").all(repo.id) as { path: string; blob: string }[]).map((row) => [row.path, row.blob]),
+    (db.prepare("SELECT path, blob, complete FROM rule_files WHERE repo_id = ?").all(repo.id) as { path: string; blob: string; complete: number }[]).map((row) => [
+      row.path,
+      row.complete ? row.blob : null,
+    ]),
   );
   const version = (db.prepare("SELECT rules_version FROM repos WHERE id = ?").get(repo.id) as { rules_version: number } | undefined)?.rules_version ?? 0;
   const stale = version < RULES_VERSION ? files : files.filter((file) => known.get(file.path) !== file.blob);
@@ -607,12 +613,13 @@ async function readChangedRules(db: DB, repo: RepoRow, listing: Promise<HeadFile
       ...(await Promise.all(
         batch.map(async (file) => {
           const parsed = parseRules(contents.get(file.blob) ?? "");
-          const blame = parsed.units.length > 0 ? await blameLines(repo.path, file.path, signal) : new Map();
+          if (parsed.units.length === 0) return { path: file.path, blob: file.blob, scope: parsed.scope, complete: true, units: [] };
+          const [blame, order] = await Promise.all([blameLines(repo.path, file.path, signal), historyOrder(repo.path, file.path, signal)]);
           const units = parsed.units.map((unit) => {
-            const history = unitHistory(unit, blame);
+            const history = blame ? unitHistory(unit, blame, order) : null;
             return { ...unit, origin: history?.origin ?? null, last: history?.last ?? null };
           });
-          return { path: file.path, blob: file.blob, scope: parsed.scope, units };
+          return { path: file.path, blob: file.blob, scope: parsed.scope, complete: blame !== null, units };
         }),
       )),
     );
@@ -630,8 +637,8 @@ function applyRules(db: DB, repo: RepoRow, changes: RuleChanges): void {
     "INSERT INTO rules (repo_id, path, line, end_line, heading, text, origin_sha, last_sha) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
   );
   const upsertFile = db.prepare(
-    `INSERT INTO rule_files (repo_id, path, blob, scope) VALUES (?, ?, ?, ?)
-     ON CONFLICT (repo_id, path) DO UPDATE SET blob = excluded.blob, scope = excluded.scope`,
+    `INSERT INTO rule_files (repo_id, path, blob, scope, complete) VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT (repo_id, path) DO UPDATE SET blob = excluded.blob, scope = excluded.scope, complete = excluded.complete`,
   );
   const commit = db.prepare("SELECT subject, authored_at FROM commits WHERE repo_id = ? AND sha = ?");
   const drop = (file: string) => {
@@ -641,7 +648,7 @@ function applyRules(db: DB, repo: RepoRow, changes: RuleChanges): void {
   const now = new Date().toISOString();
   for (const file of changes.changed) {
     drop(file.path);
-    upsertFile.run(repo.id, file.path, file.blob, file.scope);
+    upsertFile.run(repo.id, file.path, file.blob, file.scope, file.complete ? 1 : 0);
     for (const unit of file.units) {
       insert.run(repo.id, file.path, unit.line, unit.endLine, unit.heading, unit.text, unit.origin, unit.last);
       const origin = unit.origin ? (commit.get(repo.id, unit.origin) as { subject: string; authored_at: string } | undefined) : undefined;

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.2](https://github.com/Stjoo0925/grimoire/compare/v0.12.1...v0.12.2) (2026-11-02)
+
+
+### 버그 수정
+
+* **hook:** 자체 타임아웃 로그에 어느 훅·어느 단계에서 멈췄는지와 시작 지연을 남긴다 ([#45](https://github.com/Stjoo0925/grimoire/issues/45)) ([da3c7ac](https://github.com/Stjoo0925/grimoire/commit/da3c7ac9c4f8fac3640a33ca80708ff8543d5c93))
+
 ## [0.12.1](https://github.com/Stjoo0925/grimoire/compare/v0.12.0...v0.12.1) (2026-11-02)
 
 

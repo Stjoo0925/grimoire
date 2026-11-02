@@ -21,6 +21,13 @@ export const GIT_TIMEOUT_MS = 60_000;
  */
 export const GIT_BULK_TIMEOUT_MS = 10 * 60_000;
 
+/**
+ * 모든 git 호출 앞에 붙이는 설정. 색인하는 레포의 `.git/config`는 믿을 수 없다(압축본·공유 폴더로 받은 레포 등) —
+ * `core.fsmonitor`는 status·diff 때 그 명령을 그대로 돌린다. diff를 내는 명령의 textconv·외부 diff는
+ * 각 호출의 `--no-textconv --no-ext-diff`로 막는다.
+ */
+export const GIT_SAFE_CONFIG = ["-c", "core.quotepath=off", "-c", "core.fsmonitor=false"];
+
 /** 레코드/필드 구분자 — 커밋 메시지에 나올 일이 없는 제어 문자 */
 const RS = "\x1e";
 const FS = "\x1f";
@@ -85,7 +92,7 @@ export function runGit(
     }
     const child = execFile(
       "git",
-      ["-c", "core.quotepath=off", ...args],
+      [...GIT_SAFE_CONFIG, ...args],
       { cwd, maxBuffer: MAX_BUFFER, encoding: "utf8", timeout: timeoutMs, signal },
       (error, stdout, stderr) => {
         if (error) {
@@ -340,7 +347,7 @@ export function showCommit(
       return;
     }
     const args = ["show", "--format=", "--patch", "--no-color", "--no-ext-diff", "--no-textconv", sha, "--", ...paths];
-    const child = spawn("git", ["-c", "core.quotepath=off", ...args], {
+    const child = spawn("git", [...GIT_SAFE_CONFIG, ...args], {
       cwd: dir,
       stdio: ["ignore", "pipe", "pipe"],
       timeout: GIT_TIMEOUT_MS,
@@ -386,7 +393,7 @@ export function showCommit(
 
 /** 커밋 diff에 새로 들어간 줄들 (소스 파일만, 머리 줄 제외) — 세션의 편집이 커밋에 남았는지 대조하는 데 쓴다 */
 export async function addedLines(dir: string, sha: string, maxLines = 5_000): Promise<string[]> {
-  const out = await runGit(dir, ["show", "--format=", "--unified=0", "--no-color", "--no-ext-diff", sha]);
+  const out = await runGit(dir, ["show", "--format=", "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv", sha]);
   const lines: string[] = [];
   for (const line of out.split("\n")) {
     if (line.startsWith("+") && !line.startsWith("+++")) {

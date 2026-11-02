@@ -217,7 +217,7 @@ export const blameStats = { calls: 0 };
 export async function blameLines(dir: string, file: string, signal?: AbortSignal): Promise<Map<number, BlameLine> | null> {
   blameStats.calls++;
   try {
-    return parseBlame(await runGit(dir, ["blame", "--porcelain", "-w", "-M", "HEAD", "--", file], undefined, signal, BLAME_TIMEOUT_MS));
+    return parseBlame(await runGit(dir, ["blame", "--porcelain", "--no-textconv", "-w", "-M", "HEAD", "--", file], undefined, signal, BLAME_TIMEOUT_MS));
   } catch (error) {
     if (signal?.aborted) throw error;
     return null;

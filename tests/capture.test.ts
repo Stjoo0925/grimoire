@@ -104,6 +104,29 @@ test("redact: 접두가 붙은 환경 변수 이름·연결 문자열·서비스
   assert.ok(Date.now() - started < 200, `${Date.now() - started}ms`);
 });
 
+test("redact: 키워드 뒤에 꼬리가 붙은 이름·명령줄 자격 증명도 지운다", () => {
+  for (const [input, expected] of [
+    ["SECRET_KEY=s3cr3tvalue123", "SECRET_KEY=[redacted]"],
+    ["JWT_SECRET_KEY=s3cr3tvalue123 npm start", "JWT_SECRET_KEY=[redacted] npm start"],
+    ["PRIVATE_KEY=abcd1234efgh", "PRIVATE_KEY=[redacted]"],
+    ["DB_PASS=hunter22abc", "DB_PASS=[redacted]"],
+    ["API_TOKEN_PROD: abcd1234efgh", "API_TOKEN_PROD: [redacted]"],
+    ["curl -u admin:hunter22 https://x", "curl -u admin:[redacted] https://x"],
+    ["curl --user=admin:hunter22 https://x", "curl --user=admin:[redacted] https://x"],
+    ["Authorization: Basic YWRtaW46aHVudGVyMjI=", "Authorization: Basic [redacted]"],
+    ["mysql -u root -phunter22 app", "mysql -u root -p[redacted] app"],
+  ] as const) {
+    assert.equal(redact(input), expected, input);
+  }
+  // 가리키는 이름·평범한 말·포트는 그대로
+  for (const keep of ["SECRET_NAME=prod-db", "GITHUB_TOKEN_FILE=/run/x", "mysql -u root -p -P3306", "bypass=abcd1234", "Basic authentication을 붙여"]) {
+    assert.equal(redact(keep), keep, keep);
+  }
+  const started = Date.now();
+  redact(`SECRET${"_ab".repeat(20_000)} mysql ${"x ".repeat(20_000)}`);
+  assert.ok(Date.now() - started < 200, `${Date.now() - started}ms`);
+});
+
 test("verify·commit 판정과 줄 해시", () => {
   assert.equal(isVerifyCommand("npm test"), true);
   assert.equal(isVerifyCommand("npm run e2e -- --json"), true);

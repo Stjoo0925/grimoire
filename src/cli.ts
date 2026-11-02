@@ -450,6 +450,8 @@ async function cmdSearch(
     const where = hit.kind === "note" ? `note #${hit.ref}` : `${hit.repo} ${hit.ref.slice(0, 8)}`;
     print(`${day(hit.date)}  ${where}  ${hit.title}`);
     if (hit.files.length > 0) print(`    ${hit.files.slice(0, 4).join("  ")}${hit.files.length > 4 ? " …" : ""}`);
+    // 번호로 찾은 노트("grimoire search '#65'")는 본문까지
+    if (hit.exact && hit.body) print(`\n    ${hit.body.split("\n").join("\n    ")}`);
     if (hit.url) print(`    ${hit.url}`);
   }
   return 0;

@@ -17,7 +17,7 @@ import readline from "node:readline";
 
 import { extractSymbols, isIndexable, SOURCE_EXT, splitIdentifier } from "./code";
 import type { DB } from "./db";
-import { CancelledError, gitError, GIT_TIMEOUT_MS } from "./git";
+import { CancelledError, gitError, GIT_SAFE_CONFIG, GIT_TIMEOUT_MS } from "./git";
 
 /** git 한 번에 넘길 커밋 수 (쓰기 트랜잭션 단위이기도 하다) */
 const BATCH = 200;
@@ -160,8 +160,8 @@ export function readCommitCode(dir: string, shas: string[], signal?: AbortSignal
     const child = spawn(
       "git",
       [
-        "-c", "core.quotepath=off",
-        "log", "--no-walk=unsorted", "--stdin", "-p", "-U0", "--no-color", "--no-ext-diff", "--no-renames",
+        ...GIT_SAFE_CONFIG,
+        "log", "--no-walk=unsorted", "--stdin", "-p", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames",
         "--format=%x1e%H", "--", ...pathspecs,
       ],
       { cwd: dir, stdio: ["pipe", "pipe", "pipe"], timeout: DIFF_TIMEOUT_MS, signal },

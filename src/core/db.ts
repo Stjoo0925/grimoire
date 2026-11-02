@@ -354,6 +354,9 @@ const MIGRATIONS: (string | ((db: DB) => void))[] = [
   );
   ALTER TABLE repos ADD COLUMN rules_version INTEGER NOT NULL DEFAULT 0;
   `,
+  // 13: 보강된 비밀 지우기 규칙을 이미 저장된 세션 기록·노트에 다시 적용한다 (capture.ts) —
+  //     0.12.x는 SECRET_KEY=·PRIVATE_KEY=·DB_PASS= 처럼 키워드 뒤에 꼬리가 붙은 이름과 curl -u·Basic 인증을 놓쳤다
+  reRedactStored,
 ];
 
 /**

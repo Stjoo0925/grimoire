@@ -129,8 +129,14 @@ function readStdin(): Promise<string> {
 
 async function main(): Promise<void> {
   const env = parseEnvArgs(process.argv.slice(2));
+  // 시간 초과 줄에 어느 훅이 어느 단계에서 멈췄는지 남긴다 — "timeout after 3000ms"만으로는 원인을 가를 수 없었다
+  // (실사용 5~16초 정지 9건). 시작 지연(node 기동·모듈 로드)과 멈춘 시각(타이머가 늦게 불리면 동기 작업이 막은 것)도 같이 적는다.
+  const bootMs = Math.round(process.uptime() * 1000);
+  let event = "?";
+  let phase = "stdin";
   const watchdog = setTimeout(() => {
-    log(env, `timeout after ${SELF_TIMEOUT_MS}ms`);
+    const total = Math.round(process.uptime() * 1000);
+    log(env, `timeout after ${SELF_TIMEOUT_MS}ms — ${event}, 단계 ${phase}, 시작 지연 ${bootMs}ms, 프로세스 ${total}ms`);
     process.exit(0);
   }, SELF_TIMEOUT_MS);
   watchdog.unref();
@@ -142,6 +148,8 @@ async function main(): Promise<void> {
     log(env, `bad stdin: ${error instanceof Error ? error.message : error}`);
     return;
   }
+  event = `${input.hook_event_name ?? "?"}${input.tool_name ? `:${input.tool_name}` : ""}`;
+  phase = "identity";
   // 커밋이 아닌 Bash의 편집 직전 훅은 할 일이 없다 — Bash마다 불리므로 DB를 열기 전에 끝낸다
   if (input.hook_event_name === "PreToolUse" && input.tool_name === "Bash") {
     const command = input.tool_input?.command;
@@ -149,6 +157,7 @@ async function main(): Promise<void> {
   }
   // "나" — GRIMOIRE_ME가 있으면 그것, 없으면 git config user.email (CLI·MCP와 같은 규칙)
   const me = await myEmails(env);
+  phase = "db";
   let db;
   try {
     // 잠금 대기는 동기라 SELF_TIMEOUT도 못 끊는다 — Claude Code의 훅 timeout(5초)보다 한참 짧게
@@ -157,6 +166,7 @@ async function main(): Promise<void> {
     log(env, `db: ${error instanceof Error ? error.message : error}`);
     return;
   }
+  phase = "handle";
   try {
     const output = await handleHook({ db, env, me, settingsFile: settingsPath(), hookPath: path.join(__dirname, "hook.js") }, input);
     if (output?.json) process.stdout.write(JSON.stringify(output.json) + "\n");

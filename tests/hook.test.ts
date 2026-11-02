@@ -283,3 +283,16 @@ test("PreToolUse(git commit) GRIMOIRE_COMMIT_IMPACT=all: 엄격한 규칙 대신
   assert.match(text, /^- src\/a\.test\.ts \(/m);
   git(repo.path, ["checkout", "--", "."]);
 });
+
+test("hook.js 시간 초과: 어느 훅의 어느 단계에서 멈췄는지와 시작 지연을 hook.log에 남긴다", async () => {
+  const { spawn } = await import("node:child_process");
+  const home = tempDir();
+  // stdin을 닫지 않으면 훅은 stdin 단계에서 기다리다 자체 타임아웃(3초)으로 끝난다
+  const child = spawn(process.execPath, [path.join(__dirname, "..", "src", "hook.js"), "--env", `GRIMOIRE_HOME=${home}`], { stdio: ["pipe", "ignore", "ignore"] });
+  child.stdin.write('{"hook_event_name":"UserPromptSubmit"');
+  const code = await new Promise<number | null>((resolve) => child.on("exit", resolve));
+  child.stdin.destroy();
+  assert.equal(code, 0); // 작업을 막지 않는다
+  const line = fs.readFileSync(path.join(home, "hook.log"), "utf8").trim();
+  assert.match(line, /timeout after 3000ms — \?, 단계 stdin, 시작 지연 \d+ms, 프로세스 \d+ms$/);
+});

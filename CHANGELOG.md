@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.1](https://github.com/Stjoo0925/grimoire/compare/v0.12.0...v0.12.1) (2026-11-02)
+
+
+### 버그 수정
+
+* **mcp:** 워크트리 세션의 impact·record_note가 그 워크트리의 변경을 읽는다 + 실사용 지표 보강 ([#43](https://github.com/Stjoo0925/grimoire/issues/43)) ([9068064](https://github.com/Stjoo0925/grimoire/commit/906806417cf628f5190c351507a9668d28d9a159))
+
 ## [0.12.0](https://github.com/Stjoo0925/grimoire/compare/v0.11.1...v0.12.0) (2026-10-30)
 
 

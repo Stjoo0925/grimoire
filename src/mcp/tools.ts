@@ -24,7 +24,7 @@ import { AUTO_BIND_MAX, autoBindPaths } from "../core/note-autobind";
 import { isBusyError, type DB } from "../core/db";
 import { resolveAuthors } from "../core/identity";
 import { indexCommitCode } from "../core/diffs";
-import { CancelledError } from "../core/git";
+import { CancelledError, worktreeRoots } from "../core/git";
 import { addRepo, discoverRepos, listRepos, matchRepos, relativeToRepo, resolveRepoFile, syncRepo } from "../core/indexer";
 import { parseNotePaths } from "../core/note-doc";
 import { addNote, PATHS_MAX, TAG_CHARS, TAGS_MAX } from "../core/notes";
@@ -204,6 +204,20 @@ async function topDiff(db: DB, hit: SearchHit, signal?: AbortSignal) {
     patch: detail.patch,
     ...(detail.patchTruncated ? { truncated: `${FULL_DIFF_LINES}줄 넘음 — 나머지는 show_commit` } : {}),
   };
+}
+
+/**
+ * 레포의 커밋 안 된 변경을 읽을 작업 트리 — 서버 cwd가 그 레포의 워크트리(또는 하위 폴더)면 그 워크트리, 아니면 본 레포.
+ * 작업 레포(workspace.root)는 등록을 한 번만 하려고 본 레포로 올려 둔 경로라, 거기서 읽으면 워크트리 세션은
+ * 본 레포에 남은 남의 변경을 보게 된다(2026-10-28~11-02 실사용 impact 31번 중 20번이 전부 0점).
+ */
+export async function checkoutOf(repoPath: string, cwd: string, signal?: AbortSignal): Promise<string> {
+  const roots = await worktreeRoots(cwd, signal).catch((error) => {
+    if (error instanceof CancelledError) throw error;
+    return null;
+  });
+  const norm = (value: string) => (process.platform === "win32" ? path.resolve(value).toLowerCase() : path.resolve(value));
+  return roots && norm(roots.main) === norm(repoPath) ? roots.top : repoPath;
 }
 
 /** MCP scan 한 번으로 등록하는 레포 수 상한 — 넘으면 터미널 grimoire scan으로 안내한다 */
@@ -409,7 +423,7 @@ async function runTool(
         given.length > 0
           ? given.map((item, index) => located[index]?.relative ?? relativeToRepo(repo.path, item))
           : // 경로를 안 주면 작업 폴더(워크트리면 그 폴더)의 커밋 안 된 변경
-            await workingChanges(current && context.workspace?.root ? context.workspace.root : repo.path, signal);
+            await workingChanges(await checkoutOf(repo.path, context.cwd, signal), signal);
       if (current) await context.workspace?.refresh?.(current, REFRESH_WAIT_MS);
       return slimImpact(impactOf(db, repo.id, changed, { intent: str(args.intent) }));
     }
@@ -477,8 +491,7 @@ async function runTool(
       if (args.paths === undefined) {
         const target = repo ?? current;
         if (target) {
-          const dir = current && target.id === current.id && context.workspace?.root ? context.workspace.root : target.path;
-          const auto = await autoBindPaths(db, target.id, text, dir, signal);
+          const auto = await autoBindPaths(db, target.id, text, await checkoutOf(target.path, context.cwd, signal), signal);
           tooMany = auto.tooMany;
           if (auto.paths.length > 0) {
             paths = auto.paths;

@@ -9,7 +9,7 @@ import { formatImpact, impactOf, workingChanges } from "../src/core/impact";
 import { addRepo, syncRepo } from "../src/core/indexer";
 import { addNote } from "../src/core/notes";
 import { callTool } from "../src/mcp/tools";
-import { git, makeRepo, memoryDb, type FakeCommit } from "./helpers";
+import { git, makeRepo, memoryDb, tempDir, type FakeCommit } from "./helpers";
 
 /**
  * api.ts ← handler.ts ← route.ts (import 사슬), api.ts는 schema.sql과 늘 같이 바뀐다(import 없음 — 이력에만 있는 결합),
@@ -95,6 +95,30 @@ test("workingChanges·impact 도구: 경로를 안 주면 커밋 안 된 변경(
   const explicit = (await callTool({ db, me: [], cwd: dir }, "impact", { paths: [path.join(dir, "src", "handler.ts")] })) as { changed: string[] };
   assert.deepEqual(explicit.changed, ["src/handler.ts"]);
   git(dir, ["checkout", "--", "."]);
+  fs.rmSync(path.join(dir, "src", "new.ts"));
+});
+
+test("impact 도구: 워크트리 세션은 본 레포가 아니라 그 워크트리의 커밋 안 된 변경을 쓴다", async () => {
+  const { db, repo, dir } = await indexed();
+  // 본 레포에는 다른 세션이 남긴 변경, 워크트리에는 이 세션의 변경
+  fs.writeFileSync(path.join(dir, "notes.md"), "남의 메모\n");
+  const tree = path.join(tempDir(), "w1");
+  git(dir, ["worktree", "add", "-q", "-b", "w1", tree]);
+  fs.writeFileSync(path.join(tree, "src", "api.ts"), "export function api() { return 9; }\n");
+  try {
+    const inTree = (await callTool({ db, me: [], cwd: path.join(tree, "src") }, "impact", { repo: repo.name })) as { changed: string[]; impact: string[] };
+    assert.deepEqual(inTree.changed, ["src/api.ts"]);
+    assert.match(inTree.impact[0], /^\d\.\d\d db\/schema\.sql — co-changed/);
+    // 본 레포에서 뜬 서버는 본 레포의 변경 그대로
+    const inMain = (await callTool({ db, me: [], cwd: dir }, "impact", { repo: repo.name })) as { changed: string[] };
+    assert.deepEqual(inMain.changed, ["notes.md"]);
+    // 다른 레포 폴더에서 뜬 서버는 요청한 레포의 본 레포를 읽는다
+    const elsewhere = (await callTool({ db, me: [], cwd: tempDir() }, "impact", { repo: repo.name })) as { changed: string[] };
+    assert.deepEqual(elsewhere.changed, ["notes.md"]);
+  } finally {
+    git(dir, ["worktree", "remove", "--force", tree]);
+    fs.rmSync(path.join(dir, "notes.md"));
+  }
 });
 
 test("extractImports: 경로 별칭(@/·~/·@name/·baseUrl)을 가까운 조상 폴더에서 풀고, npm 패키지는 버린다", () => {

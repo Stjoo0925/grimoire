@@ -5,7 +5,7 @@ import { test } from "node:test";
 
 import { addRepo, syncRepo } from "../src/core/indexer";
 import { callTool } from "../src/mcp/tools";
-import { git, makeRepo, memoryDb } from "./helpers";
+import { git, makeRepo, memoryDb, tempDir } from "./helpers";
 
 async function indexed() {
   const dir = makeRepo(
@@ -44,6 +44,21 @@ test("record_note: paths를 안 주면 바뀐 파일(수정 + 새 파일)에 자
   fs.writeFileSync(path.join(ctx.dir, "src", "b.ts"), "export const b = 2;\n");
   const one = await record(ctx, {});
   assert.deepEqual(one.paths, ["src/b.ts"]);
+});
+
+test("record_note: 워크트리 세션은 본 레포가 아니라 그 워크트리에서 바뀐 파일에 묶는다", async () => {
+  const ctx = await indexed();
+  fs.writeFileSync(path.join(ctx.dir, "src", "a.ts"), "export const a = 9;\n"); // 본 레포에 남은 다른 세션의 변경
+  const tree = path.join(tempDir(), "w1");
+  git(ctx.dir, ["worktree", "add", "-q", "-b", "w1", tree]);
+  try {
+    fs.writeFileSync(path.join(tree, "src", "b.ts"), "export const b = 2;\n");
+    const result = (await callTool({ db: ctx.db, me: [], cwd: tree }, "record_note", { text: "결정: 이건 이렇게 한다", repo: ctx.repo })) as Recorded;
+    assert.deepEqual(result.paths, ["src/b.ts"]);
+    assert.equal(result.autoBound, true);
+  } finally {
+    git(ctx.dir, ["worktree", "remove", "--force", tree]);
+  }
 });
 
 test("record_note: 소스가 아닌 파일은 묶지 않는다", async () => {

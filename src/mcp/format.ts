@@ -48,6 +48,16 @@ function linkPrefix(url: string | null, sha: string): string | null {
   return url && url.endsWith(sha) ? url.slice(0, -sha.length) : null;
 }
 
+/**
+ * 노트 본문의 길이 — index는 질의와 맞는 발췌, summary는 앞쪽 SUMMARY_BODY_CHARS자, full이나 번호로 찾은 노트("#65")는 전부.
+ * 노트는 평균 600자·가장 길어야 1,100자라 하나를 통째로 줘도 커밋 요약 하나 크기다. 결과 8개를 전부 통째로 주면 무거워 기본은 발췌.
+ */
+function noteBody(hit: SearchHit, detail: Detail): string | undefined {
+  if (!hit.body) return snippet(hit.snippet);
+  if (hit.exact || detail === "full") return hit.body;
+  return detail === "summary" ? snippet(hit.body, SUMMARY_BODY_CHARS) : snippet(hit.snippet);
+}
+
 function snippet(text: string, max = SNIPPET_CHARS): string | undefined {
   const cleaned = text.replace(/\s+/g, " ").trim();
   if (!cleaned) return undefined;
@@ -91,7 +101,7 @@ export function slimSearch(result: SearchResult, me: string[], detail: Detail = 
         by: hit.by ?? "ai",
         date: day(hit.date),
         title: hit.title,
-        body: snippet(hit.snippet),
+        body: noteBody(hit, detail),
         repo: hit.repo ?? undefined,
         // 노트가 묶인 파일 — "이 파일의 결정"을 경로로 찾은 결과에서 어느 파일인지 보이게
         ...(hit.files.length > 0 ? { paths: hit.files.slice(0, FILES_PER_HIT) } : {}),

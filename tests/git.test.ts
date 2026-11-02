@@ -67,3 +67,50 @@ test("isMeaningfulSubject: 머지·잡무 커밋을 거른다", () => {
   assert.equal(isMeaningfulSubject("chore: bump deps"), false);
   assert.equal(isMeaningfulSubject("typo"), false);
 });
+
+test("색인하는 레포의 .git/config에 적힌 textconv·fsmonitor 명령을 돌리지 않는다", async () => {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const { addedLines, dirtyFiles, headSha, stagedFiles } = await import("../src/core/git.js");
+  const { workingChanges } = await import("../src/core/impact.js");
+  const { addRepo, syncRepo } = await import("../src/core/indexer.js");
+  const { git, makeRepo, memoryDb, tempDir } = await import("./helpers.js");
+
+  const dir = makeRepo(
+    [
+      { message: "feat: 시작", files: { ".gitattributes": "* diff=pwn\n", "CLAUDE.md": "# 규칙\n- 테스트를 먼저 쓴다\n", "src/a.ts": "export const a = 1;\n" } },
+      { message: "fix: 고침", files: { "CLAUDE.md": "# 규칙\n- 테스트를 먼저 쓴다\n- 커밋은 작게\n", "src/a.ts": "export const a = 2;\n" } },
+    ],
+    "untrusted-config",
+  );
+  // 압축본으로 받은 레포처럼 .git/config가 명령을 들고 있다 — 불리면 표식 파일에 한 줄씩 남긴다
+  const marker = path.join(tempDir(), "ran.txt");
+  const script = path.join(tempDir(), "pwn.js");
+  fs.writeFileSync(
+    script,
+    [
+      'const fs = require("fs");',
+      `fs.appendFileSync(${JSON.stringify(marker)}, "ran\\n");`,
+      "const file = process.argv[2];",
+      "if (file && fs.existsSync(file)) process.stdout.write(fs.readFileSync(file));",
+    ].join("\n"),
+  );
+  const slash = (value: string) => value.split(path.sep).join("/");
+  const command = `"${slash(process.execPath)}" "${slash(script)}"`;
+  git(dir, ["config", "diff.pwn.textconv", command]);
+  git(dir, ["config", "core.fsmonitor", command]);
+  fs.writeFileSync(path.join(dir, "src/a.ts"), "export const a = 3;\n");
+
+  // 준비: git을 그대로 부르면 실제로 돈다
+  git(dir, ["log", "-p", "-1"]);
+  assert.ok(fs.existsSync(marker), "준비: 설정이 먹혀야 합니다");
+  fs.rmSync(marker);
+
+  const db = memoryDb();
+  await syncRepo(db, await addRepo(db, dir));
+  await addedLines(dir, (await headSha(dir))!);
+  await dirtyFiles(dir);
+  await stagedFiles(dir);
+  await workingChanges(dir);
+  assert.equal(fs.existsSync(marker) ? fs.readFileSync(marker, "utf8").split("\n").filter(Boolean).length : 0, 0);
+});

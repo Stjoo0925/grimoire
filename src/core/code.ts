@@ -8,7 +8,7 @@
 import { execFile } from "node:child_process";
 import path from "node:path";
 
-import { CancelledError, gitError, GIT_BULK_TIMEOUT_MS, runGit } from "./git";
+import { CancelledError, gitError, GIT_BULK_TIMEOUT_MS, GIT_SAFE_CONFIG, runGit } from "./git";
 
 /** 색인할 소스 확장자 */
 export const SOURCE_EXT = new Set([
@@ -111,7 +111,7 @@ function runGitBuffer(dir: string, args: string[], input: string, signal?: Abort
     }
     const child = execFile(
       "git",
-      args,
+      [...GIT_SAFE_CONFIG, ...args],
       { cwd: dir, maxBuffer: 2 * BLOB_BATCH_BYTES, encoding: "buffer", timeout: GIT_BULK_TIMEOUT_MS, signal },
       (error, stdout, stderr) => {
         if (error) reject(gitError(args[0], dir, error, String(stderr), signal));

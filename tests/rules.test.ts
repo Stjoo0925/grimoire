@@ -393,7 +393,7 @@ test("업그레이드: 스키마 12 DB가 열리고, 트리가 그대로여도 �
   db.close();
 
   db = openDb(file);
-  assert.equal(db.pragma("user_version"), 13);
+  assert.equal(db.pragma("user_version"), 14);
   assert.equal((db.prepare("SELECT COUNT(*) AS n FROM rules").get() as { n: number }).n, 0);
   const result = await syncRepo(db, repo);
   assert.equal(result.added, 0, "새 커밋은 없다 — 트리도 그대로");

@@ -90,7 +90,7 @@ export const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        query: { type: "string" },
+        query: { type: "string", description: "#N: whole note N" },
         repo: { type: "string" },
         author: { type: "string", description: "me | email" },
         since: { type: "string", format: "date" },

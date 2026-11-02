@@ -7,7 +7,7 @@
 import path from "node:path";
 
 import { whyLine } from "./capture";
-import { parseNotePaths } from "./note-doc";
+import { NOTE_TITLE_MAX, parseNotePaths } from "./note-doc";
 import { isIndexable, splitIdentifier } from "./code";
 import type { DB } from "./db";
 import { commitWebUrl } from "./git";
@@ -217,8 +217,10 @@ export interface SearchHit {
   lines?: number;
   /** kind='file'일 때: 이 파일을 마지막으로 건드린 커밋 */
   lastCommit?: { sha: string; date: string; title: string } | null;
-  /** kind='commit'일 때: 커밋 본문 전체 (snippet은 발췌) */
+  /** kind='commit'일 때: 커밋 본문 전체, kind='note'일 때: 제목 줄을 뺀 노트 본문 전체 (snippet은 발췌) */
   body?: string;
+  /** 질의가 노트 번호("#65")라 그 노트를 바로 찾았다 — 보여 줄 때 본문을 자르지 않는다 */
+  exact?: boolean;
   /** kind='commit'일 때: 같은 변경으로 접힌 다른 커밋 sha (squash 머지의 브랜치 원본 등) */
   also?: string[];
   /** kind='commit'일 때: diff에서 바뀐 선언 — 파일별 이름 (diffs.ts가 뒤에서 채운다, 아직이면 빈 배열) */
@@ -241,7 +243,20 @@ interface Candidate {
   snippet?: string;
 }
 
+/**
+ * "#65"·"note 65"·"노트 #65"·"record_note #65" — 노트 번호 하나뿐인 질의. 키워드로 찾으면 다른 노트 본문의 "65"가
+ * 앞선다(실사용: "record_note #65"에서 #65가 5위). 노트 번호는 레포와 상관없이 하나라 레포·기간 필터는 보지 않는다.
+ */
+const NOTE_ID_QUERY = /^\s*(?:#|(?:record_note|note|노트)\s*#?)\s*(\d{1,9})\s*$/i;
+
 export function search(db: DB, query: string, options: SearchOptions = {}): SearchResult {
+  const noteId = options.kind === undefined || options.kind === "note" ? NOTE_ID_QUERY.exec(query)?.[1] : undefined;
+  if (noteId) {
+    const doc = db.prepare("SELECT id FROM docs WHERE kind = 'note' AND ref = ?").get(noteId) as { id: number } | undefined;
+    const hit = doc ? toHit(db, doc.id, 1, undefined) : null;
+    if (hit) return { query, hits: [{ ...hit, exact: true }] };
+    // 없는 번호면 평소처럼 찾는다 — "#65"가 이슈·PR 번호일 수도 있다
+  }
   const limit = Math.min(Math.max(1, Math.floor(options.limit ?? DEFAULT_LIMIT)), MAX_LIMIT);
   const pool = limit * POOL_FACTOR;
   const { where, params } = filterSql(options);
@@ -513,12 +528,18 @@ function toHit(
   }
 
   if (doc.kind === "note") {
-    const note = db.prepare("SELECT source, paths FROM notes WHERE id = ?").get(Number(doc.ref)) as { source: string; paths: string | null } | undefined;
+    const note = db.prepare("SELECT source, paths, text FROM notes WHERE id = ?").get(Number(doc.ref)) as
+      | { source: string; paths: string | null; text: string }
+      | undefined;
+    // 본문은 제목 줄을 뺀 나머지 — 제목이 잘렸으면(NOTE_TITLE_MAX) 첫 줄까지 그대로 (note-doc.ts noteDocFields와 같은 규칙)
+    const [first = "", ...rest] = (note?.text ?? "").split("\n");
+    const body = (first.length > NOTE_TITLE_MAX ? note?.text ?? "" : rest.join("\n")).trim();
     return {
       ...base,
       by: note?.source === "cli" ? "me" : "ai",
       author: null,
       snippet: snippet ?? doc.body.slice(0, 240),
+      ...(body ? { body } : {}),
       // 노트가 묶인 파일 (notes.ts)
       files: parseNotePaths(note?.paths).map((item) => item.path),
       filesChanged: null,

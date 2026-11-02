@@ -354,6 +354,38 @@ test("노트 검색 결과에 누가 남겼는지(by: me | ai)가 실린다", as
   assert.ok(JSON.stringify(result.hits[0]).length < 260);
 });
 
+test("노트 본문: 번호(#N)로 찾으면 그 노트 하나를 통째로, 아니면 detail 단계에 따라 발췌·600자·전부", async () => {
+  const db = memoryDb();
+  const context = { db, me: [], cwd: process.cwd() };
+  const long = Array.from({ length: 40 }, (_, i) => `측정 ${i}: 재손질률 숫자와 판단 근거를 적는다`).join("\n"); // 약 1,000자
+  const target = addNote(db, { text: `0.10 배포 후 재측정\n${long}`, source: "mcp" });
+  // 다른 노트 본문에 같은 숫자가 있어도 번호 질의는 그 노트만
+  addNote(db, { text: `다른 노트\n평균 ${target.id}줄, 재측정 #${target.id} 참고`, source: "mcp" });
+  type Hits = { hits: { note: number; title: string; body?: string }[] };
+
+  for (const query of [`#${target.id}`, `note ${target.id}`, `노트 #${target.id}`, `record_note #${target.id}`]) {
+    const exact = (await callTool(context, "search_memory", { query })) as Hits;
+    assert.equal(exact.hits.length, 1, query);
+    assert.equal(exact.hits[0].note, target.id);
+    assert.equal(exact.hits[0].body, long, query);
+  }
+  // 없는 번호는 평소 검색으로, 노트가 아닌 kind를 고르면 번호로 찾지 않는다
+  await callTool(context, "search_memory", { query: "#99999" });
+  const commitsOnly = (await callTool(context, "search_memory", { query: `#${target.id}`, kind: "commit" })) as Hits;
+  assert.equal(commitsOnly.hits.length, 0);
+
+  const body = async (detail: string) =>
+    ((await callTool(context, "search_memory", { query: "재손질률", kind: "note", detail })) as Hits).hits.find((hit) => hit.note === target.id)!.body ?? "";
+  assert.ok((await body("index")).length <= 141);
+  const summary = await body("summary");
+  assert.ok(summary.length > 141 && summary.length <= 601, `${summary.length}자`);
+  assert.equal(await body("full"), long);
+
+  // CLI도 같은 core를 쓴다 — 번호로 찾은 노트에 본문이 실린다
+  const hit = (await search(db, `#${target.id}`)).hits[0];
+  assert.deepEqual([hit.exact, hit.body], [true, long]);
+});
+
 test("레포 이름이 여럿과 부분 일치하면 고르지 않고 후보를 알린다", async () => {
   const db = memoryDb();
   await syncRepo(db, await addRepo(db, sampleRepo("shop-api")));

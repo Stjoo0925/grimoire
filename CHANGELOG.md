@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.3](https://github.com/Stjoo0925/grimoire/compare/v0.12.2...v0.12.3) (2026-11-02)
+
+
+### 버그 수정
+
+* **security:** 레포 git 설정의 명령을 돌리지 않고 놓치던 비밀 꼴도 지운다 + 노트 번호로 본문 전체 찾기 ([#48](https://github.com/Stjoo0925/grimoire/issues/48)) ([1026bb6](https://github.com/Stjoo0925/grimoire/commit/1026bb6fc631265380baf8875f5e73642386162d))
+
 ## [0.12.2](https://github.com/Stjoo0925/grimoire/compare/v0.12.1...v0.12.2) (2026-11-02)
 
 

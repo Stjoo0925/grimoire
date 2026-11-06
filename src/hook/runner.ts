@@ -86,6 +86,8 @@ export interface SessionState {
 const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 /** 세션 파일 보존 기간 */
 export const SESSION_TTL_DAYS = 14;
+/** 이보다 오래 기록이 없는 세션은 끝난 것으로 본다 (SessionStart의 "묶이지 않은 프롬프트" 집계용) */
+export const SESSION_QUIET_MS = 6 * 3_600_000;
 
 export function sessionsDir(env: Env): string {
   return path.join(grimoireHome(env), "sessions");
@@ -404,12 +406,15 @@ async function sessionStart(context: HookContext, input: HookInput): Promise<Hoo
     .all(repo.id) as { path: string }[];
   if (uncommitted.length > 0) lines.push(`Edited but not committed in earlier sessions: ${uncommitted.map((row) => row.path).join(", ")}`);
   // 커밋에 묶이지 않은 채 지워질 날을 기다리는 이전 세션의 프롬프트 — "하지 않기로 한 이유"는 커밋을 만들지 않아 여기서만 보인다 (docs/feature-audit.md F2)
+  // 지금 돌고 있을 수 있는 세션(최근 SESSION_QUIET_MS 안에 기록이 있는 것)은 세지 않는다 — 곧 커밋할지 모른다
+  const quietBefore = new Date(Date.now() - SESSION_QUIET_MS).toISOString();
   const orphan = context.db
     .prepare(
       `SELECT COUNT(*) AS n, MIN(at) AS oldest FROM session_events e WHERE repo_id = ? AND kind = 'prompt' AND session_id <> ?
-          AND NOT EXISTS (SELECT 1 FROM session_events c WHERE c.session_id = e.session_id AND c.repo_id = e.repo_id AND c.kind = 'commit' AND c.at > e.at)`,
+          AND NOT EXISTS (SELECT 1 FROM session_events c WHERE c.session_id = e.session_id AND c.repo_id = e.repo_id AND c.kind = 'commit' AND c.at > e.at)
+          AND NOT EXISTS (SELECT 1 FROM session_events l WHERE l.session_id = e.session_id AND l.at > ?)`,
     )
-    .get(repo.id, input.session_id ?? "") as { n: number; oldest: string | null };
+    .get(repo.id, input.session_id ?? "", quietBefore) as { n: number; oldest: string | null };
   if (orphan.n > 0 && orphan.oldest) {
     const daysLeft = Math.max(0, EVENT_TTL_DAYS - Math.floor((Date.now() - Date.parse(orphan.oldest)) / 86_400_000));
     lines.push(`${orphan.n} prompt(s) from earlier sessions were never bound to a commit (oldest expires in ${daysLeft}d) — a decision made without a commit survives only as a record_note.`);

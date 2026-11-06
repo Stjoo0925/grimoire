@@ -28,7 +28,7 @@ import { CancelledError, worktreeRoots } from "../core/git";
 import { addRepo, discoverRepos, listRepos, matchRepos, relativeToRepo, resolveRepoFile, syncRepo } from "../core/indexer";
 import { parseNotePaths } from "../core/note-doc";
 import { addNote, notesCiting, PATHS_MAX, TAG_CHARS, TAGS_MAX } from "../core/notes";
-import { recordVerdicts, refLabel, resolveRefs, supersededMark, type ResolvedRef } from "../core/supersede";
+import { inheritedNotePaths, recordVerdicts, refLabel, resolveRefs, supersededMark, type ResolvedRef } from "../core/supersede";
 import { commitDetail, repoOverview, repoSummaries } from "../core/overview";
 import { search, type SearchHit } from "../core/search";
 import { slimCommit, slimFileContext, slimImpact, slimOverview, slimRepos, slimSearch, type Detail } from "./format";
@@ -83,9 +83,6 @@ export function emptyHint(context: ToolContext): string | undefined {
  * 영어로 쓴다: 같은 뜻이면 토큰이 적고, 영어로 묻는 세션에서도 도구를 고르게. annotations는 클라이언트가
  * 확인 없이 불러도 되는지 판단하는 힌트다(읽기 도구는 readOnlyHint, add_repo는 같은 경로면 다시 불러도 같다. record_note는 부를 때마다 노트가 생겨 MCP 기본값(idempotentHint 없음 = false) 그대로 둔다).
  */
-/** record_note 하나가 뒤집거나 확인하는 대상 수 상한 */
-const VERDICTS_MAX = 10;
-
 export const TOOLS = [
   {
     name: "search_memory",
@@ -255,17 +252,6 @@ export class ToolError extends Error {}
 
 const BUSY_MESSAGE = "다른 grimoire 프로세스가 DB를 쓰는 중입니다. 잠시 후 다시 시도하세요.";
 const CANCELLED_MESSAGE = "요청이 취소되었습니다";
-/** 뒤집거나 확인하는 노트들이 묶인 파일 — 새 판단이 같은 자리에서 보이게 물려받는다 */
-function inheritedPaths(db: DB, targets: ResolvedRef[]): string[] {
-  const out: string[] = [];
-  for (const target of targets) {
-    if (target.kind !== "note") continue;
-    const row = db.prepare("SELECT paths FROM notes WHERE id = ?").get(Number(target.ref)) as { paths: string } | undefined;
-    for (const item of parseNotePaths(row?.paths)) if (!out.includes(item.path)) out.push(item.path);
-  }
-  return out.slice(0, PATHS_MAX);
-}
-
 /** record_note가 DB 잠금에 걸렸을 때 다시 해 보는 횟수와 간격 */
 const NOTE_RETRIES = 2;
 const NOTE_RETRY_MS = 200;
@@ -494,12 +480,25 @@ async function runTool(
       const tokensOf = (value: unknown, name: string): string[] => {
         if (value === undefined) return [];
         if (!Array.isArray(value)) throw new ToolError(`${name}는 문자열 배열이어야 합니다`);
-        return value.slice(0, VERDICTS_MAX).filter((item): item is string => typeof item === "string" && item.trim() !== "");
+        // 상한(VERDICTS_MAX)은 resolveRefs가 본다 — 자르지 않고 거절한다
+        return value.filter((item): item is string => typeof item === "string" && item.trim() !== "");
       };
       const supersedeTokens = tokensOf(args.supersedes, "supersedes");
       const confirmTokens = tokensOf(args.confirms, "confirms");
-      const text = str(args.text) || (confirmTokens.length > 0 ? `확인: ${confirmTokens.map((token) => (token.startsWith("#") ? token : `#${token}`)).join(", ")} — 다시 보았고 아직 맞다` : "");
-      if (!text) throw new ToolError("text가 필요합니다");
+      const text = str(args.text);
+      if (!text) {
+        if (supersedeTokens.length > 0) throw new ToolError("supersedes에는 text(뒤집는 이유)가 필요합니다");
+        if (confirmTokens.length === 0) throw new ToolError("text가 필요합니다");
+        // 확인만: 노트를 만들지 않는다 — 스텁 노트가 카드 자리와 검색을 차지하지 않게. 기록의 주체는 에이전트(user:mcp)다
+        const onlyRepo = repoFilter(args.repo) ?? current;
+        try {
+          const targets = resolveRefs(db, onlyRepo?.id ?? null, confirmTokens);
+          const result = recordVerdicts(db, { repoId: onlyRepo?.id ?? null, by: { kind: "user", ref: "mcp" }, targets, how: "confirm" });
+          return { confirmed: targets.map(refLabel), ...(result.notes.length > 0 ? { warnings: result.notes } : {}) };
+        } catch (error) {
+          throw new ToolError(error instanceof Error ? error.message : String(error));
+        }
+      }
       if (args.tags !== undefined && !Array.isArray(args.tags)) throw new ToolError("tags는 문자열 배열이어야 합니다");
       // 상한(TAGS_MAX개·TAG_CHARS자)을 넘으면 오류 대신 자른다 — 거대한 배열을 끝까지 훑지도 않는다
       const tags = (args.tags ?? []).slice(0, TAGS_MAX).filter((tag): tag is string => typeof tag === "string");
@@ -527,7 +526,7 @@ async function runTool(
       let bound = repo;
       let autoBound = false;
       let tooMany = false;
-      const inherited = args.paths === undefined ? inheritedPaths(db, [...supersedes, ...confirms]) : [];
+      const inherited = args.paths === undefined ? inheritedNotePaths(db, [...supersedes, ...confirms]) : [];
       if (inherited.length > 0 && verdictRepo) {
         paths = inherited;
         bound = verdictRepo;

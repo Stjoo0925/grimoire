@@ -378,6 +378,25 @@ const MIGRATIONS: (string | ((db: DB) => void))[] = [
   CREATE INDEX supersessions_by ON supersessions (by_kind, by_ref);
   ALTER TABLE notes ADD COLUMN refs TEXT NOT NULL DEFAULT '[]';
   `,
+  // 15: 판단 표를 다시 만든다 — (1) 같은 사람이 같은 노트를 두 번 확인할 수 있게 at을 키에 넣고(by_kind = user인 확인은 노트가 없어
+  //     by_ref가 "cli"·"mcp"뿐이다), (2) 레포를 지워도 살아남는 노트(repo_id SET NULL)의 판단 기록이 함께 사라지지 않게 SET NULL로.
+  //     행은 그대로 옮긴다 — 내용을 지우는 단계가 아니다
+  `
+  CREATE TABLE supersessions_v2 (
+    repo_id      INTEGER REFERENCES repos(id) ON DELETE SET NULL,
+    target_kind  TEXT NOT NULL,
+    target_ref   TEXT NOT NULL,
+    by_kind      TEXT NOT NULL,
+    by_ref       TEXT NOT NULL,
+    how          TEXT NOT NULL,
+    at           TEXT NOT NULL,
+    PRIMARY KEY (target_kind, target_ref, by_kind, by_ref, how, at)
+  );
+  INSERT OR IGNORE INTO supersessions_v2 SELECT repo_id, target_kind, target_ref, by_kind, by_ref, how, at FROM supersessions;
+  DROP TABLE supersessions;
+  ALTER TABLE supersessions_v2 RENAME TO supersessions;
+  CREATE INDEX supersessions_by ON supersessions (by_kind, by_ref);
+  `,
 ];
 
 /**

@@ -296,6 +296,7 @@ npm run upgrade-check -- --from <old dist>   # build a DB with the last release,
 npm run taskbench   # task benchmark: with vs without Grimoire on real fix tasks (below, calls real Claude)
 npm run eval -- --cochange   # offline: does co-change predict the files that change together? (time split)
 npm run impactbench -- --repo <path> --ratio 0.7   # offline: does impact rank the files that changed together? (time split, no model calls)
+npm run missbench -- --repo <path>                 # offline: would impact have flagged the files a later fix had to change? (time split, no model calls)
 npm run usage -- --since 2026-10-20                # read-only: grimoire tool/skill use in your Claude Code sessions and the 48-hour re-touch rate
 ```
 

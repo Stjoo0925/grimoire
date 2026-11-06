@@ -282,6 +282,7 @@ npm run bench       # 핀포인트 벤치 (아래, 실제 Claude 호출)
 npm run taskbench   # 작업 완수 벤치: 실제 fix 작업을 Grimoire 있음/없음으로 (아래, 실제 Claude 호출)
 npm run eval -- --cochange   # 오프라인: 공변경이 같이 바뀔 파일을 맞히나 (시간 분할)
 npm run impactbench -- --repo <경로> --ratio 0.7   # 오프라인: impact가 같이 바뀐 파일을 맞히나 (시간 분할, 모델 호출 없음)
+npm run missbench -- --repo <경로>                 # 오프라인: 나중에 fix가 고쳐야 했던 파일을 impact가 미리 짚었나 (시간 분할, 모델 호출 없음)
 npm run usage -- --since 2026-10-20                # 읽기만: Claude Code 세션의 grimoire 도구·스킬 사용과 48시간 재손질률
 npm run upgrade-check -- --from <옛 dist>   # 지난 릴리스로 만든 DB를 지금 소스로 열어 마이그레이션·공변경 재계산·비밀 지우기 확인 (임시 폴더만)
 ```

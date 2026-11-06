@@ -96,6 +96,42 @@ export interface ImpactOptions {
   weights?: Partial<Record<ImpactSource, number>>;
   /** 작업 의도(사용자의 요청·변경 계획) — 주면 그 말로 찾은 파일을 순위에 합친다 */
   intent?: string;
+  /** 근거 합치기 — 기본 DEFAULT_AGGREGATE (평가용으로 바꿔 낄 수 있다) */
+  aggregate?: ImpactAggregate;
+  /** 허브 감점 세기 — 공변경 근거에 (1 - 그 파일이 바뀐 커밋 비율)^hub를 곱한다. 0이면 끈다 (평가용) */
+  hub?: number;
+  /**
+   * import 허브 감점 세기 — import 근거에 min(1, FANIN_FREE / 그 import 관계에서 의존받는 쪽의 importer 수)^fanin을,
+   * 2홉 근거에는 가운데 파일의 이웃 수로 같은 감점을 곱한다. 거의 모든 화면이 import하는 공용 파일(설정 컨텍스트·버튼)이
+   * 큰 커밋에서 약한 import 근거 수십 개로 1.00에 차는 것을 막는다. 기본 DEFAULT_FANIN, 0이면 끈다
+   */
+  fanin?: number;
+}
+
+/** import 허브 감점이 시작되는 importer 수 */
+const FANIN_FREE = 5;
+/**
+ * 기본 합치기·import 허브 감점 — 놓친 파일 벤치(e2e/missbench.ts, 레포 7개·사례 203개, 2026-11-06)에서 noisy-or·감점 없음 대비
+ * R@10 +0.016(p=0.014), hit@10 0.40→0.44. 4~10파일 커밋 0.243→0.265, 11파일 이상 0.068→0.091. 파일 하나 질의(impactbench)는 그대로다
+ */
+export const DEFAULT_AGGREGATE: ImpactAggregate = "seed-damped";
+export const DEFAULT_FANIN = 0.5;
+
+/**
+ * noisy-or: 모든 근거를 한 번에 noisy-OR (바뀐 파일이 많으면 근거가 쌓여 1.00으로 포화한다)
+ * seed-max: 바뀐 파일마다 noisy-OR한 뒤 가장 센 파일 하나만
+ * seed-damped: 바뀐 파일별 점수를 센 순서로 1, 1/2, 1/4…배 해서 noisy-OR (여러 파일이 가리키면 조금씩만 오른다)
+ */
+export type ImpactAggregate = "noisy-or" | "seed-max" | "seed-damped";
+
+function combine(reasons: ImpactReason[], aggregate: ImpactAggregate): number {
+  const noisyOr = (scores: number[]) => 1 - scores.reduce((rest, score) => rest * (1 - score), 1);
+  if (aggregate === "noisy-or") return noisyOr(reasons.map((reason) => reason.score));
+  const bySeed = new Map<string, number[]>();
+  for (const reason of reasons) bySeed.set(reason.from, [...(bySeed.get(reason.from) ?? []), reason.score]);
+  const perSeed = [...bySeed.values()].map(noisyOr).sort((a, b) => b - a);
+  if (aggregate === "seed-max") return perSeed[0] ?? 0;
+  return noisyOr(perSeed.map((score, index) => score * 0.5 ** index));
 }
 
 export function impactOf(db: DB, repoId: number, changed: string[], options: ImpactOptions = {}): Impact {
@@ -134,6 +170,27 @@ export function impactOf(db: DB, repoId: number, changed: string[], options: Imp
     "SELECT name FROM file_defs WHERE repo_id = ? AND path = ?",
     "SELECT f.path AS other, f.name FROM file_refs f WHERE f.repo_id = ? AND f.name IN (SELECT name FROM uses) AND f.path <> ?",
   );
+  // 허브 감점 — 거의 모든 커밋에 끼는 파일(CHANGELOG·라우터 등록부)은 누구와도 같이 바뀌어 신뢰도가 높게 나온다
+  const hub = options.hub ?? 0;
+  const touchesOf = db.prepare("SELECT commits FROM file_touches WHERE repo_id = ? AND path = ?");
+  const allCommits = hub > 0 ? ((db.prepare("SELECT COUNT(*) AS n FROM commits WHERE repo_id = ?").get(repoId) as { n: number }).n || 1) : 1;
+  const hubFactor = (file: string) => {
+    if (hub <= 0) return 1;
+    const touches = (touchesOf.get(repoId, file) as { commits: number } | undefined)?.commits ?? 0;
+    return Math.max(0, 1 - touches / allCommits) ** hub;
+  };
+  const fanin = options.fanin ?? DEFAULT_FANIN;
+  const importerStmt = db.prepare("SELECT COUNT(*) AS n FROM file_imports WHERE repo_id = ? AND target = ?");
+  const importerCache = new Map<string, number>();
+  const importers = (file: string) => {
+    let count = importerCache.get(file);
+    if (count === undefined) {
+      count = (importerStmt.get(repoId, file) as { n: number }).n;
+      importerCache.set(file, count);
+    }
+    return count;
+  };
+  const faninFactor = (count: number) => (fanin > 0 ? Math.min(1, FANIN_FREE / Math.max(1, count)) ** fanin : 1);
   const neighbors = (file: string) => ({
     out: (importsOf.all(repoId, file) as { other: string }[]).map((row) => row.other),
     in: (importersOf.all(repoId, file) as { other: string }[]).map((row) => row.other),
@@ -143,16 +200,19 @@ export function impactOf(db: DB, repoId: number, changed: string[], options: Imp
     if (sources.has("import") || sources.has("import2")) {
       const hop1 = neighbors(seed);
       if (sources.has("import")) {
-        for (const other of hop1.in) add(other, { source: "import", from: seed, score: weight.import, detail: `imports ${seed}` });
-        for (const other of hop1.out) add(other, { source: "import", from: seed, score: weight.import, detail: `imported by ${seed}` });
+        // 의존받는 쪽이 허브면 약하게 — other가 seed를 import하면 seed가, seed가 other를 import하면 other가 의존받는 쪽
+        const seedFactor = faninFactor(hop1.in.length);
+        for (const other of hop1.in) add(other, { source: "import", from: seed, score: weight.import * seedFactor, detail: `imports ${seed}` });
+        for (const other of hop1.out) add(other, { source: "import", from: seed, score: weight.import * faninFactor(fanin > 0 ? importers(other) : 0), detail: `imported by ${seed}` });
       }
       if (sources.has("import2")) {
         const first = [...new Set([...hop1.in, ...hop1.out])].slice(0, HOP2_FANOUT);
         for (const middle of first) {
           const hop2 = neighbors(middle);
+          const middleFactor = faninFactor(hop2.in.length + hop2.out.length);
           for (const other of [...hop2.in, ...hop2.out]) {
             if (other === seed) continue;
-            add(other, { source: "import2", from: seed, score: weight.import2, detail: `via ${middle}` });
+            add(other, { source: "import2", from: seed, score: weight.import2 * middleFactor, detail: `via ${middle}` });
           }
         }
       }
@@ -185,7 +245,7 @@ export function impactOf(db: DB, repoId: number, changed: string[], options: Imp
         add(item.path, {
           source: "cochange",
           from: seed,
-          score: Math.min(1, item.confidence) * weight.cochange,
+          score: Math.min(1, item.confidence) * weight.cochange * hubFactor(item.path),
           detail: `co-changed with ${seed} ${item.support}× (${Math.round(item.confidence * 100)}%)`,
           support: item.support,
         });
@@ -210,9 +270,10 @@ export function impactOf(db: DB, repoId: number, changed: string[], options: Imp
     }
   }
 
+  const aggregate = options.aggregate ?? DEFAULT_AGGREGATE;
   const items: ImpactItem[] = [...found.entries()].map(([file, reasons]) => {
     reasons.sort((a, b) => b.score - a.score);
-    const score = 1 - reasons.reduce((rest, reason) => rest * (1 - reason.score), 1);
+    const score = combine(reasons, aggregate);
     return { path: file, score: Math.round(score * 1000) / 1000, test: TEST_PATH.test(file), reasons };
   });
   // 점수 순, 같으면 근거 수, 그다음 경로 (결정론)

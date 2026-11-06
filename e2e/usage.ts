@@ -117,8 +117,8 @@ function resultText(content: unknown): string {
     .join("\n");
 }
 
-/** impact 줄 "0.82 src/a.ts — 근거" (core/impact.ts impactLines)에서 경로 */
-const IMPACT_LINE = /^-?\d+(?:\.\d+)?\s+(.+?)\s+—\s/;
+/** impact 줄 "0.82 src/a.ts — 근거" 또는 의도로만 찾은 "intent src/a.ts — 근거" (core/impact.ts impactLines)에서 경로 */
+const IMPACT_LINE = /^(?:-?\d+(?:\.\d+)?|intent)\s+(.+?)\s+—\s/;
 
 /** impact MCP 결과(JSON의 impact 배열)에서 제안된 파일. 오류 문자열 등 낯선 결과면 빈 배열. */
 export function parseImpactSuggestions(text: string): string[] {

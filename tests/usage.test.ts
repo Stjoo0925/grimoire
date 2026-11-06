@@ -94,6 +94,8 @@ test("도구 호출 세기: grimoire MCP·impact intent·스킬", async () => {
 test("parseImpactSuggestions: impact MCP 결과에서 제안 경로", () => {
   assert.deepEqual(parseImpactSuggestions(impactJson(["src/a b.ts", "tests/a.test.ts"])), ["src/a b.ts", "tests/a.test.ts"]);
   assert.deepEqual(parseImpactSuggestions(JSON.stringify({ changed: [], impact: ["0.00 docs/x.md — matches the task text"] })), ["docs/x.md"]);
+  // 의도로만 찾은 줄은 점수 대신 "intent"
+  assert.deepEqual(parseImpactSuggestions(JSON.stringify({ changed: [], impact: ["intent docs/y.md — matches the task text"] })), ["docs/y.md"]);
   assert.deepEqual(parseImpactSuggestions("repo가 필요합니다"), []);
   assert.deepEqual(parseImpactSuggestions(JSON.stringify({ changed: [] })), []);
 });

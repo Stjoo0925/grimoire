@@ -5,7 +5,8 @@ import { test } from "node:test";
 
 import { buildQueries, meanScore, parseLog, scoreQuery } from "../e2e/impactbench";
 import { extractImports } from "../src/core/context";
-import { formatImpact, impactOf, workingChanges } from "../src/core/impact";
+import { formatImpact, impactLines, impactOf, INTENT_ONLY_NOTICE, intentOnlyImpact, workingChanges } from "../src/core/impact";
+import { slimImpact } from "../src/mcp/format";
 import { addRepo, syncRepo } from "../src/core/indexer";
 import { addNote } from "../src/core/notes";
 import { callTool } from "../src/mcp/tools";
@@ -207,4 +208,33 @@ test("impactOf intent: 작업 의도로 찾은 과거 커밋의 파일을 순위
   assert.match(schema!.reasons.find((reason) => reason.source === "intent")!.detail, /^changed in [0-9a-f]{7} "feat\(api\): 컬럼/);
   // 바뀐 파일 자신과 지금 레포에 없는 파일은 넣지 않는다
   assert.equal(withIntent.some((item) => item.path === "src/handler.ts"), false);
+});
+
+test("impactLines: 의도로만 찾은 항목은 0.00이 아니라 intent로, 구조·이력 근거가 하나도 없으면 그렇다고 밝힌다", async () => {
+  const { db, repo } = await indexed();
+  // 섞인 결과 — 구조 근거가 있는 항목이 있으니 안내는 없다
+  const mixed = impactOf(db, repo.id, ["src/handler.ts"], { noteFiles: 0, intent: "컬럼 추가" });
+  const lines = impactLines(mixed, mixed.items.length);
+  assert.ok(lines.some((line) => line.startsWith("intent db/schema.sql — changed in ")), lines.join("\n"));
+  assert.equal(lines.some((line) => line.startsWith("0.00 ")), false);
+  assert.equal(intentOnlyImpact(mixed), false);
+  assert.equal("evidence" in slimImpact(mixed), false);
+  // 색인 밖 파일(README.md)만 바꿨다 — 구조·이력 근거가 없어 의도로 찾은 후보만 남는다
+  const only = impactOf(db, repo.id, ["README.md"], { noteFiles: 0, intent: "컬럼 추가" });
+  assert.ok(only.items.length > 0);
+  assert.equal(intentOnlyImpact(only), true);
+  assert.equal(slimImpact(only).evidence, INTENT_ONLY_NOTICE);
+  assert.match(formatImpact(only), /이력·import·폴더 근거는 없습니다/);
+});
+
+test("impactOf dir: 레포 최상위 파일도 같은 폴더(최상위) 파일을 잇는다", async () => {
+  const dir = makeRepo(
+    [{ message: "feat: 시작", files: { "main.ts": "export const main = 1;\n", "util.ts": "export const util = 2;\n", "src/deep.ts": "export const deep = 3;\n" }, date: "2024-01-01T10:00:00+09:00" }],
+    "impact-root",
+  );
+  const db = memoryDb();
+  const repo = await addRepo(db, dir);
+  await syncRepo(db, repo);
+  const items = impactOf(db, repo.id, ["main.ts"], { noteFiles: 0, sources: ["dir"] }).items.map((item) => item.path);
+  assert.deepEqual(items, ["util.ts"], "하위 폴더 파일은 같은 폴더가 아니다");
 });

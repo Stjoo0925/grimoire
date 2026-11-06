@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.0](https://github.com/Stjoo0925/grimoire/compare/v0.12.4...v0.13.0) (2026-11-06)
+
+
+### 기능
+
+* **impact:** 놓친 파일 벤치를 더하고, 큰 커밋에서 공용 파일이 순위를 덮지 않게 근거 합치기를 바꾼다 ([#52](https://github.com/Stjoo0925/grimoire/issues/52)) ([9c73aa9](https://github.com/Stjoo0925/grimoire/commit/9c73aa9318fdd8bcfe438905382e70986ad68451))
+
 ## [0.12.4](https://github.com/Stjoo0925/grimoire/compare/v0.12.3...v0.12.4) (2026-11-06)
 
 

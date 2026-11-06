@@ -124,12 +124,71 @@ test("record_note supersedes/confirms: 대상을 먼저 검증하고, paths 없�
   assert.equal(next.autoBound, undefined);
   assert.deepEqual(notesForFile(db, repo.id, "src/b.ts").map((hint) => hint.id), [next.id]);
 
-  const confirmed = (await callTool(context, "record_note", { repo: repo.name, confirms: [String(next.id)] })) as { id: number; confirms?: string[] };
-  assert.deepEqual(confirmed.confirms, [`#${next.id}`]);
-  const row = db.prepare("SELECT text FROM notes WHERE id = ?").get(confirmed.id) as { text: string };
-  assert.match(row.text, new RegExp(`확인: #${next.id}`));
-  assert.equal(notesForFile(db, repo.id, "src/b.ts").find((hint) => hint.id === next.id)?.confirmed?.count, 1);
+  // 확인만: 노트를 만들지 않는다 — 스텁 노트가 카드 자리와 검색을 차지하지 않게
+  const before = (db.prepare("SELECT COUNT(*) AS n FROM notes").get() as { n: number }).n;
+  const confirmed = (await callTool(context, "record_note", { repo: repo.name, confirms: [String(next.id)] })) as { confirmed?: string[]; id?: number };
+  assert.deepEqual(confirmed.confirmed, [`#${next.id}`]);
+  assert.equal(confirmed.id, undefined);
+  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM notes").get() as { n: number }).n, before, "노트가 늘지 않는다");
+  assert.deepEqual(notesForFile(db, repo.id, "src/b.ts").map((hint) => hint.id), [next.id]);
+  assert.equal(notesForFile(db, repo.id, "src/b.ts")[0].confirmed?.count, 1);
+  // 같은 에이전트가 다시 확인해도 쌓인다 (키에 at이 있다)
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await callTool(context, "record_note", { repo: repo.name, confirms: [String(next.id)] });
+  assert.equal(confirmationsOf(db, next.id).count, 2);
   await assert.rejects(callTool(context, "record_note", { repo: repo.name }), /text/);
+  await assert.rejects(callTool(context, "record_note", { repo: repo.name, supersedes: [`#${next.id}`] }), /이유/);
+  await assert.rejects(callTool(context, "record_note", { text: "너무 많음", repo: repo.name, confirms: Array.from({ length: 11 }, (_, i) => `#${next.id + i}`) }), /at most 10/);
+});
+
+test("처음 색인할 때 이미 있는 revert도 판단으로 남는다 — 최신 커밋부터 들어와 원본이 아직 없어도", async () => {
+  const db = memoryDb();
+  const dir = makeRepo([{ message: "feat: 캐시\n\nWhy: 느려서", files: { "src/a.ts": "export const a = 1;\n" }, date: "2024-01-01T10:00:00+09:00" }], "firstrevert");
+  const first = (await headSha(dir))!;
+  addCommit(dir, { message: `Revert "feat: 캐시"\n\nThis reverts commit ${first}.`, files: { "src/a.ts": "export const a = 0;\n" }, date: "2024-02-01T10:00:00+09:00" });
+  const repo = await addRepo(db, dir);
+  await syncRepo(db, repo);
+  assert.equal(isSuperseded(db, "commit", first), true, "한 번의 동기화로 revert가 기록된다");
+  assert.equal(fileContext(db, repo.id, "src/a.ts").why, null, "되돌려진 커밋의 Why는 고르지 않는다");
+});
+
+test("고리: 사슬을 거쳐 나를 뒤집은 노트는 뒤집을 수 없다", async () => {
+  const { db, repo } = await indexed("cycle");
+  const a = addNote(db, { text: "A", repoId: repo.id, paths: ["src/a.ts"], source: "cli" });
+  const b = addNote(db, { text: "B", repoId: repo.id, paths: ["src/a.ts"], source: "cli" });
+  const c = addNote(db, { text: "C", repoId: repo.id, paths: ["src/a.ts"], source: "cli" });
+  const ref = (note: { id: number }) => ({ kind: "note" as const, ref: String(note.id) });
+  recordVerdicts(db, { repoId: repo.id, by: ref(b), targets: [ref(a)], how: "note" });
+  recordVerdicts(db, { repoId: repo.id, by: ref(c), targets: [ref(b)], how: "note" });
+  assert.throws(() => recordVerdicts(db, { repoId: repo.id, by: ref(a), targets: [ref(c)], how: "note" }), /through a chain/);
+  assert.deepEqual(notesForFile(db, repo.id, "src/a.ts").map((hint) => hint.id), [c.id], "끝의 판단 하나는 남는다");
+  assert.throws(() => recordVerdicts(db, { repoId: repo.id, by: { kind: "user", ref: "cli" }, targets: [ref(c)], how: "note" }), /needs a note or a commit/);
+});
+
+test("export는 판단 기록도 꺼내고, remove 뒤에도 살아남은 노트의 판단 기록은 남는다", async () => {
+  const { removeRepo, exportRepoMemory, repoMemorySize } = await import("../src/core/indexer.js");
+  const { db, repo } = await indexed("exportv");
+  const old = addNote(db, { text: "옛 결정", repoId: repo.id, paths: ["src/a.ts"], source: "cli" });
+  const next = addNote(db, { text: "새 결정", repoId: repo.id, paths: ["src/a.ts"], source: "cli" });
+  recordVerdicts(db, { repoId: repo.id, by: { kind: "note", ref: String(next.id) }, targets: [{ kind: "note", ref: String(old.id) }], how: "note" });
+  recordVerdicts(db, { repoId: repo.id, by: { kind: "user", ref: "cli" }, targets: [{ kind: "note", ref: String(next.id) }], how: "confirm" });
+  assert.equal(repoMemorySize(db, repo.id).verdicts, 2);
+  const exported = exportRepoMemory(db, repo);
+  assert.deepEqual(exported.verdicts.map((item) => item.how).sort(), ["confirm", "note"]);
+  removeRepo(db, repo);
+  assert.equal(isSuperseded(db, "note", String(old.id)), true, "노트가 살아남으면 그 판단도 남는다");
+  assert.equal(confirmationsOf(db, next.id).count, 1);
+});
+
+test("최신 노트가 전부 뒤집혔어도 그 뒤의 멀쩡한 노트가 카드에 보인다", async () => {
+  const { db, repo } = await indexed("many");
+  const keep = addNote(db, { text: "지켜야 할 결정", repoId: repo.id, paths: ["src/a.ts"], source: "cli" });
+  const sha = (db.prepare("SELECT sha FROM commits WHERE repo_id = ?").get(repo.id) as { sha: string }).sha;
+  for (let i = 0; i < 13; i++) {
+    const note = addNote(db, { text: `뒤집힐 ${i}`, repoId: repo.id, paths: ["src/a.ts"], source: "cli" });
+    recordVerdicts(db, { repoId: repo.id, by: { kind: "commit", ref: sha }, targets: [{ kind: "note", ref: String(note.id) }], how: "trailer" });
+  }
+  assert.deepEqual(notesForFile(db, repo.id, "src/a.ts").map((hint) => hint.id), [keep.id]);
 });
 
 test("커밋이 남기는 판단: git revert와 Supersedes: 트레일러가 커밋을 뒤집고, 뒤집힌 커밋의 의도는 카드의 Why에서 빠진다", async () => {

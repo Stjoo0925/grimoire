@@ -13,7 +13,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { refreshWhy, storeTrailers } from "./capture";
-import { recordCommitVerdicts } from "./supersede";
+import { recordCommitVerdicts, verdictsOfRepo, type Verdict } from "./supersede";
 import { BLOB_BATCH_BYTES, extractRefNames, extractSymbols, headerComment, indexableFiles, listHeadTree, readBlobs, splitIdentifier, type CodeSymbol, type HeadFile } from "./code";
 import { blameLines, historyOrder, isRuleFile, parseRules, RULE_FILES_MAX, unitHistory, type RuleUnit } from "./rules";
 import { addCochange, changeKey, cochangeInput, extractImportSpecs, needsCochangeBackfill, rebuildCochange, resolveImportSpecs } from "./context";
@@ -113,10 +113,10 @@ export function removeRepo(db: DB, repo: RepoRow): void {
  * 레포를 지우면 함께 사라지는, git에는 없는 기억의 크기 — 커밋에 묶인 세션 기록·트레일러(commit_context)와 노트.
  * 색인(커밋·코드·규칙·공변경)은 다시 만들 수 있지만 이 둘은 못 만든다. remove가 지우기 전에 보이고 확인을 받는다 (docs/feature-audit.md F5).
  */
-export function repoMemorySize(db: DB, repoId: number): { context: number; notes: number } {
+export function repoMemorySize(db: DB, repoId: number): { context: number; notes: number; verdicts: number } {
   const context = (db.prepare("SELECT COUNT(*) AS n FROM commit_context WHERE repo_id = ?").get(repoId) as { n: number }).n;
   const notes = (db.prepare("SELECT COUNT(*) AS n FROM notes WHERE repo_id = ?").get(repoId) as { n: number }).n;
-  return { context, notes };
+  return { context, notes, verdicts: verdictsOfRepo(db, repoId).length };
 }
 
 export interface RepoMemoryExport {
@@ -124,6 +124,8 @@ export interface RepoMemoryExport {
   exportedAt: string;
   notes: { id: number; text: string; tags: string; paths: unknown; source: string; createdAt: string }[];
   commits: { sha: string; subject: string; authoredAt: string; context: { kind: string; text: string }[] }[];
+  /** 확인·뒤집기 기록 (supersede.ts) — 노트는 레포를 지워도 남지만 이 기록은 꺼내 두어야 되살릴 수 있다 */
+  verdicts: Verdict[];
 }
 
 /** git에 없는 기억을 JSON으로 꺼낸다 — remove 전에, 또는 백업으로. 색인은 넣지 않는다(다시 만들 수 있다). */
@@ -149,7 +151,7 @@ export function exportRepoMemory(db: DB, repo: RepoRow): RepoMemoryExport {
     entry.context.push({ kind: row.kind, text: row.text });
     commits.set(row.sha, entry);
   }
-  return { repo: { name: repo.name, path: repo.path, remote: repo.remote_url }, exportedAt: new Date().toISOString(), notes, commits: [...commits.values()] };
+  return { repo: { name: repo.name, path: repo.path, remote: repo.remote_url }, exportedAt: new Date().toISOString(), notes, commits: [...commits.values()], verdicts: verdictsOfRepo(db, repo.id) };
 }
 
 export function listRepos(db: DB): RepoRow[] {

@@ -1,6 +1,6 @@
 # 결정 뒤집기 — "틀린 결정이 계속 나오지 않게" (2026-11-06)
 
-> 상태: **구현됨 (2026-11-06, 미배포).** `src/core/supersede.ts`, 마이그레이션 14, `record_note supersedes/confirms`, CLI `note --supersedes/--confirms`·`note confirm`·`note rm`·`review`, 색인 때 `Supersedes:`·revert. 성공 기준(§6)의 단위 테스트는 `tests/supersede.test.ts`. §3-2의 표는 repo_id가 NULL일 수 있고(레포 없는 노트) `how`에 `confirm`이 더 있다. 실제 레포 측정(§6 넷째 줄)은 아직 하지 않았다.
+> 상태: **구현됨 (2026-11-06, 미배포).** `src/core/supersede.ts`, 마이그레이션 14, `record_note supersedes/confirms`, CLI `note --supersedes/--confirms`·`note confirm`·`note rm`·`review`, 색인 때 `Supersedes:`·revert. 성공 기준(§6)의 단위 테스트는 `tests/supersede.test.ts`. §3-2의 표는 repo_id가 NULL일 수 있고(레포 없는 노트) `how`에 `confirm`이 더 있다. 실제 레포 측정(§6 넷째 줄)은 아직 하지 않았다. 리뷰 뒤 고친 것(마이그레이션 15): 확인만은 노트를 만들지 않고 `by_kind = user`로 남긴다(스텁 노트가 카드를 차지하지 않게), 전체 sha의 revert는 풀어 보지 않고 바로 적는다(색인은 최신부터 들어와 원본이 아직 없을 수 있다), 고리 검사는 사슬 전체를 본다, export·remove가 판단 기록을 포함한다.
 
 ## 0. 한 줄
 

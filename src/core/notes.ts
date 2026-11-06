@@ -181,9 +181,9 @@ export function notesForFile(db: DB, repoId: number, file: string, limit = NOTES
   const rows = db
     .prepare(
       `SELECT n.id, n.text, n.source, n.created_at, json_extract(j.value, '$.blob') AS blob, json_extract(j.value, '$.how') AS how FROM notes n, json_each(n.paths) AS j
-        WHERE n.repo_id = ? AND json_extract(j.value, '$.path') = ? ORDER BY n.created_at DESC, n.id DESC LIMIT ?`,
+        WHERE n.repo_id = ? AND json_extract(j.value, '$.path') = ? ORDER BY n.created_at DESC, n.id DESC`,
     )
-    .all(repoId, file, limit * 4) as { id: number; text: string; source: string; created_at: string; blob: string | null; how: string | null }[];
+    .all(repoId, file) as { id: number; text: string; source: string; created_at: string; blob: string | null; how: string | null }[];
   if (rows.length === 0) return [];
   const current =
     (

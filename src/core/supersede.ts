@@ -5,12 +5,16 @@
  * 사건(커밋)은 바뀌지 않고, 판단(노트·트레일러)은 뒤집힐 수 있고, 확인은 쌓인다.
  *  - supersede: 새 노트·커밋이 옛 노트·커밋을 **명시적으로** 가리켜 "이제 맞지 않는다"고 한다. 옛것은 남고 표시만 붙는다.
  *  - confirm:   노트를 다시 보고 "아직 맞다"고 한다. 묶인 파일의 blob을 지금 것으로 다시 적어 stale이 풀린다.
+ *               확인은 노트를 만들지 않는다 — 사람(cli)·에이전트(mcp)가 직접 남긴 기록(by_kind = user)이다. 말을 붙이면 그 말은 노트가 되고
+ *               노트가 확인의 주체가 된다.
  * 유사도·나이로 자동으로 하지 않는다(규칙 노트 #39의 실패). AI(mcp)가 사람(cli)의 노트를 뒤집으면 숨기지 않고 둘 다 보인다(disputed).
  */
 import type { DB } from "./db";
 import { parseNotePaths, type NotePath } from "./note-doc";
 
 export type RefKind = "note" | "commit";
+/** 판단의 주체 — 노트, 커밋, 또는 노트 없이 확인만 남긴 사람·에이전트(user: ref = "cli" | "mcp") */
+export type ByKind = RefKind | "user";
 /** 어떻게 뒤집혔나 — note: record_note supersedes, confirm: 다시 보고 맞다, trailer: 커밋의 Supersedes:, revert: git revert */
 export type VerdictHow = "note" | "confirm" | "trailer" | "revert";
 
@@ -20,10 +24,15 @@ export interface ResolvedRef {
   ref: string;
 }
 
+export interface ByRef {
+  kind: ByKind;
+  ref: string;
+}
+
 export interface Verdict {
   targetKind: RefKind;
   targetRef: string;
-  byKind: RefKind;
+  byKind: ByKind;
   byRef: string;
   how: VerdictHow;
   at: string;
@@ -31,6 +40,11 @@ export interface Verdict {
 
 const NOTE_TOKEN = /^#?(\d+)$/;
 const SHA_TOKEN = /^[0-9a-f]{7,40}$/i;
+const FULL_SHA = /^[0-9a-f]{40}$/i;
+/** record_note 하나가 뒤집거나 확인하는 대상 수 상한 — 넘으면 자르지 않고 거절한다 */
+export const VERDICTS_MAX = 10;
+/** 노트 하나에 물려주는 파일 수 상한 (notes.ts PATHS_MAX와 같다) */
+const INHERIT_MAX = 20;
 
 /** "#12" → 노트, 7자 이상 16진수 → 이 레포의 커밋. 없거나 여럿이면 오류 — 틀린 참조를 조용히 저장하지 않는다 */
 export function resolveRef(db: DB, repoId: number | null, token: string): ResolvedRef {
@@ -52,7 +66,9 @@ export function resolveRef(db: DB, repoId: number | null, token: string): Resolv
   throw new Error(`"${text}" is neither a note (#12) nor a commit sha`);
 }
 
+/** 여러 토큰을 푼다 — VERDICTS_MAX를 넘으면 자르지 않고 오류 (조용한 손실 금지, docs/feature-audit.md F3) */
 export function resolveRefs(db: DB, repoId: number | null, tokens: string[]): ResolvedRef[] {
+  if (tokens.length > VERDICTS_MAX) throw new Error(`at most ${VERDICTS_MAX} targets per note (${tokens.length} given) — split the note`);
   const out: ResolvedRef[] = [];
   for (const token of tokens) {
     const resolved = resolveRef(db, repoId, token);
@@ -61,13 +77,15 @@ export function resolveRefs(db: DB, repoId: number | null, tokens: string[]): Re
   return out;
 }
 
-export function refLabel(item: { kind: RefKind; ref: string }): string {
-  return item.kind === "note" ? `#${item.ref}` : item.ref.slice(0, 10);
+export function refLabel(item: { kind: ByKind; ref: string }): string {
+  if (item.kind === "note") return `#${item.ref}`;
+  if (item.kind === "commit") return item.ref.slice(0, 10);
+  return item.ref;
 }
 
 export interface VerdictInput {
   repoId: number | null;
-  by: ResolvedRef;
+  by: ByRef;
   targets: ResolvedRef[];
   how: VerdictHow;
   at?: string;
@@ -80,13 +98,15 @@ export interface VerdictResult {
 }
 
 /**
- * 뒤집기·확인을 기록한다. 자기 자신, 그리고 나를 이미 뒤집은 것은 뒤집을 수 없다(고리). 이미 뒤집힌 대상은 알리고 그대로 기록한다.
+ * 뒤집기·확인을 기록한다. 자기 자신, 그리고 나를 이미 뒤집은 것(몇 단계를 거쳐서라도)은 뒤집을 수 없다 — 고리가 생기면 모두 숨겨진다.
+ * 이미 뒤집힌 대상은 알리고 그대로 기록한다. 뒤집기(confirm 아님)의 주체는 노트나 커밋이어야 한다 — 뒤집는 이유가 곧 그 기록이다.
  * confirm은 대상 노트가 묶인 파일의 blob을 지금 HEAD로 다시 적는다 — "파일은 바뀌었지만 이 결정은 그대로"의 유일한 표현.
  */
 export function recordVerdicts(db: DB, input: VerdictInput): VerdictResult {
   const at = input.at ?? new Date().toISOString();
   const applied: Verdict[] = [];
   const notes: string[] = [];
+  if (input.how !== "confirm" && input.by.kind === "user") throw new Error("superseding needs a note or a commit as the reason");
   const insert = db.prepare(
     "INSERT OR IGNORE INTO supersessions (repo_id, target_kind, target_ref, by_kind, by_ref, how, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
   );
@@ -94,8 +114,8 @@ export function recordVerdicts(db: DB, input: VerdictInput): VerdictResult {
     for (const target of input.targets) {
       if (target.kind === input.by.kind && target.ref === input.by.ref) throw new Error(`${refLabel(target)} cannot supersede itself`);
       if (input.how !== "confirm") {
-        if (supersedersOf(db, input.by).some((item) => item.byKind === target.kind && item.byRef === target.ref)) {
-          throw new Error(`${refLabel(target)} already supersedes ${refLabel(input.by)} — supersede a newer note instead`);
+        if (input.by.kind !== "user" && supersedes(db, target, { kind: input.by.kind, ref: input.by.ref })) {
+          throw new Error(`${refLabel(target)} already supersedes ${refLabel(input.by)} (directly or through a chain) — supersede a newer note instead`);
         }
         const already = supersedersOf(db, target);
         if (already.length > 0) notes.push(`${refLabel(target)} is already superseded by ${already.map((item) => refLabel({ kind: item.byKind, ref: item.byRef })).join(", ")}`);
@@ -108,21 +128,38 @@ export function recordVerdicts(db: DB, input: VerdictInput): VerdictResult {
   return { applied, notes };
 }
 
+/** from이 to를 뒤집는가 — 직접, 또는 from → … → to 사슬로. 고리를 막는 데 쓴다 (너비 우선, 방문한 것은 다시 안 본다) */
+function supersedes(db: DB, from: ResolvedRef, to: ResolvedRef): boolean {
+  const seen = new Set<string>();
+  const queue: ResolvedRef[] = [from];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    const key = `${current.kind}:${current.ref}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    for (const verdict of supersededBy(db, current)) {
+      if (verdict.targetKind === to.kind && verdict.targetRef === to.ref) return true;
+      queue.push({ kind: verdict.targetKind, ref: verdict.targetRef });
+    }
+  }
+  return false;
+}
+
 /** 이것을 뒤집은 것들 (confirm 제외), 최근 것부터 */
 export function supersedersOf(db: DB, target: { kind: RefKind; ref: string }): Verdict[] {
   return (
     db
       .prepare("SELECT target_kind, target_ref, by_kind, by_ref, how, at FROM supersessions WHERE target_kind = ? AND target_ref = ? AND how <> 'confirm' ORDER BY at DESC")
-      .all(target.kind, target.ref) as { target_kind: RefKind; target_ref: string; by_kind: RefKind; by_ref: string; how: VerdictHow; at: string }[]
+      .all(target.kind, target.ref) as VerdictRow[]
   ).map(toVerdict);
 }
 
 /** 이것이 뒤집은 것들 (confirm 제외) */
-export function supersededBy(db: DB, by: { kind: RefKind; ref: string }): Verdict[] {
+export function supersededBy(db: DB, by: { kind: ByKind; ref: string }): Verdict[] {
   return (
     db
       .prepare("SELECT target_kind, target_ref, by_kind, by_ref, how, at FROM supersessions WHERE by_kind = ? AND by_ref = ? AND how <> 'confirm' ORDER BY at DESC")
-      .all(by.kind, by.ref) as { target_kind: RefKind; target_ref: string; by_kind: RefKind; by_ref: string; how: VerdictHow; at: string }[]
+      .all(by.kind, by.ref) as VerdictRow[]
   ).map(toVerdict);
 }
 
@@ -141,13 +178,38 @@ export function isSuperseded(db: DB, kind: RefKind, ref: string): boolean {
 
 /** 검색 결과에 붙일 한 토막 — 가장 최근에 뒤집은 것 ("#31" 또는 sha 10자), 없으면 null */
 export function supersededMark(db: DB, kind: RefKind, ref: string): string | null {
-  const latest = supersedersOf(db, kind === "note" ? { kind, ref } : { kind, ref })[0];
+  const latest = supersedersOf(db, { kind, ref })[0];
   return latest ? refLabel({ kind: latest.byKind, ref: latest.byRef }) : null;
 }
 
 /** 노트를 지우면 그 노트가 남긴 판단도 지운다 (그 노트를 가리킨 판단은 남는다 — 대상이 사라졌다는 것도 기록이다) */
 export function forgetVerdictsBy(db: DB, noteId: number): void {
   db.prepare("DELETE FROM supersessions WHERE by_kind = 'note' AND by_ref = ?").run(String(noteId));
+}
+
+/** 뒤집거나 확인하는 노트들이 묶인 파일 — 새 판단이 옛 판단이 보이던 바로 그 자리에서 보이게 물려받는다 (MCP·CLI 공통) */
+export function inheritedNotePaths(db: DB, targets: ResolvedRef[]): string[] {
+  const out: string[] = [];
+  for (const target of targets) {
+    if (target.kind !== "note") continue;
+    const row = db.prepare("SELECT paths FROM notes WHERE id = ?").get(Number(target.ref)) as { paths: string } | undefined;
+    for (const item of parseNotePaths(row?.paths)) if (!out.includes(item.path)) out.push(item.path);
+  }
+  return out.slice(0, INHERIT_MAX);
+}
+
+/** 레포의 판단 기록 전부 — export용. 이 레포의 것(repo_id)과, 이 레포 노트를 가리키거나 그 노트가 남긴 것 */
+export function verdictsOfRepo(db: DB, repoId: number): Verdict[] {
+  return (
+    db
+      .prepare(
+        `SELECT DISTINCT s.target_kind, s.target_ref, s.by_kind, s.by_ref, s.how, s.at FROM supersessions s
+          LEFT JOIN notes t ON s.target_kind = 'note' AND t.id = CAST(s.target_ref AS INTEGER)
+          LEFT JOIN notes b ON s.by_kind = 'note' AND b.id = CAST(s.by_ref AS INTEGER)
+          WHERE s.repo_id = ? OR t.repo_id = ? OR b.repo_id = ? ORDER BY s.at`,
+      )
+      .all(repoId, repoId, repoId) as VerdictRow[]
+  ).map(toVerdict);
 }
 
 /** 확인: 묶인 파일의 blob을 지금 HEAD의 것으로 다시 적는다 — 그 뒤로는 stale이 아니다. 경로·출처(how)는 그대로 */
@@ -164,7 +226,16 @@ function refreshNoteBlobs(db: DB, noteId: number): void {
   db.prepare("UPDATE notes SET paths = ? WHERE id = ?").run(JSON.stringify(refreshed), noteId);
 }
 
-function toVerdict(row: { target_kind: RefKind; target_ref: string; by_kind: RefKind; by_ref: string; how: VerdictHow; at: string }): Verdict {
+interface VerdictRow {
+  target_kind: RefKind;
+  target_ref: string;
+  by_kind: ByKind;
+  by_ref: string;
+  how: VerdictHow;
+  at: string;
+}
+
+function toVerdict(row: VerdictRow): Verdict {
   return { targetKind: row.target_kind, targetRef: row.target_ref, byKind: row.by_kind, byRef: row.by_ref, how: row.how, at: row.at };
 }
 
@@ -175,7 +246,8 @@ const REF_TOKEN = /#\d+|\b[0-9a-f]{7,40}\b/gi;
 
 /**
  * 커밋 본문의 `Supersedes:` 트레일러와 `This reverts commit <sha>`를 판단으로 기록한다 (색인 때·백필 때).
- * 맞지 않는 참조(없는 sha·다른 레포의 노트)는 조용히 건너뛴다 — 커밋은 이미 일어난 일이라 오류로 막을 수 없다.
+ * 전체 sha(40자)는 풀어 보지 않고 그대로 적는다 — 색인은 최신 커밋부터 들어오므로(rev-list) 되돌린 원본이 아직 없을 수 있다.
+ * 그 커밋이 끝내 색인되지 않으면 행은 아무 데서도 읽히지 않는다(해롭지 않다). 짧은 sha·노트 번호는 풀어 보고, 맞지 않으면 건너뛴다.
  */
 export function recordCommitVerdicts(db: DB, repoId: number, sha: string, body: string, supersedesValues: string[]): number {
   const by: ResolvedRef = { kind: "commit", ref: sha };
@@ -183,7 +255,7 @@ export function recordCommitVerdicts(db: DB, repoId: number, sha: string, body: 
   const apply = (tokens: string[], how: VerdictHow) => {
     for (const token of tokens) {
       try {
-        const target = resolveRef(db, repoId, token);
+        const target: ResolvedRef = FULL_SHA.test(token) ? { kind: "commit", ref: token.toLowerCase() } : resolveRef(db, repoId, token);
         if (target.kind === by.kind && target.ref === by.ref) continue;
         recorded += recordVerdicts(db, { repoId, by, targets: [target], how }).applied.length;
       } catch {

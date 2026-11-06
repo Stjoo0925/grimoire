@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.4](https://github.com/Stjoo0925/grimoire/compare/v0.12.3...v0.12.4) (2026-11-06)
+
+
+### 버그 수정
+
+* **impact:** 의도로만 찾은 후보를 0.00 대신 intent로 표시하고, 최상위 파일도 같은 폴더 근거를 받는다 ([#50](https://github.com/Stjoo0925/grimoire/issues/50)) ([63946f2](https://github.com/Stjoo0925/grimoire/commit/63946f21d500d7ae0da933117f473fec81d08607))
+
 ## [0.12.3](https://github.com/Stjoo0925/grimoire/compare/v0.12.2...v0.12.3) (2026-11-02)
 
 

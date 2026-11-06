@@ -27,7 +27,8 @@ import { indexCommitCode } from "../core/diffs";
 import { CancelledError, worktreeRoots } from "../core/git";
 import { addRepo, discoverRepos, listRepos, matchRepos, relativeToRepo, resolveRepoFile, syncRepo } from "../core/indexer";
 import { parseNotePaths } from "../core/note-doc";
-import { addNote, PATHS_MAX, TAG_CHARS, TAGS_MAX } from "../core/notes";
+import { addNote, notesCiting, PATHS_MAX, TAG_CHARS, TAGS_MAX } from "../core/notes";
+import { recordVerdicts, refLabel, resolveRefs, supersededMark, type ResolvedRef } from "../core/supersede";
 import { commitDetail, repoOverview, repoSummaries } from "../core/overview";
 import { search, type SearchHit } from "../core/search";
 import { slimCommit, slimFileContext, slimImpact, slimOverview, slimRepos, slimSearch, type Detail } from "./format";
@@ -82,6 +83,9 @@ export function emptyHint(context: ToolContext): string | undefined {
  * 영어로 쓴다: 같은 뜻이면 토큰이 적고, 영어로 묻는 세션에서도 도구를 고르게. annotations는 클라이언트가
  * 확인 없이 불러도 되는지 판단하는 힌트다(읽기 도구는 readOnlyHint, add_repo는 같은 경로면 다시 불러도 같다. record_note는 부를 때마다 노트가 생겨 MCP 기본값(idempotentHint 없음 = false) 그대로 둔다).
  */
+/** record_note 하나가 뒤집거나 확인하는 대상 수 상한 */
+const VERDICTS_MAX = 10;
+
 export const TOOLS = [
   {
     name: "search_memory",
@@ -161,16 +165,17 @@ export const TOOLS = [
   },
   {
     name: "record_note",
-    description: "Save a decision to keep; paths = files it concerns.",
+    description: "Save decision; paths=files; supersedes/confirms=#N|sha",
     inputSchema: {
       type: "object",
       properties: {
-        text: { type: "string", description: "line 1 = title" },
+        text: { type: "string", description: "line 1=title" },
         repo: { type: "string" },
         tags: { type: "array", items: { type: "string", maxLength: TAG_CHARS }, maxItems: TAGS_MAX },
         paths: { type: "array", items: { type: "string" }, maxItems: PATHS_MAX },
+        supersedes: { type: "array", items: { type: "string" } },
+        confirms: { type: "array", items: { type: "string" } },
       },
-      required: ["text"],
     },
   },
 ] as const;
@@ -250,6 +255,17 @@ export class ToolError extends Error {}
 
 const BUSY_MESSAGE = "다른 grimoire 프로세스가 DB를 쓰는 중입니다. 잠시 후 다시 시도하세요.";
 const CANCELLED_MESSAGE = "요청이 취소되었습니다";
+/** 뒤집거나 확인하는 노트들이 묶인 파일 — 새 판단이 같은 자리에서 보이게 물려받는다 */
+function inheritedPaths(db: DB, targets: ResolvedRef[]): string[] {
+  const out: string[] = [];
+  for (const target of targets) {
+    if (target.kind !== "note") continue;
+    const row = db.prepare("SELECT paths FROM notes WHERE id = ?").get(Number(target.ref)) as { paths: string } | undefined;
+    for (const item of parseNotePaths(row?.paths)) if (!out.includes(item.path)) out.push(item.path);
+  }
+  return out.slice(0, PATHS_MAX);
+}
+
 /** record_note가 DB 잠금에 걸렸을 때 다시 해 보는 횟수와 간격 */
 const NOTE_RETRIES = 2;
 const NOTE_RETRY_MS = 200;
@@ -387,16 +403,18 @@ async function runTool(
           : [];
       const repoId = repoFilter(args.repo)?.id;
       const contextOf = (detail: { repoId: number; sha: string }) => commitContextOf(db, detail.repoId, detail.sha);
+      // 이 커밋을 뒤집은 것과 이 커밋을 근거로 적은 노트 (supersede.ts, notes.ts refs)
+      const extraOf = (detail: { repoId: number; sha: string }) => ({ cited: notesCiting(db, detail.repoId, detail.sha), superseded: supersededMark(db, "commit", detail.sha) });
       if (shas.length === 0) {
         const detail = await commitDetail(db, sha!, { repoId, maxDiffLines: num(args.max_diff_lines), paths, signal });
         if ("error" in detail) throw new ToolError([detail.error, ...(detail.candidates ?? [])].join("\n"));
-        return slimCommit(detail, me, contextOf(detail));
+        return slimCommit(detail, me, contextOf(detail), extraOf(detail));
       }
       // 여러 커밋 한 번에 — 검색 결과 상위 몇 개를 왕복 없이 비교할 때. 응답이 커지지 않게 커밋당 diff를 줄인다
       const commits = await Promise.all(
         shas.map(async (item) => {
           const detail = await commitDetail(db, item, { repoId, maxDiffLines: num(args.max_diff_lines) ?? MULTI_DIFF_LINES, paths, signal });
-          return "error" in detail ? { sha: item, error: [detail.error, ...(detail.candidates ?? [])].join("\n") } : slimCommit(detail, me, contextOf(detail));
+          return "error" in detail ? { sha: item, error: [detail.error, ...(detail.candidates ?? [])].join("\n") } : slimCommit(detail, me, contextOf(detail), extraOf(detail));
         }),
       );
       return { commits };
@@ -472,11 +490,21 @@ async function runTool(
       return { added, failed };
     }
     case "record_note": {
-      const text = str(args.text);
+      // 판단의 뒤집기·확인 (supersede.ts) — 대상은 먼저 풀어 본다: 틀린 참조로 노트만 남는 일이 없게
+      const tokensOf = (value: unknown, name: string): string[] => {
+        if (value === undefined) return [];
+        if (!Array.isArray(value)) throw new ToolError(`${name}는 문자열 배열이어야 합니다`);
+        return value.slice(0, VERDICTS_MAX).filter((item): item is string => typeof item === "string" && item.trim() !== "");
+      };
+      const supersedeTokens = tokensOf(args.supersedes, "supersedes");
+      const confirmTokens = tokensOf(args.confirms, "confirms");
+      const text = str(args.text) || (confirmTokens.length > 0 ? `확인: ${confirmTokens.map((token) => (token.startsWith("#") ? token : `#${token}`)).join(", ")} — 다시 보았고 아직 맞다` : "");
       if (!text) throw new ToolError("text가 필요합니다");
       if (args.tags !== undefined && !Array.isArray(args.tags)) throw new ToolError("tags는 문자열 배열이어야 합니다");
       // 상한(TAGS_MAX개·TAG_CHARS자)을 넘으면 오류 대신 자른다 — 거대한 배열을 끝까지 훑지도 않는다
       const tags = (args.tags ?? []).slice(0, TAGS_MAX).filter((tag): tag is string => typeof tag === "string");
+      // 잘라 낸 수는 알린다 — 조용히 잃지 않게 (docs/feature-audit.md F3)
+      const tagsCut = Math.max(0, (args.tags ?? []).length - TAGS_MAX);
       if (args.paths !== undefined && !Array.isArray(args.paths)) throw new ToolError("paths는 문자열 배열이어야 합니다");
       const given = (args.paths ?? []).slice(0, PATHS_MAX).filter((item): item is string => typeof item === "string" && item.trim() !== "");
       // 파일을 묶는 노트는 레포가 있어야 한다 — repo를 안 줬으면 작업 레포(절대경로면 그 경로가 속한 레포)
@@ -484,11 +512,26 @@ async function runTool(
       const repo = repoFilter(args.repo) ?? (located ? (await resolveRepoFile(db, located, signal))?.repo : undefined) ?? (given.length > 0 ? current : undefined);
       const repoId = repo?.id ?? null;
       let paths = repo ? given.map((item) => (path.isAbsolute(item) ? relativeToRepo(repo.path, item) : item)) : [];
-      // paths를 아예 안 줬으면(빈 배열 []은 "묶지 않음") 지금 작업 폴더에서 바뀐 소스 파일에 묶는다
+      // 뒤집기·확인의 대상 — sha는 레포가 있어야 풀린다 (repo를 안 줬으면 작업 레포)
+      const verdictRepo = repo ?? current;
+      let supersedes: ResolvedRef[] = [];
+      let confirms: ResolvedRef[] = [];
+      try {
+        supersedes = resolveRefs(db, verdictRepo?.id ?? null, supersedeTokens);
+        confirms = resolveRefs(db, verdictRepo?.id ?? null, confirmTokens);
+      } catch (error) {
+        throw new ToolError(error instanceof Error ? error.message : String(error));
+      }
+      // paths를 아예 안 줬으면(빈 배열 []은 "묶지 않음") 지금 작업 폴더에서 바뀐 소스 파일에 묶는다.
+      // 뒤집거나 확인하는 노트가 있으면 그 노트가 묶인 파일을 물려받는다 — 새 판단이 옛 판단이 보이던 바로 그 자리에서 보이게
       let bound = repo;
       let autoBound = false;
       let tooMany = false;
-      if (args.paths === undefined) {
+      const inherited = args.paths === undefined ? inheritedPaths(db, [...supersedes, ...confirms]) : [];
+      if (inherited.length > 0 && verdictRepo) {
+        paths = inherited;
+        bound = verdictRepo;
+      } else if (args.paths === undefined) {
         const target = repo ?? current;
         if (target) {
           const auto = await autoBindPaths(db, target.id, text, await checkoutOf(target.path, context.cwd, signal), signal);
@@ -503,15 +546,23 @@ async function runTool(
       // 다른 grimoire 프로세스가 쓰는 중이면 잠깐 뒤 다시 — 사용자가 남기라고 한 노트라 바로 실패시키지 않는다
       for (let attempt = 0; ; attempt++) {
         try {
-          const note = addNote(db, { text, repoId: bound?.id ?? null, tags, paths, source: "mcp" });
+          const note = addNote(db, { text, repoId: bound?.id ?? null, tags, paths: autoBound ? [] : paths, autoPaths: autoBound ? paths : [], source: "mcp" });
+          const by: ResolvedRef = { kind: "note", ref: String(note.id) };
+          const warnings: string[] = [];
+          if (supersedes.length > 0) warnings.push(...recordVerdicts(db, { repoId: bound?.id ?? null, by, targets: supersedes, how: "note" }).notes);
+          if (confirms.length > 0) warnings.push(...recordVerdicts(db, { repoId: bound?.id ?? null, by, targets: confirms, how: "confirm" }).notes);
           return {
             recorded: true,
             id: note.id,
             createdAt: note.created_at,
+            ...(supersedes.length > 0 ? { supersedes: supersedes.map(refLabel) } : {}),
+            ...(confirms.length > 0 ? { confirms: confirms.map(refLabel) } : {}),
+            ...(warnings.length > 0 ? { warnings } : {}),
             ...(note.paths !== "[]" ? { paths: parseNotePaths(note.paths).map((item) => item.path) } : {}),
             ...(autoBound ? { autoBound: true } : {}),
             ...(tooMany ? { note: `바뀐 소스 파일이 ${AUTO_BIND_MAX}개를 넘어 파일에 묶지 않았습니다` } : {}),
             ...(note.redacted ? { redacted: "비밀로 보이는 값(토큰·비밀번호 등)을 [redacted]로 바꿔 저장했습니다" } : {}),
+            ...(note.tagsDropped + tagsCut > 0 ? { tagsDropped: note.tagsDropped + tagsCut } : {}),
           };
         } catch (error) {
           if (!isBusyError(error) || attempt >= NOTE_RETRIES) throw error;

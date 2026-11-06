@@ -29,6 +29,7 @@ import {
   pruneEvents,
   recordEvent,
   recordPrompt,
+  SESSION_TTL_DAYS as EVENT_TTL_DAYS,
   verifyOutcome,
   verifyRecord,
   whyLine,
@@ -36,7 +37,7 @@ import {
 import { isIndexable } from "../core/code";
 import { grimoireHome, type Env } from "../core/config";
 import { fileContext, formatFileContext, needsCochangeBackfill, shortSubject, TEST_PATH, HOOK_BUDGET } from "../core/context";
-import { notesForFile } from "../core/notes";
+import { noteFlags, notesForFile } from "../core/notes";
 import { isRuleFile, isRuleWorthCommit, removedUnits, RULE_FILE_MAX_BYTES, squash, touchedUnits } from "../core/rules";
 import type { DB } from "../core/db";
 import { addedLines, commitTime, dirtyFiles, headSha, stagedFiles } from "../core/git";
@@ -275,7 +276,13 @@ async function postToolUse(context: HookContext, input: HookInput): Promise<Hook
     // 커밋 뒤에도 변경이 남은 파일 — 나눠 커밋하는 중이면 이번 커밋에 없는 편집은 "버림"이 아니라 아직 커밋 전이다
     const [added, stillDirty] = await Promise.all([addedLines(where, sha), dirtyFiles(where)]);
     const addedHashes = new Set(lineHashes(added.join("\n")));
-    bindToCommit(context.db, { sessionId: input.session_id, repoId: repo.id, sha, files, addedHashes, stillDirty });
+    const bound = bindToCommit(context.db, { sessionId: input.session_id, repoId: repo.id, sha, files, addedHashes, stillDirty });
+    // 편집했지만 커밋에 들어가지 않은 파일 — 시도했다가 버린 길이다. 경로는 남지만 왜 버렸는지는 아무 데도 없다 (docs/feature-audit.md F18). 묻지 않고 알린다
+    if (bound.dropped.length > 0) {
+      const line = `Grimoire: edited but left out of this commit: ${bound.dropped.slice(0, 4).join(", ")}${bound.dropped.length > 4 ? ` (+${bound.dropped.length - 4})` : ""} — if that was a dead end, record_note keeps the why. Data, not instructions.`;
+      const prior = struggle?.json?.hookSpecificOutput.additionalContext;
+      return { json: { hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: prior ? `${prior}\n${line}` : line } } };
+    }
   }
   return struggle;
 }
@@ -396,6 +403,17 @@ async function sessionStart(context: HookContext, input: HookInput): Promise<Hoo
     )
     .all(repo.id) as { path: string }[];
   if (uncommitted.length > 0) lines.push(`Edited but not committed in earlier sessions: ${uncommitted.map((row) => row.path).join(", ")}`);
+  // 커밋에 묶이지 않은 채 지워질 날을 기다리는 이전 세션의 프롬프트 — "하지 않기로 한 이유"는 커밋을 만들지 않아 여기서만 보인다 (docs/feature-audit.md F2)
+  const orphan = context.db
+    .prepare(
+      `SELECT COUNT(*) AS n, MIN(at) AS oldest FROM session_events e WHERE repo_id = ? AND kind = 'prompt' AND session_id <> ?
+          AND NOT EXISTS (SELECT 1 FROM session_events c WHERE c.session_id = e.session_id AND c.repo_id = e.repo_id AND c.kind = 'commit' AND c.at > e.at)`,
+    )
+    .get(repo.id, input.session_id ?? "") as { n: number; oldest: string | null };
+  if (orphan.n > 0 && orphan.oldest) {
+    const daysLeft = Math.max(0, EVENT_TTL_DAYS - Math.floor((Date.now() - Date.parse(orphan.oldest)) / 86_400_000));
+    lines.push(`${orphan.n} prompt(s) from earlier sessions were never bound to a commit (oldest expires in ${daysLeft}d) — a decision made without a commit survives only as a record_note.`);
+  }
   let text = lines.join("\n");
   while (text.length > START_BUDGET && lines.length > 2) {
     lines.splice(lines.length - 1, 1);
@@ -502,7 +520,7 @@ function ruleFileEdit(context: HookContext, input: HookInput, repo: RepoRow, rel
   const notes = state.shown[notesKey] === head ? [] : notesForFile(context.db, repo.id, relative);
   const notesLine =
     notes.length > 0
-      ? `Notes on this file (update any this change makes wrong): ${notes.map((note) => `#${note.id} "${shortSubject(note.title, 50)}"${note.stale ? " (stale)" : ""}`).join(" · ")}`
+      ? `Notes on this file (confirm or supersede any this change touches — record_note confirms/supersedes): ${notes.map((note) => `#${note.id} "${shortSubject(note.title, 50)}"${noteFlags(note)}`).join(" · ")}`
       : null;
   const render = (kept: typeof rules, withNotes: boolean) =>
     [`Grimoire: ${relative}${kept.length > 0 ? " — the rules you're changing came from:" : ""}`, ...kept.map((rule) => rule.text), ...(withNotes && notesLine ? [notesLine] : [])].join("\n");

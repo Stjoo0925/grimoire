@@ -4,8 +4,9 @@
  * 걸러진 커밋도 저장·검색은 된다. 개요의 "주요 커밋"과 임베딩 대상만 이 판정을 따른다.
  */
 const MERGE = /^merge\s+(branch|pull request|remote|commit|tag)\b/i;
+// revert는 여기 없다 — 되돌림은 "그 결정이 틀렸다"는 가장 강한 신호라 사소한 쪽이 아니다 (docs/feature-audit.md F10)
 const TRIVIAL_PREFIX =
-  /^(chore|docs|style|ci|build|test|revert)(\([^)]*\))?!?\s*:/i;
+  /^(chore|docs|style|ci|build|test)(\([^)]*\))?!?\s*:/i;
 const TRIVIAL_WORDS =
   /^(wip\b|typo\b|오타|fix typo|update readme|readme 수정|readme update|initial commit|first commit|minor (fix|change)|formatting|lint\b|prettier\b|bump\b|version bump|\.$)/i;
 const MEANINGFUL_PREFIX = /^(feat|fix|refactor|perf|feature)(\([^)]*\))?!?\s*:/i;

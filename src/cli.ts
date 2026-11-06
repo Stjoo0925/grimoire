@@ -16,6 +16,7 @@
  *   grimoire update             최신 GitHub 릴리스로 올리기
  *   grimoire mcp                MCP 서버 (stdio)
  */
+import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 
@@ -25,10 +26,11 @@ import { formatImpact, impactOf, workingChanges } from "./core/impact";
 import { openDb, type DB } from "./core/db";
 import { myEmails, resolveAuthors } from "./core/identity";
 import { indexCommitCode } from "./core/diffs";
-import { addRepo, discoverRepos, listRepos, matchRepos, relativeToRepo, removeRepo, resolveRepoFile, syncRepo, type RepoRow } from "./core/indexer";
+import { addRepo, discoverRepos, exportRepoMemory, listRepos, matchRepos, relativeToRepo, removeRepo, repoMemorySize, resolveRepoFile, syncRepo, type RepoRow } from "./core/indexer";
 import { parseNotePaths } from "./core/note-doc";
 import { AUTO_BIND_MAX, autoBindPaths } from "./core/note-autobind";
-import { addNote } from "./core/notes";
+import { addNote, deleteNote, PATHS_MAX } from "./core/notes";
+import { recordVerdicts, refLabel, resolveRefs, REVIEW_DAYS, reviewNotes, type ResolvedRef } from "./core/supersede";
 import { commitDetail, repoOverview, repoSummaries } from "./core/overview";
 import { search } from "./core/search";
 import { pendingUpdate, refreshUpdateCache, VERSION } from "./core/update";
@@ -54,7 +56,12 @@ const HELP = `grimoire — 로컬 git 이력을 AI 코딩 도구의 기억으로
   grimoire context <file>         파일을 고치기 전에 볼 것 — 최근 커밋·왜·같이 바뀌는 파일/테스트  [--repo r] [--json]
   grimoire impact [file...]       바뀐 파일이 건드릴 곳 — import·공변경·테스트  (파일을 안 주면 커밋 안 된 변경)  [--intent "작업"] [--repo r] [--limit n] [--json]
   grimoire note <text>            노트 남기기  [--repo r] [--tag t ...] [--path f ...]  (--path: 그 파일을 고치기 전에 노트가 보인다)
-  grimoire remove <repo>          레포와 색인 삭제
+                                  [--supersedes 12|sha ...] 이 노트가 뒤집는 옛 노트·커밋  [--confirms 12 ...] 다시 보았고 아직 맞은 노트
+  grimoire note confirm <id> [말]  노트를 다시 보았고 아직 맞다 (stale이 풀린다)
+  grimoire note rm <id>           노트 삭제 — 비밀이 섞였거나 실수로 남긴 것
+  grimoire review [repo]          다시 볼 노트 — stale·추정 묶기·오래 확인 안 됨·근거 커밋 뒤집힘  [--days n] [--json]
+  grimoire export <repo>          git에 없는 기억(노트·커밋에 묶인 세션 기록)을 JSON으로  [--out file]
+  grimoire remove <repo>          레포와 색인 삭제  (노트·세션 기록이 있으면 --yes가 필요하다 — 먼저 export)
 
 MCP 연결:
   grimoire install <client>       설정 자동 작성  client: ${CLIENTS.join(" | ")}
@@ -108,6 +115,11 @@ async function main(argv: string[]): Promise<number> {
       "remove-hooks": { type: "boolean" },
       skills: { type: "boolean" },
       "remove-skills": { type: "boolean" },
+      yes: { type: "boolean" },
+      out: { type: "string" },
+      supersedes: { type: "string", multiple: true },
+      confirms: { type: "string", multiple: true },
+      days: { type: "string" },
     },
   });
 
@@ -218,17 +230,39 @@ async function main(argv: string[]): Promise<number> {
         return 0;
       }
       case "note": {
+        // `note rm <id>`: 노트를 지운다 — 비밀이 섞였거나 실수로 남긴 것. 사람만 할 수 있다(MCP에는 없다)
+        if (positionals[0] === "rm" && /^#?\d+$/.test(positionals[1] ?? "")) {
+          const id = Number(positionals[1].replace("#", ""));
+          if (!deleteNote(db, id)) throw new UsageError(`노트 #${id}가 없습니다`);
+          print(`노트 #${id} 삭제 — 그 노트가 남긴 뒤집기·확인 기록도 지웠습니다`);
+          return 0;
+        }
+        // `note confirm <id> [말]`: 다시 보았고 아직 맞다 — 한 글자도 안 쓰고 남길 수 있어야 쓴다 (docs/memory-philosophy.md §3-B)
+        const confirmShort = positionals[0] === "confirm" && /^#?\d+$/.test(positionals[1] ?? "");
+        const confirmTokens = [...(values.confirms ?? []), ...(confirmShort ? [positionals[1]] : [])];
+        const supersedeTokens = values.supersedes ?? [];
+        const words = confirmShort ? positionals.slice(2) : positionals;
         // --path가 있으면 레포가 필요하다 — --repo, 아니면 절대경로가 속한 레포, 아니면 현재 폴더의 레포
         const given = values.path ?? [];
         const located = values.repo ? null : await resolveRepoFile(db, given.find((item) => path.isAbsolute(item)) ?? process.cwd());
         const repo = values.repo ? requireRepo(db, values.repo) : given.length > 0 ? located?.repo : undefined;
         if (given.length > 0 && !repo) throw new UsageError("--path를 묶을 레포를 알 수 없습니다 — --repo로 지정하세요");
-        const text = need(positionals.join(" "), "노트 내용");
+        const text = words.join(" ").trim() || (confirmTokens.length > 0 ? `확인: ${confirmTokens.map((token) => (token.startsWith("#") ? token : `#${token}`)).join(", ")} — 다시 보았고 아직 맞다` : "");
+        if (!text) throw new UsageError("노트 내용이 필요합니다");
+        // 뒤집기·확인의 대상을 먼저 풀어 본다 — 틀린 참조로 노트만 남지 않게 (supersede.ts)
+        const verdictRepo = repo ?? (await resolveRepoFile(db, process.cwd()))?.repo;
+        const supersedes = resolveRefs(db, verdictRepo?.id ?? null, supersedeTokens);
+        const confirms = resolveRefs(db, verdictRepo?.id ?? null, confirmTokens);
         let bound = repo;
         let bindPaths = repo ? given.map((item) => (path.isAbsolute(item) ? relativeToRepo(repo.path, item) : item)) : [];
         let autoNote = "";
-        // --path를 안 줬으면 지금 작업 폴더에서 바뀐 소스 파일에 묶는다
-        if (given.length === 0) {
+        // 뒤집거나 확인하는 노트가 묶인 파일을 물려받는다 — 새 판단이 옛 판단이 보이던 자리에서 보이게
+        const inherited = given.length === 0 ? inheritedNotePaths(db, [...supersedes, ...confirms]) : [];
+        if (inherited.length > 0 && verdictRepo) {
+          bound = verdictRepo;
+          bindPaths = inherited;
+        } else if (given.length === 0) {
+          // --path를 안 줬으면 지금 작업 폴더에서 바뀐 소스 파일에 묶는다
           const target = values.repo ? repo : (await resolveRepoFile(db, process.cwd()))?.repo;
           if (target) {
             const auto = await autoBindPaths(db, target.id, text, values.repo ? target.path : process.cwd());
@@ -239,15 +273,61 @@ async function main(argv: string[]): Promise<number> {
             } else if (auto.tooMany) autoNote = ` (바뀐 소스 파일이 ${AUTO_BIND_MAX}개를 넘어 파일에 묶지 않았습니다)`;
           }
         }
-        const note = addNote(db, { text, repoId: bound?.id ?? null, tags: values.tag, paths: bindPaths, source: "cli" });
+        const note = addNote(db, { text, repoId: bound?.id ?? null, tags: values.tag, paths: autoNote.includes("자동") ? [] : bindPaths, autoPaths: autoNote.includes("자동") ? bindPaths : [], source: "cli" });
+        const by = { kind: "note" as const, ref: String(note.id) };
+        const warnings: string[] = [];
+        if (supersedes.length > 0) warnings.push(...recordVerdicts(db, { repoId: bound?.id ?? null, by, targets: supersedes, how: "note" }).notes);
+        if (confirms.length > 0) warnings.push(...recordVerdicts(db, { repoId: bound?.id ?? null, by, targets: confirms, how: "confirm" }).notes);
         const paths = parseNotePaths(note.paths).map((item) => item.path);
-        print(`노트 #${note.id} 저장${paths.length > 0 ? ` (파일: ${paths.join(", ")})` : ""}${autoNote}${note.redacted ? " (비밀로 보이는 값은 [redacted]로 바꿨습니다)" : ""}`);
+        print(
+          `노트 #${note.id} 저장${paths.length > 0 ? ` (파일: ${paths.join(", ")})` : ""}${autoNote}` +
+            `${supersedes.length > 0 ? ` — 뒤집음: ${supersedes.map(refLabel).join(", ")}` : ""}${confirms.length > 0 ? ` — 확인: ${confirms.map(refLabel).join(", ")}` : ""}` +
+            `${note.redacted ? " (비밀로 보이는 값은 [redacted]로 바꿨습니다)" : ""}${note.tagsDropped > 0 ? ` (태그 ${note.tagsDropped}개는 상한을 넘어 버렸습니다)` : ""}`,
+        );
+        for (const warning of warnings) console.error(`  ${warning}`);
         return 0;
+      }
+      case "review": {
+        // 다시 볼 만한 노트 — stale·추정 묶기·오래 확인 안 됨·근거 커밋 뒤집힘. 보여 주기만 하고 판단은 사람이 한다 (docs/memory-philosophy.md §3-E)
+        const repo = positionals[0] ? requireRepo(db, positionals[0]) : (await resolveRepoFile(db, process.cwd()))?.repo;
+        if (!repo) throw new UsageError("어느 레포인지 알 수 없습니다 — 레포 안에서 부르거나 이름을 주세요");
+        const days = values.days ? Number.parseInt(values.days, 10) || REVIEW_DAYS : REVIEW_DAYS;
+        const items = reviewNotes(db, repo.id, { days });
+        if (values.json) return printJson({ repo: repo.name, days, items });
+        if (items.length === 0) {
+          print(`${repo.name}: 다시 볼 노트가 없습니다 (${days}일 기준)`);
+          return 0;
+        }
+        print(`${repo.name}: 다시 볼 노트 ${items.length}개 — 맞으면 \`grimoire note confirm <번호>\`, 틀렸으면 \`grimoire note "새 결정" --supersedes <번호>\`, 실수면 \`grimoire note rm <번호>\``);
+        for (const item of items) {
+          print(`#${item.id} ${item.createdAt.slice(0, 10)} "${item.title}"${item.paths.length > 0 ? ` [${item.paths.join(", ")}]` : ""}`);
+          for (const reason of item.reasons) print(`    - ${reason}`);
+        }
+        return 0;
+      }
+      case "export": {
+        const repo = requireRepo(db, need(positionals[0], "repo"));
+        const memory = exportRepoMemory(db, repo);
+        if (values.out) {
+          fs.writeFileSync(values.out, JSON.stringify(memory, null, 2));
+          print(`${repo.name}: 노트 ${memory.notes.length}개, 커밋 맥락 ${memory.commits.length}개 커밋 → ${values.out}`);
+          return 0;
+        }
+        return printJson(memory);
       }
       case "remove": {
         const repo = requireRepo(db, need(positionals[0], "repo"));
+        // 색인은 다시 만들 수 있지만 커밋에 묶인 "왜"와 노트는 못 만든다 — 있으면 보이고 --yes를 요구한다 (docs/feature-audit.md F5)
+        const memory = repoMemorySize(db, repo.id);
+        if ((memory.context > 0 || memory.notes > 0) && !values.yes) {
+          console.error(
+            `${repo.name}에는 git에 없는 기억이 있습니다 — 커밋에 묶인 세션 기록·트레일러 ${memory.context}건, 노트 ${memory.notes}개.\n` +
+              `지우면 되살릴 수 없습니다. 먼저 \`grimoire export ${repo.name} --out <file>\`로 꺼내 두고, 정말 지우려면 --yes를 붙이세요.`,
+          );
+          return 1;
+        }
         removeRepo(db, repo);
-        print(`${repo.name} 삭제 (${repo.path})`);
+        print(`${repo.name} 삭제 (${repo.path})${memory.context + memory.notes > 0 ? ` — 세션 기록 ${memory.context}건, 노트 ${memory.notes}개도 함께 지웠습니다` : ""}`);
         return 0;
       }
       default:
@@ -480,6 +560,17 @@ function toInt(value: string | undefined): number | undefined {
 }
 
 const day = (iso: string | null) => (iso ? iso.slice(0, 10) : "-");
+/** 뒤집거나 확인하는 노트들이 묶인 파일 — 새 판단이 같은 자리에서 보이게 물려받는다 (MCP의 inheritedPaths와 같은 규칙) */
+function inheritedNotePaths(db: DB, targets: ResolvedRef[]): string[] {
+  const out: string[] = [];
+  for (const target of targets) {
+    if (target.kind !== "note") continue;
+    const row = db.prepare("SELECT paths FROM notes WHERE id = ?").get(Number(target.ref)) as { paths: string } | undefined;
+    for (const item of parseNotePaths(row?.paths)) if (!out.includes(item.path)) out.push(item.path);
+  }
+  return out.slice(0, PATHS_MAX);
+}
+
 const print = (line: string) => process.stdout.write(line + "\n");
 const printJson = (value: unknown) => {
   print(JSON.stringify(value, null, 2));
@@ -487,7 +578,7 @@ const printJson = (value: unknown) => {
 };
 
 /** 끝나고 새 버전을 알려 줄 명령 — mcp(stdout이 통신로)·doctor·update는 따로 다룬다 */
-const NOTICE_COMMANDS = new Set(["add", "scan", "sync", "repos", "search", "show", "overview", "note", "remove"]);
+const NOTICE_COMMANDS = new Set(["add", "scan", "sync", "repos", "search", "show", "overview", "note", "remove", "export", "review"]);
 
 /** 명령과 나란히 하루 한 번 업데이트를 확인하고, 새 버전이 있으면 stderr로 한 줄 알린다 */
 async function runWithUpdateNotice(argv: string[]): Promise<number> {

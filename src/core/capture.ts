@@ -29,8 +29,12 @@ export interface SessionEvent {
   line_hashes: string | null;
 }
 
-/** 상한 (커밋당) */
-const PROMPTS_PER_COMMIT = 10;
+/**
+ * 상한 (커밋당). 프롬프트는 **처음 것부터** PROMPTS_HEAD개, 그 뒤 마지막 것들로 채운다 — 원래 의도는 거의 항상 첫 프롬프트에 있고
+ * 뒤쪽은 "고쳐"·"다시"다. 마지막 10개만 남기면 긴 세션에서 의도가 사라진다(docs/feature-audit.md F1). 잘렸으면 `truncated`로 적는다.
+ */
+export const PROMPTS_PER_COMMIT = 10;
+export const PROMPTS_HEAD = 3;
 const VERIFIES_PER_COMMIT = 20;
 const EDITS_PER_COMMIT = 200;
 export const PROMPT_MAX = 1_000;
@@ -295,7 +299,9 @@ export function promptText(raw: string): string | null {
     cleaned = cleaned.slice(command[0].length).trim();
     if (!looksLikeWords(cleaned)) return null;
   }
-  return cleaned ? cleaned.slice(0, PROMPT_MAX) : null;
+  if (!cleaned) return null;
+  // 상한을 넘으면 자르되 잘렸다고 끝에 적는다 — 잘린 기억을 꺼낸 쪽이 그 사실을 알 수 있게 (feature-audit F3)
+  return cleaned.length > PROMPT_MAX ? `${cleaned.slice(0, PROMPT_MAX)} [truncated ${PROMPT_MAX}/${cleaned.length}]` : cleaned;
 }
 
 /** 프롬프트 하나를 기록한다 (규칙은 promptText). 기록하지 않았으면 false */
@@ -359,12 +365,12 @@ export const RELEASE_SUBJECT = /^chore(\([^)]*\))?!?:\s*release\b/i;
  */
 export function cleanReleaseContext(db: DB): number {
   const commits = db
-    .prepare("SELECT DISTINCT c.repo_id, c.sha, c.subject FROM commits c JOIN commit_context x ON x.repo_id = c.repo_id AND x.sha = c.sha WHERE x.kind IN ('prompt', 'verify', 'dropped')")
+    .prepare("SELECT DISTINCT c.repo_id, c.sha, c.subject FROM commits c JOIN commit_context x ON x.repo_id = c.repo_id AND x.sha = c.sha WHERE x.kind IN ('prompt', 'verify', 'dropped', 'truncated')")
     .all() as { repo_id: number; sha: string; subject: string }[];
   let removed = 0;
   for (const commit of commits) {
     if (!RELEASE_SUBJECT.test(commit.subject)) continue;
-    removed += Number(db.prepare("DELETE FROM commit_context WHERE repo_id = ? AND sha = ? AND kind IN ('prompt', 'verify', 'dropped')").run(commit.repo_id, commit.sha).changes);
+    removed += Number(db.prepare("DELETE FROM commit_context WHERE repo_id = ? AND sha = ? AND kind IN ('prompt', 'verify', 'dropped', 'truncated')").run(commit.repo_id, commit.sha).changes);
     refreshWhy(db, commit.repo_id, commit.sha);
   }
   return removed;
@@ -448,8 +454,10 @@ export interface BindResult {
  */
 export function bindToCommit(db: DB, input: BindInput): BindResult {
   const events = pendingEvents(db, input.sessionId, input.repoId);
-  const prompts = events.filter((event) => event.kind === "prompt").slice(-PROMPTS_PER_COMMIT);
-  const verifies = events.filter((event) => event.kind === "verify").slice(-VERIFIES_PER_COMMIT);
+  const allPrompts = events.filter((event) => event.kind === "prompt");
+  const prompts = keepHeadAndTail(allPrompts, PROMPTS_HEAD, PROMPTS_PER_COMMIT);
+  const allVerifies = events.filter((event) => event.kind === "verify");
+  const verifies = allVerifies.slice(-VERIFIES_PER_COMMIT);
   const edits = events.filter((event) => event.kind === "edit").slice(-EDITS_PER_COMMIT);
   const committed = new Set(input.files);
   const dropped = new Set<string>();
@@ -471,6 +479,9 @@ export function bindToCommit(db: DB, input: BindInput): BindResult {
     ordered.forEach((event, index) => insert.run(input.repoId, input.sha, "prompt", event.text, index));
     verifies.forEach((event, index) => insert.run(input.repoId, input.sha, "verify", event.text, index));
     [...dropped].forEach((file, index) => insert.run(input.repoId, input.sha, "dropped", file, index));
+    // 상한에 잘렸으면 잘렸다는 사실을 남긴다 — 꺼내는 쪽이 "이게 전부"로 읽지 않게 (feature-audit F3)
+    const cuts = [allPrompts.length > prompts.length ? `prompts ${allPrompts.length} → ${prompts.length}` : "", allVerifies.length > verifies.length ? `verify ${allVerifies.length} → ${verifies.length}` : ""].filter(Boolean);
+    if (cuts.length > 0) insert.run(input.repoId, input.sha, "truncated", cuts.join(", "), 0);
     const committedAt = Date.now();
     recordEvent(db, { sessionId: input.sessionId, repoId: input.repoId, kind: "commit", text: input.sha }, new Date(committedAt).toISOString());
     // 아직 커밋 전인 파일의 편집은 커밋 표식 뒤로 다시 적어 다음 커밋이 묶게 한다 (pendingEvents는 표식보다 뒤만 본다)
@@ -481,6 +492,12 @@ export function bindToCommit(db: DB, input: BindInput): BindResult {
     refreshWhy(db, input.repoId, input.sha);
   })();
   return { prompts: prompts.length, verifies: verifies.length, dropped: [...dropped] };
+}
+
+/** 처음 head개 + 마지막 (max − head)개. 전체가 max 이하면 그대로. */
+export function keepHeadAndTail<T>(items: T[], head: number, max: number): T[] {
+  if (items.length <= max) return items;
+  return [...items.slice(0, head), ...items.slice(items.length - (max - head))];
 }
 
 /** 첫 줄이 증상·오류 붙여 넣기 꼴인가 (의도가 아니라 현상) */
@@ -595,6 +612,8 @@ export interface CommitContextView {
   verify: string[];
   dropped: string[];
   trailers: Trailer[];
+  /** 상한에 잘린 기록이 있으면 무엇이 얼마나 ("prompts 25 → 10") — 꺼내는 쪽이 전부로 읽지 않게 */
+  truncated?: string;
 }
 
 /** 같은 변경으로 남은 다른 커밋들 (squash 머지 ↔ 브랜치 원본, commits.change_key) */
@@ -618,7 +637,7 @@ export function sameChangeShas(db: DB, repoId: number, sha: string): string[] {
 export function commitContextOf(db: DB, repoId: number, sha: string): CommitContextView | null {
   const query = db.prepare("SELECT kind, text FROM commit_context WHERE repo_id = ? AND sha = ? ORDER BY kind, ord");
   let rows = query.all(repoId, sha) as { kind: string; text: string }[];
-  const isSession = (kind: string) => kind === "prompt" || kind === "verify" || kind === "dropped";
+  const isSession = (kind: string) => kind === "prompt" || kind === "verify" || kind === "dropped" || kind === "truncated";
   const isTrailer = (kind: string) => kind.startsWith("trailer:");
   // 세션 기록과 트레일러는 따로 찾는다 — 한 형제에 트레일러만, 다른 형제에 세션 기록만 있을 수 있다.
   // 같은 종류는 한 커밋 것만 통째로 (두 커밋 것을 섞지 않는다)
@@ -641,6 +660,7 @@ export function commitContextOf(db: DB, repoId: number, sha: string): CommitCont
     verify: rows.filter((row) => row.kind === "verify").map((row) => row.text),
     dropped: rows.filter((row) => row.kind === "dropped").map((row) => row.text),
     trailers: rows.filter((row) => row.kind.startsWith("trailer:")).map((row) => ({ key: row.kind.slice("trailer:".length), value: row.text })),
+    ...(rows.some((row) => row.kind === "truncated") ? { truncated: rows.find((row) => row.kind === "truncated")!.text } : {}),
   };
 }
 

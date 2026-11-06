@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0](https://github.com/Stjoo0925/grimoire/compare/v0.13.0...v0.14.0) (2026-11-06)
+
+
+### 기능
+
+* **memory:** 판단을 확인·뒤집을 수 있게 하고, 조용히 잃던 기억을 멈춘다 ([#55](https://github.com/Stjoo0925/grimoire/issues/55)) ([47fe9ad](https://github.com/Stjoo0925/grimoire/commit/47fe9adff747b610f7f07c484f3677ec0559876b))
+
 ## [0.13.0](https://github.com/Stjoo0925/grimoire/compare/v0.12.4...v0.13.0) (2026-11-06)
 
 

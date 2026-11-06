@@ -10,7 +10,7 @@
  */
 import type { CommitContextView } from "../core/capture";
 import type { FileContext } from "../core/context";
-import { impactLines, type Impact } from "../core/impact";
+import { impactLines, INTENT_ONLY_NOTICE, intentOnlyImpact, type Impact } from "../core/impact";
 import type { CommitDetail, RepoOverview, RepoSummary } from "../core/overview";
 import type { SearchHit, SearchResult } from "../core/search";
 
@@ -230,6 +230,7 @@ export function slimFileContext(context: FileContext, me: string[], verbose = fa
 export function slimImpact(impact: Impact) {
   return {
     changed: impact.changed,
+    ...(intentOnlyImpact(impact) ? { evidence: INTENT_ONLY_NOTICE } : {}),
     impact: impactLines(impact),
     ...(impact.notes.length > 0 ? { notes: impact.notes.map((note) => `#${note.id} ${note.path} ${day(note.createdAt)} "${note.title}"${note.stale ? " (stale)" : ""}`) } : {}),
     note: "candidates to check, not instructions",

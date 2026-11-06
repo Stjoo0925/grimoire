@@ -196,9 +196,12 @@ export function impactOf(db: DB, repoId: number, changed: string[], options: Imp
     }
     if (sources.has("dir")) {
       const dir = path.posix.dirname(seed);
-      const rows = db
-        .prepare("SELECT path FROM code_files WHERE repo_id = ? AND path LIKE ? AND path NOT LIKE ? LIMIT 50")
-        .all(repoId, `${dir}/%`, `${dir}/%/%`) as { path: string }[];
+      // 최상위 파일은 dirname이 "."이라 "./%"로는 아무것도 못 찾는다 — 슬래시 없는 경로가 같은 폴더다
+      const rows = (
+        dir === "."
+          ? db.prepare("SELECT path FROM code_files WHERE repo_id = ? AND path NOT LIKE '%/%' LIMIT 50").all(repoId)
+          : db.prepare("SELECT path FROM code_files WHERE repo_id = ? AND path LIKE ? AND path NOT LIKE ? LIMIT 50").all(repoId, `${dir}/%`, `${dir}/%/%`)
+      ) as { path: string }[];
       for (const row of rows) add(row.path, { source: "dir", from: seed, score: weight.dir, detail: `same folder as ${seed}` });
     }
     if (sources.has("sibling")) {
@@ -314,11 +317,27 @@ export async function workingChanges(dir: string, signal?: AbortSignal): Promise
   return [...new Set(`${changed}\n${added}`.split("\n").map((line) => line.trim()).filter(Boolean))];
 }
 
-/** 사람이 읽는 줄 — 점수, 경로, 근거 두 개까지 */
+/** 작업 의도로만 찾은 항목 — 점수 0은 "근거 없음"이 아니라 점수에 넣지 않는 근거라는 뜻이다 */
+export const INTENT_ONLY_LABEL = "intent";
+
+const intentOnly = (item: ImpactItem) => item.score === 0 && item.reasons.length > 0 && item.reasons.every((reason) => reason.source === "intent");
+
+/**
+ * 구조·이력 근거(import·공변경·폴더 등)가 한 건도 없는데 목록이 있을 때 붙이는 안내 — 의도 검색으로만 찾은 후보라는 것.
+ * 2026-11 실사용에서 이런 결과가 "0.00" 줄로만 찍혀 근거 없는 목록처럼 보였다 (노트 #80·#81)
+ */
+export const INTENT_ONLY_NOTICE = "no import/co-change/folder evidence for the changed files — every candidate below only matches the task text (past commits or file search)";
+
+export function intentOnlyImpact(impact: Impact): boolean {
+  return impact.items.length > 0 && impact.items.every(intentOnly);
+}
+
+/** 사람이 읽는 줄 — 점수(의도로만 찾았으면 "intent"), 경로, 근거 두 개까지 */
 export function impactLines(impact: Impact, limit = 10): string[] {
   return impact.items.slice(0, limit).map((item) => {
     const more = item.reasons.length > 2 ? ` (+${item.reasons.length - 2})` : "";
-    return `${item.score.toFixed(2)} ${item.path} — ${item.reasons.slice(0, 2).map((reason) => reason.detail).join("; ")}${more}`;
+    const score = intentOnly(item) ? INTENT_ONLY_LABEL : item.score.toFixed(2);
+    return `${score} ${item.path} — ${item.reasons.slice(0, 2).map((reason) => reason.detail).join("; ")}${more}`;
   });
 }
 
@@ -326,7 +345,10 @@ export function formatImpact(impact: Impact, limit = 10): string {
   if (impact.changed.length === 0) return "바뀐 파일이 없습니다";
   const lines = [`Grimoire impact: ${impact.changed.join(", ")}`];
   if (impact.items.length === 0) lines.push("이력과 import에서 더 알려 줄 것이 없습니다");
-  else lines.push(...impactLines(impact, limit));
+  else {
+    if (intentOnlyImpact(impact)) lines.push("이력·import·폴더 근거는 없습니다 — 아래는 작업 내용과 맞는 과거 커밋·파일 검색으로만 찾은 후보입니다");
+    lines.push(...impactLines(impact, limit));
+  }
   if (impact.notes.length > 0) lines.push(`Notes: ${impact.notes.map((note) => `#${note.id} ${note.path} "${note.title}"${note.stale ? " (stale)" : ""}`).join(" · ")}`);
   return lines.join("\n");
 }

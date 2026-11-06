@@ -64,7 +64,7 @@ test("impactOf: import 이웃·2홉·공변경·이름 짝 테스트를 근거�
   assert.equal(impact.items.some((item) => item.path === "src/api.ts"), false, "바뀐 파일 자신은 빠진다");
 });
 
-test("impactOf: 근거를 골라 끌 수 있고, 여러 파일의 근거는 noisy-OR로 합친다", async () => {
+test("impactOf: 근거를 골라 끌 수 있고, 여러 파일이 가리키면 점수가 오른다", async () => {
   const { db, repo } = await indexed();
   const importOnly = impactOf(db, repo.id, ["src/api.ts"], { sources: ["import"], noteFiles: 0 });
   assert.deepEqual(importOnly.items.map((item) => item.path), ["src/handler.ts"]);
@@ -237,4 +237,37 @@ test("impactOf dir: 레포 최상위 파일도 같은 폴더(최상위) 파일�
   await syncRepo(db, repo);
   const items = impactOf(db, repo.id, ["main.ts"], { noteFiles: 0, sources: ["dir"] }).items.map((item) => item.path);
   assert.deepEqual(items, ["util.ts"], "하위 폴더 파일은 같은 폴더가 아니다");
+});
+
+test("impactOf: 큰 커밋에서 바뀐 파일 여럿이 import하는 공용 파일이 약한 근거를 쌓아 늘 같이 바뀐 파일을 밀어내지 않는다", async () => {
+  // shared.ts는 화면 8개가 import하는 공용 파일, pair.ts는 s1.ts와 늘 같이 바뀌어 왔다 — s1~s8을 한 커밋에서 바꾼다
+  const screens = Array.from({ length: 8 }, (_, i) => `src/screens/s${i + 1}.ts`);
+  const files: Record<string, string> = { "src/lib/shared.ts": "export const shared = 1;\n", "src/data/pair.ts": "export const pair = 0;\n" };
+  for (const screen of screens) files[screen] = 'import { shared } from "../lib/shared";\nexport const s = shared;\n';
+  const commits: FakeCommit[] = [{ message: "feat: 시작", files, date: "2024-01-01T10:00:00+09:00" }];
+  for (let i = 1; i <= 3; i++) {
+    commits.push({
+      message: `fix(s1): ${i}`,
+      files: { "src/screens/s1.ts": `import { shared } from "../lib/shared";\nexport const s = shared + ${i};\n`, "src/data/pair.ts": `export const pair = ${i};\n` },
+      date: `2024-0${i + 1}-01T10:00:00+09:00`,
+    });
+    // s1이 다른 파일과 바뀐 커밋도 섞어 pair.ts의 공변경 신뢰도를 4/7로 — 공용 파일의 옛 점수(0.83)보다 낮게
+    // (파일 하나뿐인 커밋은 공변경 집계에 들어가지 않는다)
+    commits.push({
+      message: `feat(s1): 따로 ${i}`,
+      files: { "src/notes/other.md": `${i}\n`, "src/screens/s1.ts": `import { shared } from "../lib/shared";\nexport const s = shared - ${i};\n` },
+      date: `2024-0${i + 1}-15T10:00:00+09:00`,
+    });
+  }
+  const dir = makeRepo(commits, "impact-hub");
+  const db = memoryDb();
+  const repo = await addRepo(db, dir);
+  await syncRepo(db, repo);
+  const rank = (options: Parameters<typeof impactOf>[3]) => impactOf(db, repo.id, screens, { noteFiles: 0, sources: ["import", "cochange"], ...options }).items.map((item) => item.path);
+  // 예전 방식(근거 전부 noisy-OR, 감점 없음)은 0.2 근거 여덟 개로 shared.ts가 0.83이 되어 맨 위였다
+  const old = rank({ aggregate: "noisy-or", fanin: 0 });
+  assert.equal(old[0], "src/lib/shared.ts");
+  const now = rank({});
+  assert.equal(now[0], "src/data/pair.ts", now.join(", "));
+  assert.ok(now.includes("src/lib/shared.ts"), "공용 파일도 후보에는 남는다");
 });

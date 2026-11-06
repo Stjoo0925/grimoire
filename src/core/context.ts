@@ -22,7 +22,8 @@ import { isSymptomOnly } from "./capture";
 import { isIndexable, SOURCE_EXT } from "./code";
 import type { DB } from "./db";
 import type { GitCommit } from "./git";
-import { notesForFile, type NoteHint } from "./notes";
+import { noteFlags, notesForFile, type NoteHint } from "./notes";
+import { isSuperseded } from "./supersede";
 
 /**
  * 공변경 거래로 쓰는 커밋의 변경 파일 수 범위. 상한은 GRIMOIRE_COCHANGE_MAX_FILES로 바꿀 수 있다 —
@@ -86,6 +87,10 @@ export interface Why {
   /** 검증 신호(통과한 검증 명령·Tested 트레일러)가 있는 커밋인가 */
   verified: boolean;
   verify?: string;
+  /** 의도가 붙은 최근 커밋 수 — 1보다 크면 이 "왜"는 여럿 중 고른 하나다 (docs/feature-audit.md F7) */
+  candidates: number;
+  /** `Revisit-when:` 트레일러 — 이 결정을 다시 봐야 할 조건 (memory-philosophy §3-D) */
+  revisit?: string;
 }
 
 export interface FileContext {
@@ -439,22 +444,30 @@ function whyOf(db: DB, repoId: number, recent: ChangeLine[]): Why | null {
     "SELECT 1 FROM commit_files f JOIN code_files c ON c.repo_id = f.repo_id AND c.path = f.path WHERE f.repo_id = ? AND f.sha = ? LIMIT 1",
   );
   let fallback: Why | null = null;
+  let chosen: Why | null = null;
+  let candidates = 0;
   for (const commit of recent) {
     // 세션 기록은 워크트리의 브랜치 커밋에 묶이고, main에는 squash 커밋이 남는다 — 같은 변경의 모든 sha에서 찾는다
     const rows = commit.shas.flatMap((sha) => context.all(repoId, sha) as { kind: string; text: string }[]);
     if (rows.length === 0) continue;
     if (!alive.get(repoId, commit.sha)) continue;
+    // 되돌려졌거나 Supersedes:로 뒤집힌 커밋의 의도는 지금의 "왜"가 아니다 (supersede.ts)
+    if (commit.shas.some((sha) => isSuperseded(db, "commit", sha))) continue;
     // 증상·상태 질문만 있는 프롬프트("고쳤냐?", 오류 붙여 넣기)는 왜가 아니다 — 짧고 틀린 맥락은 없는 것보다 해롭다
     const intent =
       rows.find((row) => row.kind === "prompt" && !isSymptomOnly(row.text))?.text ??
       rows.find((row) => row.kind === "trailer:why" || row.kind === "trailer:constraint" || row.kind === "trailer:rejected" || row.kind === "trailer:directive")?.text;
     if (!intent) continue;
     const verify = rows.find((row) => row.kind === "verify" && /\bpass\b/.test(row.text))?.text ?? rows.find((row) => row.kind === "trailer:tested")?.text;
-    const why: Why = { sha: commit.sha, text: firstLine(intent), verified: Boolean(verify), ...(verify ? { verify: firstLine(verify) } : {}) };
-    if (why.verified) return why;
+    candidates++;
+    const revisit = rows.find((row) => row.kind === "trailer:revisit-when")?.text;
+    const why: Why = { sha: commit.sha, text: firstLine(intent), verified: Boolean(verify), ...(verify ? { verify: firstLine(verify) } : {}), candidates: 0, ...(revisit ? { revisit: firstLine(revisit, 80) } : {}) };
+    if (why.verified) chosen ??= why;
     fallback ??= why;
   }
-  return fallback;
+  // 고른 것은 검증 신호가 있는 가장 최근 하나, 없으면 첫 후보 — 몇 개 중에서 골랐는지는 같이 돌려준다
+  const picked = chosen ?? fallback;
+  return picked ? { ...picked, candidates } : null;
 }
 
 function firstLine(text: string, max = 120): string {
@@ -507,14 +520,14 @@ export function formatFileContext(context: FileContext, options: FormatOptions =
   if (context.notes.length > 0) {
     lines.push({
       key: "notes",
-      text: `Notes: ${context.notes.map((note) => `#${note.id} "${shortSubject(note.title, 60)}" (${note.createdAt.slice(0, 10)}${note.stale ? ", file changed since" : ""})`).join(" · ")}`,
+      text: `Notes: ${context.notes.map((note) => `#${note.id} "${shortSubject(note.title, 60)}" (${note.createdAt.slice(0, 10)}${noteFlags(note, "file changed since").replace(/^ \((.*)\)$/, ", $1")})`).join(" · ")}`,
       drop: 6,
     });
   }
   if (context.why) {
     lines.push({
       key: "why",
-      text: `Why (${context.why.sha.slice(0, 10)}): "${context.why.text}"${context.why.verify ? ` · verified: ${context.why.verify}` : ""}`,
+      text: `Why (${context.why.sha.slice(0, 10)}${context.why.candidates > 1 ? `, 1 of ${context.why.candidates}` : ""}): "${context.why.text}"${context.why.verify ? ` · verified: ${context.why.verify}` : ""}${context.why.revisit ? ` · revisit when: ${context.why.revisit}` : ""}`,
       drop: 4,
     });
   }

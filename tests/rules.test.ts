@@ -371,7 +371,7 @@ test("규칙 파일에 묶인 노트: 본문에 경로만 적어도 묶이고, �
   const shown = await handleHook({ db, env, me: [] }, editRule(repo.path, "## Commits", "n1"));
   assert.equal(
     shown!.json!.hookSpecificOutput.additionalContext,
-    `Grimoire: CLAUDE.md\nNotes on this file (update any this change makes wrong): #${note.id} "결정: CLAUDE.md의 배포 규칙은 릴리스 PR 머지로만"`,
+    `Grimoire: CLAUDE.md\nNotes on this file (confirm or supersede any this change touches — record_note confirms/supersedes): #${note.id} "결정: CLAUDE.md의 배포 규칙은 릴리스 PR 머지로만"`,
   );
 
   addCommit(dir, { message: "feat: 배포 규칙을 바꾼다", files: { "CLAUDE.md": CLAUDE_V1.replace("사용자가 말할 때만", "CI가 초록일 때") } });
@@ -385,15 +385,16 @@ test("업그레이드: 스키마 12 DB가 열리고, 트리가 그대로여도 �
   let db = openDb(file);
   const repo = await addRepo(db, dir);
   await syncRepo(db, repo);
-  // 0.11.x 상태로 되돌린다 — 규칙 표와 칸이 없고 user_version 12
+  // 0.11.x 상태로 되돌린다 — 규칙 표와 칸이 없고(12), 판단 표·노트 refs도 없고(14), user_version 12
   db.exec(
-    "DELETE FROM docs_fts WHERE rowid IN (SELECT id FROM docs WHERE kind = 'rule'); DELETE FROM docs WHERE kind = 'rule'; DROP TABLE rules; DROP TABLE rule_files; ALTER TABLE repos DROP COLUMN rules_version;",
+    "DELETE FROM docs_fts WHERE rowid IN (SELECT id FROM docs WHERE kind = 'rule'); DELETE FROM docs WHERE kind = 'rule'; DROP TABLE rules; DROP TABLE rule_files; ALTER TABLE repos DROP COLUMN rules_version; DROP TABLE supersessions; ALTER TABLE notes DROP COLUMN refs;",
   );
   db.pragma("user_version = 12");
   db.close();
 
   db = openDb(file);
-  assert.equal(db.pragma("user_version"), 14);
+  assert.equal(db.pragma("user_version"), 15);
+  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM supersessions").get() as { n: number }).n, 0, "판단 표가 다시 생긴다");
   assert.equal((db.prepare("SELECT COUNT(*) AS n FROM rules").get() as { n: number }).n, 0);
   const result = await syncRepo(db, repo);
   assert.equal(result.added, 0, "새 커밋은 없다 — 트리도 그대로");

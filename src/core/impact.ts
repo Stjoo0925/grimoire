@@ -20,7 +20,7 @@ import path from "node:path";
 import { cochangeOf, namedTests, TEST_PATH } from "./context";
 import type { DB } from "./db";
 import { runGit } from "./git";
-import { notesForFile, type NoteHint } from "./notes";
+import { noteFlags, notesForFile, type NoteHint } from "./notes";
 import { buildMatchExpression } from "./search";
 
 export type ImpactSource = "import" | "import2" | "ref" | "cochange" | "test" | "dir" | "sibling" | "intent";
@@ -349,7 +349,7 @@ export function formatImpact(impact: Impact, limit = 10): string {
     if (intentOnlyImpact(impact)) lines.push("이력·import·폴더 근거는 없습니다 — 아래는 작업 내용과 맞는 과거 커밋·파일 검색으로만 찾은 후보입니다");
     lines.push(...impactLines(impact, limit));
   }
-  if (impact.notes.length > 0) lines.push(`Notes: ${impact.notes.map((note) => `#${note.id} ${note.path} "${note.title}"${note.stale ? " (stale)" : ""}`).join(" · ")}`);
+  if (impact.notes.length > 0) lines.push(`Notes: ${impact.notes.map((note) => `#${note.id} ${note.path} "${note.title}"${noteFlags(note)}`).join(" · ")}`);
   return lines.join("\n");
 }
 

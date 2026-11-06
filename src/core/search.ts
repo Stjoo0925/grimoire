@@ -8,6 +8,7 @@ import path from "node:path";
 
 import { whyLine } from "./capture";
 import { NOTE_TITLE_MAX, parseNotePaths } from "./note-doc";
+import { supersededMark } from "./supersede";
 import { isIndexable, splitIdentifier } from "./code";
 import type { DB } from "./db";
 import { commitWebUrl } from "./git";
@@ -229,6 +230,10 @@ export interface SearchHit {
   why?: string;
   /** kind='note'일 때: 누가 남겼나 — me(터미널 grimoire note) | ai(MCP record_note). AI가 쓴 노트를 사람의 결정과 구분하게 */
   by?: "me" | "ai";
+  /** 이 판단(노트·커밋)을 뒤집은 것 — "#31" 또는 sha 10자 (supersede.ts). 결과에서 빼지 않고 표시하고 뒤로 보낸다 */
+  supersededBy?: string;
+  /** kind='note'일 때: 본문에 적힌 근거 커밋 sha(10자) */
+  evidence?: string[];
   /** kind='rule'일 때: 규칙 파일의 줄과 그 규칙을 들여온 커밋(origin), 그 뒤 마지막으로 바꾼 커밋(changed, origin과 다를 때만) */
   rule?: { line: number; heading: string; scope: string; origin: RuleCommit | null; changed: RuleCommit | null };
 }
@@ -236,6 +241,8 @@ export interface SearchHit {
 export interface SearchResult {
   query: string;
   hits: SearchHit[];
+  /** 질의 낱말 → 함께 찾은 변형(조사 뗀 꼴·영어 확장·기술 정규명). 왜 이 결과가 나왔는지 읽는 쪽이 확인할 수 있게 (docs/feature-audit.md F11) */
+  expanded?: Record<string, string[]>;
 }
 
 interface Candidate {
@@ -303,9 +310,13 @@ export function search(db: DB, query: string, options: SearchOptions = {}): Sear
     const hit = toHit(db, item.docId, item.score, item.snippet, terms);
     return hit && item.also.length > 0 ? { ...hit, also: item.also } : hit;
   });
+  const expanded = Object.fromEntries(concepts.filter((concept) => concept.length > 1).map(([word, ...rest]) => [word, rest]));
+  // 뒤집힌 판단은 빼지 않고 뒤로 — "예전엔 왜 그랬지"도 답해야 하지만, 옛 결정이 지금 결정보다 앞에 서면 안 된다 (supersede.ts)
+  const kept = hits.filter((hit): hit is SearchHit => hit !== null);
   return {
     query,
-    hits: hits.filter((hit): hit is SearchHit => hit !== null),
+    hits: [...kept.filter((hit) => !hit.supersededBy), ...kept.filter((hit) => hit.supersededBy)],
+    ...(Object.keys(expanded).length > 0 ? { expanded } : {}),
   };
 }
 
@@ -528,9 +539,16 @@ function toHit(
   }
 
   if (doc.kind === "note") {
-    const note = db.prepare("SELECT source, paths, text FROM notes WHERE id = ?").get(Number(doc.ref)) as
-      | { source: string; paths: string | null; text: string }
+    const note = db.prepare("SELECT source, paths, refs, text FROM notes WHERE id = ?").get(Number(doc.ref)) as
+      | { source: string; paths: string | null; refs: string | null; text: string }
       | undefined;
+    let refs: string[] = [];
+    try {
+      refs = note?.refs ? (JSON.parse(note.refs) as string[]) : [];
+    } catch {
+      refs = [];
+    }
+    const supersededBy = supersededMark(db, "note", doc.ref);
     // 본문은 제목 줄을 뺀 나머지 — 제목이 잘렸으면(NOTE_TITLE_MAX) 첫 줄까지 그대로 (note-doc.ts noteDocFields와 같은 규칙)
     const [first = "", ...rest] = (note?.text ?? "").split("\n");
     const body = (first.length > NOTE_TITLE_MAX ? note?.text ?? "" : rest.join("\n")).trim();
@@ -544,6 +562,8 @@ function toHit(
       files: parseNotePaths(note?.paths).map((item) => item.path),
       filesChanged: null,
       url: null,
+      ...(supersededBy ? { supersededBy } : {}),
+      ...(refs.length > 0 ? { evidence: refs.slice(0, 3).map((sha) => sha.slice(0, 10)) } : {}),
     };
   }
 
@@ -560,6 +580,7 @@ function toHit(
   ).slice(0, FILES_PER_HIT);
 
   const why = doc.repo_id === null ? undefined : whyLine(db, doc.repo_id, doc.ref);
+  const commitSuperseded = supersededMark(db, "commit", doc.ref);
   return {
     ...base,
     author: commit ? `${commit.author_name} <${commit.author_email}>` : null,
@@ -571,6 +592,7 @@ function toHit(
     body: commit?.body ?? "",
     touched: touchedSymbols(commit?.symbols ?? null, terms),
     ...(why ? { why } : {}),
+    ...(commitSuperseded ? { supersededBy: commitSuperseded } : {}),
   };
 }
 

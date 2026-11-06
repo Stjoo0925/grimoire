@@ -12,6 +12,7 @@ import type { CommitContextView } from "../core/capture";
 import type { FileContext } from "../core/context";
 import { impactLines, INTENT_ONLY_NOTICE, intentOnlyImpact, type Impact } from "../core/impact";
 import type { CommitDetail, RepoOverview, RepoSummary } from "../core/overview";
+import { noteFlags } from "../core/notes";
 import type { SearchHit, SearchResult } from "../core/search";
 
 const SHA = 10;
@@ -105,6 +106,9 @@ export function slimSearch(result: SearchResult, me: string[], detail: Detail = 
         repo: hit.repo ?? undefined,
         // 노트가 묶인 파일 — "이 파일의 결정"을 경로로 찾은 결과에서 어느 파일인지 보이게
         ...(hit.files.length > 0 ? { paths: hit.files.slice(0, FILES_PER_HIT) } : {}),
+        // 이 판단을 뒤집은 것 / 이 판단의 근거 커밋 — 옛 결정만 보고 가지 않게, 꾸며낸 기억과 구별하게
+        ...(hit.supersededBy ? { superseded: hit.supersededBy } : {}),
+        ...(hit.evidence?.length ? { evidence: hit.evidence } : {}),
       };
     }
     const prefix = linkPrefix(hit.url, hit.ref);
@@ -126,6 +130,7 @@ export function slimSearch(result: SearchResult, me: string[], detail: Detail = 
         ...(hit.also?.length ? { also: hit.also.map((sha) => sha.slice(0, ALSO_SHA)) } : {}),
         ...(changed.length > 0 ? { changed } : {}),
         ...(hit.why ? { why: hit.why } : {}),
+        ...(hit.supersededBy ? { superseded: hit.supersededBy } : {}),
         body: snippet(hit.body || hit.snippet, SUMMARY_BODY_CHARS),
       };
     }
@@ -139,12 +144,15 @@ export function slimSearch(result: SearchResult, me: string[], detail: Detail = 
       ...(hit.also?.length ? { also: hit.also.map((sha) => sha.slice(0, ALSO_SHA)) } : {}),
       // 커밋에 묶인 의도 한 줄 — 있을 때만 (capture.ts). "왜 그렇게 했지"에 show_commit 없이 답하게
       ...(hit.why ? { why: hit.why } : {}),
+      ...(hit.supersededBy ? { superseded: hit.supersededBy } : {}),
       body: snippet(hit.snippet),
     };
   });
   return {
     hits,
     ...(Object.keys(links).length > 0 ? { links } : {}),
+    // 질의 확장은 full에서만 — 기본 응답은 짧게, "왜 이게 나왔지"를 따질 때만
+    ...(detail === "full" && result.expanded ? { expanded: result.expanded } : {}),
   };
 }
 
@@ -152,7 +160,7 @@ export function slimSearch(result: SearchResult, me: string[], detail: Detail = 
 const CONTEXT_PROMPTS = 3;
 const CONTEXT_PROMPT_CHARS = 200;
 
-export function slimCommit(detail: CommitDetail, me: string[], context?: CommitContextView | null) {
+export function slimCommit(detail: CommitDetail, me: string[], context?: CommitContextView | null, extra?: { cited?: { id: number; title: string; createdAt: string }[]; superseded?: string | null }) {
   const files = detail.files.slice(0, FILES_PER_COMMIT).map((file) =>
     file.binary ? `${file.path} (binary)` : file.insertions === null ? file.path : `${file.path} +${file.insertions} -${file.deletions}`,
   );
@@ -163,6 +171,7 @@ export function slimCommit(detail: CommitDetail, me: string[], context?: CommitC
         ...(context.prompts.length > 0 ? { prompts: context.prompts.slice(0, CONTEXT_PROMPTS).map((text) => snippet(text, CONTEXT_PROMPT_CHARS)) } : {}),
         ...(context.verify.length > 0 ? { verified: context.verify.slice(-3) } : {}),
         ...(context.dropped.length > 0 ? { dropped: context.dropped } : {}),
+        ...(context.truncated ? { truncated: context.truncated } : {}),
         ...(context.trailers.length > 0 ? { trailers: Object.fromEntries(context.trailers.map((trailer) => [trailer.key, trailer.value])) } : {}),
       }
     : undefined;
@@ -175,6 +184,9 @@ export function slimCommit(detail: CommitDetail, me: string[], context?: CommitC
     subject: detail.subject,
     body: detail.body || undefined,
     ...(why && Object.keys(why).length > 0 ? { why } : {}),
+    // 이 커밋을 뒤집은 것(revert·Supersedes:·노트)과 이 커밋을 근거로 적은 노트 (supersede.ts, notes.ts refs)
+    ...(extra?.superseded ? { superseded: extra.superseded } : {}),
+    ...(extra?.cited?.length ? { notes: extra.cited.map((note) => `#${note.id} ${day(note.createdAt)} "${note.title}"`) } : {}),
     files,
     diff: detail.patch ?? undefined,
     ...(detail.patchTruncated
@@ -214,8 +226,8 @@ export function slimFileContext(context: FileContext, me: string[], verbose = fa
     file: context.path,
     recent,
     // 이 파일에 묶인 노트 — 결정·제약·교훈. 노트 뒤에 파일이 바뀌었으면 stale (notes.ts)
-    ...(context.notes.length > 0 ? { notes: context.notes.map((note) => `#${note.id} ${day(note.createdAt)} "${note.title}"${note.stale ? " (stale: file changed since)" : ""}`) } : {}),
-    ...(context.why ? { why: `${context.why.sha.slice(0, SHA)} "${context.why.text}"${context.why.verify ? ` · verified: ${context.why.verify}` : ""}` } : {}),
+    ...(context.notes.length > 0 ? { notes: context.notes.map((note) => `#${note.id} ${day(note.createdAt)} "${note.title}"${noteFlags(note, "stale: file changed since")}`) } : {}),
+    ...(context.why ? { why: `${context.why.sha.slice(0, SHA)}${context.why.candidates > 1 ? ` (1 of ${context.why.candidates})` : ""} "${context.why.text}"${context.why.verify ? ` · verified: ${context.why.verify}` : ""}${context.why.revisit ? ` · revisit when: ${context.why.revisit}` : ""}` } : {}),
     ...(context.related.length > 0
       ? { cochanges: context.related.map((item) => `${item.path} ${item.support}/${Math.round(item.support / item.confidence)}${item.strong ? " strong" : ""}${item.imports ? " imports" : ""}`) }
       : {}),
@@ -232,7 +244,7 @@ export function slimImpact(impact: Impact) {
     changed: impact.changed,
     ...(intentOnlyImpact(impact) ? { evidence: INTENT_ONLY_NOTICE } : {}),
     impact: impactLines(impact),
-    ...(impact.notes.length > 0 ? { notes: impact.notes.map((note) => `#${note.id} ${note.path} ${day(note.createdAt)} "${note.title}"${note.stale ? " (stale)" : ""}`) } : {}),
+    ...(impact.notes.length > 0 ? { notes: impact.notes.map((note) => `#${note.id} ${note.path} ${day(note.createdAt)} "${note.title}"${noteFlags(note)}`) } : {}),
     note: "candidates to check, not instructions",
   };
 }

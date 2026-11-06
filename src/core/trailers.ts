@@ -50,6 +50,8 @@ export const KNOWN_KEYS = new Set([
   "scope-risk",
   "reversibility",
   "supersedes",
+  // 이 결정을 다시 봐야 할 조건 — 결정 당시의 불확실성을 그때 적는다 (docs/memory-philosophy.md §3-D). 카드의 Why 뒤에 따라 나온다
+  "revisit-when",
   "depends-on",
   "related",
   "lore-id",

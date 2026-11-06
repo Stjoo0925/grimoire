@@ -17,7 +17,9 @@ AI가 프로젝트를 일일이 열어 보거나 git log를 뒤지지 않고, �
 - 응답은 토큰을 아끼는 최소 형태. 대화 컨텍스트에 쌓이는 양이 곧 비용이라서
 - **고치기 전에** (Claude Code 훅, 선택): 그 파일에 묶인 노트, 커밋에 묶인 *왜*, 같이 바뀌는 파일과 테스트를 몇 줄로, 세션당 파일당 한 번 — 이력만 아는 것, 코드로는 알 수 없는 것만
 - **같이 바뀔 파일** (`impact`): 바뀐 파일(안 주면 커밋 안 된 변경)과, 원하면 작업 내용을 주면 같이 고쳐야 할 가능성이 높은 파일을 이유와 함께 순위로 — import(별칭 포함), 정의→참조, 같이 바뀌어 온 이력, 테스트, 거기 묶인 노트. 실제 변경 864건을 다시 돌렸을 때 실제로 같이 바뀐 파일이 상위 5개 안에 든 비율이 59%(작업 내용을 주면 64%), import 그래프만 쓰면 36%. Claude Code에서는 `/grimoire-impact` 스킬이 커밋 전에 부릅니다
-- **파일에 묶인 노트**: `record_note`에 `paths`를 주면 결정·제약·교훈이 그 파일에 묶입니다. 그 파일을 고치기 직전에 보이고, 노트 뒤에 파일이 바뀌었으면 오래됐을 수 있다고 표시합니다. `paths`를 안 주면 작업 폴더에서 바뀐 소스 파일(최대 5개)에 자동으로 묶고 응답에 `autoBound`로 알립니다(`paths: []`면 묶지 않음)
+- **파일에 묶인 노트**: `record_note`에 `paths`를 주면 결정·제약·교훈이 그 파일에 묶입니다. 그 파일을 고치기 직전에 보이고, 노트 뒤에 파일이 바뀌었으면 오래됐을 수 있다고 표시합니다. `paths`를 안 주면 작업 폴더에서 바뀐 소스 파일(최대 5개)에 자동으로 묶고 응답에 `autoBound`로 알립니다(`paths: []`면 묶지 않음). 추정으로 묶인 것은 어디서 보이든 `auto-bound`로 표시됩니다
+- **판단은 다시 확인하거나 뒤집을 수 있고, 조용히 사라지지 않습니다**: `record_note`에 `confirms: ["#12"]`를 주면 "다시 봤고 아직 맞다"(stale이 풀리고, 횟수가 쌓이고, 카드에서 먼저 나옵니다). `supersedes: ["#12", "<sha>"]`는 "이 판단이 저것을 뒤집는다" — 옛 노트는 고치기 직전 카드에서 빠지지만 검색에는 `superseded` 표시로 남습니다. `git revert`와 `Supersedes:` 트레일러는 커밋에 같은 일을 해서, 뒤집힌 커밋의 *왜*는 지금의 왜로 나오지 않습니다. AI 노트는 사람의 노트를 숨기지 못합니다 — 둘 다 `disputed`로 보입니다. 유사도나 나이로 자동으로 물리는 일은 없습니다 (`docs/memory-philosophy.md`)
+- **조용히 잃는 것이 없습니다**: 긴 세션의 첫 프롬프트는 마지막 것들과 함께 남고(마지막 10개만이 아니라), 잘린 기록은 `truncated`로 적히고, 너무 긴 노트는 자르지 않고 거절하며, `grimoire remove`는 캡처된 *왜*와 노트가 있으면 `--yes` 없이는 지우지 않습니다 — `grimoire export <repo>`로 먼저 꺼낼 수 있습니다. `grimoire review [repo]`는 다시 볼 노트(stale, 추정 묶기, 오래 확인 안 됨, 뒤집힌 커밋 인용)를 모아 보이기만 합니다
 - **커밋에 묶인 "왜"**: 커밋 트레일러(`Constraint:`·`Rejected:`·`Tested:`·`Why:` …)와, 훅이 있으면 AI에게 한 말·돌린 검증·고쳤다가 뺀 파일까지 sha에 붙어 그때 쓴 말로 검색됨
 - **규칙이 왜 있는지**: 규칙은 규칙 파일(`CLAUDE.md`·`AGENTS.md`·`.claude/rules/`·`.cursor/rules/`·`.github/copilot-instructions.md`·`.kiro/steering/`…)에 그대로 있고, Grimoire는 규칙을 쓰지도 복제하지도 않습니다. 규칙 하나(목록 항목·문단)마다 지금 글자를 쓴 커밋(`git blame`)과 그 커밋의 *왜*를 색인해서, `search_memory`(`kind: rule`)가 "이 규칙 왜 있지?"에 답합니다. 에이전트가 규칙 파일을 고치기 직전에는 바꾸는 규칙이 어디서 왔는지 훅이 알려 주고, 규칙 파일을 언급한 노트는 그 파일이 바뀌면 오래됐다고 표시됩니다
 - LLM·임베딩 모델·GPU 필요 없음: 검색은 키워드(SQLite FTS5)로 하고, 찾은 근거를 읽는 건 이미 쓰는 AI가 합니다
@@ -202,7 +204,11 @@ grimoire show 2518bf75 --path route.ts         # 경로 일부가 맞는 파일�
 grimoire overview please_readme                # 기술 스택·활동·많이 건드린 곳·최근 주요 커밋
 grimoire context src/core/search.ts            # 고치기 전에: 최근 커밋·왜·같이 바뀌는 파일/테스트·import하는 파일
 grimoire note "결정: 세션 대신 JWT — 모바일 때문" --repo shop-api --tag decision
-grimoire remove shop-api                       # 레포와 색인 삭제
+grimoire note "결정: 결국 세션 — 모바일은 OAuth로 갔다" --supersedes 12   # 노트 #12(또는 sha)를 뒤집는다
+grimoire note confirm 12                       # 다시 봤고 아직 맞다 (stale이 풀린다)
+grimoire review shop-api                       # 다시 볼 노트 — 보여 주기만 한다
+grimoire export shop-api --out shop-api.json   # 노트 + 캡처된 왜를 JSON으로 (remove 전에)
+grimoire remove shop-api --yes                 # 레포와 색인 삭제 (기억이 사라질 때는 확인을 받는다)
 grimoire update                                # 최신 릴리스로 올리기 (아래 '업데이트')
 grimoire impact                                 # 커밋 안 된 변경이 같이 건드릴 곳 (또는 grimoire impact <파일...>) — MCP 서버처럼 그 레포를 등록·동기화
 grimoire impact src/api.ts --intent "내보내기에 열 추가"   # 같은 작업을 한 과거 커밋이 건드린 파일도 합침

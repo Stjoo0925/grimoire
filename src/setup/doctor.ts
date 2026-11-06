@@ -8,7 +8,7 @@ import path from "node:path";
 
 import { dbPath, grimoireHome, type Env } from "../core/config";
 import { needsCochangeBackfill } from "../core/context";
-import { loadSqlite, MIN_NODE, openDb } from "../core/db";
+import { loadSqlite, MIN_NODE, openDb, type DB } from "../core/db";
 import { runGit } from "../core/git";
 import { myEmails } from "../core/identity";
 import { listRepos, worktreeRegistrations } from "../core/indexer";
@@ -80,6 +80,7 @@ export async function doctor(options: DoctorOptions): Promise<Check[]> {
 
   // 3. DB와 레포
   const file = dbPath(env);
+  const me = await myEmails(env);
   if (sqliteOk) {
     try {
       const db = openDb(file);
@@ -102,6 +103,16 @@ export async function doctor(options: DoctorOptions): Promise<Check[]> {
               title: `경로가 사라진 레포 ${missing.length}개`,
               detail: missing.map((repo) => repo.path).join(", "),
               fix: missing.map((repo) => `grimoire remove ${repo.name}`).join("  /  "),
+            });
+          }
+          // "나"의 메일이 그 레포의 주요 작성자와 하나도 안 겹치면 author: "me"가 빈 목록을 내고, 빈 목록은 "그런 일 없었다"로 읽힌다 (docs/feature-audit.md F13)
+          const strangers = me.length > 0 ? repos.filter((repo) => authorsMissingMe(db, repo.id, me)) : [];
+          if (strangers.length > 0) {
+            checks.push({
+              level: "warn",
+              title: `내 이메일이 커밋 작성자에 없는 레포 ${strangers.length}개 — 거기서는 author: "me" 결과가 비어 있습니다`,
+              detail: strangers.map((repo) => `${repo.name}: ${topAuthors(db, repo.id).join(", ")}`).join("\n    "),
+              fix: "GRIMOIRE_ME=개인메일,회사메일 처럼 쓰는 메일을 모두 적으세요",
             });
           }
           const neverSynced = repos.filter((repo) => !repo.synced_at);
@@ -145,7 +156,6 @@ export async function doctor(options: DoctorOptions): Promise<Check[]> {
   }
 
   // 4. "나"
-  const me = await myEmails(env);
   checks.push(
     me.length > 0
       ? { level: "ok", title: "내 이메일", detail: me.join(", ") }
@@ -394,4 +404,16 @@ export function formatChecks(checks: Check[]): string {
   const warns = checks.filter((check) => check.level === "warn").length;
   lines.push("", fails > 0 ? `문제 ${fails}개, 주의 ${warns}개` : warns > 0 ? `동작 가능, 주의 ${warns}개` : "모두 정상");
   return lines.join("\n");
+}
+
+/** 레포에서 커밋이 많은 작성자 메일 셋 — 작은 레포(커밋 20개 미만)는 보지 않는다 */
+const AUTHOR_CHECK_MIN_COMMITS = 20;
+function topAuthors(db: DB, repoId: number): string[] {
+  return (db.prepare("SELECT author_email AS email, COUNT(*) AS n FROM commits WHERE repo_id = ? GROUP BY author_email ORDER BY n DESC LIMIT 3").all(repoId) as { email: string }[]).map((row) => row.email);
+}
+function authorsMissingMe(db: DB, repoId: number, me: string[]): boolean {
+  const total = (db.prepare("SELECT COUNT(*) AS n FROM commits WHERE repo_id = ?").get(repoId) as { n: number }).n;
+  if (total < AUTHOR_CHECK_MIN_COMMITS) return false;
+  const mine = new Set(me.map((email) => email.toLowerCase()));
+  return !topAuthors(db, repoId).some((email) => mine.has(email.toLowerCase()));
 }

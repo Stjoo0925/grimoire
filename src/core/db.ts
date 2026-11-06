@@ -109,8 +109,13 @@ export class DB {
   }
 }
 
-/** 스키마 버전 — 바꾸면 MIGRATIONS에 한 단계를 덧붙인다. */
-/** SQL 한 덩어리, 또는 SQL로 못 하는 데이터 손질(같은 트랜잭션 안에서 돈다) */
+/**
+ * 스키마 버전 — 바꾸면 MIGRATIONS에 한 단계를 덧붙인다. SQL 한 덩어리, 또는 SQL로 못 하는 데이터 손질(같은 트랜잭션 안에서 돈다).
+ *
+ * 저장된 원문(프롬프트·노트·커밋 맥락)을 고치거나 지우는 단계는 **비밀 제거**(8·13)와 **잘못 묶인 기록의 분리**(11)만 허용한다.
+ * 내용의 가치·중요도·신선도를 이유로 지우거나 요약하지 않는다 — grimoire의 가치는 꺼내도 바뀌지 않는 기억이라는 점 하나다
+ * (docs/memory-philosophy.md §0·§4, docs/feature-audit.md F8). 그런 단계는 바꾼 행 수를 돌려주거나 로그로 남긴다.
+ */
 const MIGRATIONS: (string | ((db: DB) => void))[] = [
   `
   CREATE TABLE repos (
@@ -357,6 +362,22 @@ const MIGRATIONS: (string | ((db: DB) => void))[] = [
   // 13: 보강된 비밀 지우기 규칙을 이미 저장된 세션 기록·노트에 다시 적용한다 (capture.ts) —
   //     0.12.x는 SECRET_KEY=·PRIVATE_KEY=·DB_PASS= 처럼 키워드 뒤에 꼬리가 붙은 이름과 curl -u·Basic 인증을 놓쳤다
   reRedactStored,
+  // 14: 판단의 확인·뒤집기(supersede.ts) — 누가(by) 무엇을(target) 어떻게(how) 뒤집거나 확인했나. 기억은 지우지 않고 그 위에 쌓는다
+  //     (docs/memory-philosophy.md §3). 노트 본문에 적힌 커밋 sha는 refs로 묶어 "이 노트의 근거"가 된다 (§3-C)
+  `
+  CREATE TABLE supersessions (
+    repo_id      INTEGER REFERENCES repos(id) ON DELETE CASCADE,
+    target_kind  TEXT NOT NULL,
+    target_ref   TEXT NOT NULL,
+    by_kind      TEXT NOT NULL,
+    by_ref       TEXT NOT NULL,
+    how          TEXT NOT NULL,
+    at           TEXT NOT NULL,
+    PRIMARY KEY (target_kind, target_ref, by_kind, by_ref, how)
+  );
+  CREATE INDEX supersessions_by ON supersessions (by_kind, by_ref);
+  ALTER TABLE notes ADD COLUMN refs TEXT NOT NULL DEFAULT '[]';
+  `,
 ];
 
 /**

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.1](https://github.com/Stjoo0925/grimoire/compare/v0.14.0...v0.14.1) (2026-11-08)
+
+
+### 버그 수정
+
+* **memory:** 리뷰 발견 10개 — revert 판단 보존, 확인은 노트 없이, export·remove에 판단 기록 포함 ([#57](https://github.com/Stjoo0925/grimoire/issues/57)) ([1fa2636](https://github.com/Stjoo0925/grimoire/commit/1fa2636c6fe06dd85544be5bb4883bb575d665be))
+
 ## [0.14.0](https://github.com/Stjoo0925/grimoire/compare/v0.13.0...v0.14.0) (2026-11-06)
 
 

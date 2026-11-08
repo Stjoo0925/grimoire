@@ -174,10 +174,12 @@ test("F2·F18: 커밋에 묶이지 않은 이전 세션의 프롬프트를 Sessi
   await syncRepo(db, repo);
   const context = { db, env: { GRIMOIRE_HOME: tempDir("grimoire-orphan-home-") }, me: [] };
 
-  // 이전 세션: 프롬프트만 있고 커밋이 없다
-  await handleHook(context, event(dir, "old-1", { hook_event_name: "UserPromptSubmit", prompt: "캐시를 Redis로 옮길지 조사했는데 하지 않기로 했다" }));
+  // 이전 세션(이틀 전, 조용함): 프롬프트만 있고 커밋이 없다. 지금 돌고 있는 다른 세션(live-1)의 프롬프트는 세지 않는다
+  const twoDaysAgo = new Date(Date.now() - 2 * 86_400_000).toISOString();
+  recordEvent(db, { sessionId: "old-1", repoId: repo.id, kind: "prompt", text: "캐시를 Redis로 옮길지 조사했는데 하지 않기로 했다" }, twoDaysAgo);
+  await handleHook(context, event(dir, "live-1", { hook_event_name: "UserPromptSubmit", prompt: "지금 작업 중인 다른 세션의 말" }));
   const start = await handleHook(context, { hook_event_name: "SessionStart", session_id: "new-1", cwd: dir, source: "startup" });
-  assert.match(start?.stdout ?? "", /1 prompt\(s\) from earlier sessions were never bound to a commit \(oldest expires in 14d\)/);
+  assert.match(start?.stdout ?? "", /1 prompt\(s\) from earlier sessions were never bound to a commit \(oldest expires in 12d\)/);
 
   // 이번 세션: a·b를 고치고 a만 커밋 — b는 되돌렸다(작업 폴더에 변경이 없다)
   const session = "new-1";

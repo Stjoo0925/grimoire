@@ -29,8 +29,8 @@ import { indexCommitCode } from "./core/diffs";
 import { addRepo, discoverRepos, exportRepoMemory, listRepos, matchRepos, relativeToRepo, removeRepo, repoMemorySize, resolveRepoFile, syncRepo, type RepoRow } from "./core/indexer";
 import { parseNotePaths } from "./core/note-doc";
 import { AUTO_BIND_MAX, autoBindPaths } from "./core/note-autobind";
-import { addNote, deleteNote, PATHS_MAX } from "./core/notes";
-import { recordVerdicts, refLabel, resolveRefs, REVIEW_DAYS, reviewNotes, type ResolvedRef } from "./core/supersede";
+import { addNote, deleteNote } from "./core/notes";
+import { inheritedNotePaths, recordVerdicts, refLabel, resolveRefs, REVIEW_DAYS, reviewNotes } from "./core/supersede";
 import { commitDetail, repoOverview, repoSummaries } from "./core/overview";
 import { search } from "./core/search";
 import { pendingUpdate, refreshUpdateCache, VERSION } from "./core/update";
@@ -247,15 +247,24 @@ async function main(argv: string[]): Promise<number> {
         const located = values.repo ? null : await resolveRepoFile(db, given.find((item) => path.isAbsolute(item)) ?? process.cwd());
         const repo = values.repo ? requireRepo(db, values.repo) : given.length > 0 ? located?.repo : undefined;
         if (given.length > 0 && !repo) throw new UsageError("--path를 묶을 레포를 알 수 없습니다 — --repo로 지정하세요");
-        const text = words.join(" ").trim() || (confirmTokens.length > 0 ? `확인: ${confirmTokens.map((token) => (token.startsWith("#") ? token : `#${token}`)).join(", ")} — 다시 보았고 아직 맞다` : "");
-        if (!text) throw new UsageError("노트 내용이 필요합니다");
+        const text = words.join(" ").trim();
         // 뒤집기·확인의 대상을 먼저 풀어 본다 — 틀린 참조로 노트만 남지 않게 (supersede.ts)
         const verdictRepo = repo ?? (await resolveRepoFile(db, process.cwd()))?.repo;
         const supersedes = resolveRefs(db, verdictRepo?.id ?? null, supersedeTokens);
         const confirms = resolveRefs(db, verdictRepo?.id ?? null, confirmTokens);
+        if (!text) {
+          if (supersedes.length > 0) throw new UsageError("뒤집는 이유를 적어야 합니다 — grimoire note \"새 결정과 이유\" --supersedes <번호>");
+          if (confirms.length === 0) throw new UsageError("노트 내용이 필요합니다");
+          // 확인만: 노트를 만들지 않는다 — 한 글자도 안 쓰고 "봤다, 맞다"만 남긴다. 기록의 주체는 사람(user:cli)
+          const result = recordVerdicts(db, { repoId: verdictRepo?.id ?? null, by: { kind: "user", ref: "cli" }, targets: confirms, how: "confirm" });
+          print(`확인: ${confirms.map(refLabel).join(", ")} — 다시 보았고 아직 맞다 (stale 해제)`);
+          for (const warning of result.notes) console.error(`  ${warning}`);
+          return 0;
+        }
         let bound = repo;
         let bindPaths = repo ? given.map((item) => (path.isAbsolute(item) ? relativeToRepo(repo.path, item) : item)) : [];
         let autoNote = "";
+        let autoBound = false;
         // 뒤집거나 확인하는 노트가 묶인 파일을 물려받는다 — 새 판단이 옛 판단이 보이던 자리에서 보이게
         const inherited = given.length === 0 ? inheritedNotePaths(db, [...supersedes, ...confirms]) : [];
         if (inherited.length > 0 && verdictRepo) {
@@ -270,10 +279,11 @@ async function main(argv: string[]): Promise<number> {
               bound = target;
               bindPaths = auto.paths;
               autoNote = " [바뀐 파일에 자동으로 묶음]";
+              autoBound = true;
             } else if (auto.tooMany) autoNote = ` (바뀐 소스 파일이 ${AUTO_BIND_MAX}개를 넘어 파일에 묶지 않았습니다)`;
           }
         }
-        const note = addNote(db, { text, repoId: bound?.id ?? null, tags: values.tag, paths: autoNote.includes("자동") ? [] : bindPaths, autoPaths: autoNote.includes("자동") ? bindPaths : [], source: "cli" });
+        const note = addNote(db, { text, repoId: bound?.id ?? null, tags: values.tag, paths: autoBound ? [] : bindPaths, autoPaths: autoBound ? bindPaths : [], source: "cli" });
         const by = { kind: "note" as const, ref: String(note.id) };
         const warnings: string[] = [];
         if (supersedes.length > 0) warnings.push(...recordVerdicts(db, { repoId: bound?.id ?? null, by, targets: supersedes, how: "note" }).notes);
@@ -319,9 +329,9 @@ async function main(argv: string[]): Promise<number> {
         const repo = requireRepo(db, need(positionals[0], "repo"));
         // 색인은 다시 만들 수 있지만 커밋에 묶인 "왜"와 노트는 못 만든다 — 있으면 보이고 --yes를 요구한다 (docs/feature-audit.md F5)
         const memory = repoMemorySize(db, repo.id);
-        if ((memory.context > 0 || memory.notes > 0) && !values.yes) {
+        if ((memory.context > 0 || memory.notes > 0 || memory.verdicts > 0) && !values.yes) {
           console.error(
-            `${repo.name}에는 git에 없는 기억이 있습니다 — 커밋에 묶인 세션 기록·트레일러 ${memory.context}건, 노트 ${memory.notes}개.\n` +
+            `${repo.name}에는 git에 없는 기억이 있습니다 — 커밋에 묶인 세션 기록·트레일러 ${memory.context}건, 노트 ${memory.notes}개, 확인·뒤집기 기록 ${memory.verdicts}건.\n` +
               `지우면 되살릴 수 없습니다. 먼저 \`grimoire export ${repo.name} --out <file>\`로 꺼내 두고, 정말 지우려면 --yes를 붙이세요.`,
           );
           return 1;
@@ -560,17 +570,6 @@ function toInt(value: string | undefined): number | undefined {
 }
 
 const day = (iso: string | null) => (iso ? iso.slice(0, 10) : "-");
-/** 뒤집거나 확인하는 노트들이 묶인 파일 — 새 판단이 같은 자리에서 보이게 물려받는다 (MCP의 inheritedPaths와 같은 규칙) */
-function inheritedNotePaths(db: DB, targets: ResolvedRef[]): string[] {
-  const out: string[] = [];
-  for (const target of targets) {
-    if (target.kind !== "note") continue;
-    const row = db.prepare("SELECT paths FROM notes WHERE id = ?").get(Number(target.ref)) as { paths: string } | undefined;
-    for (const item of parseNotePaths(row?.paths)) if (!out.includes(item.path)) out.push(item.path);
-  }
-  return out.slice(0, PATHS_MAX);
-}
-
 const print = (line: string) => process.stdout.write(line + "\n");
 const printJson = (value: unknown) => {
   print(JSON.stringify(value, null, 2));

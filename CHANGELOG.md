@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.3](https://github.com/Stjoo0925/grimoire/compare/v0.14.2...v0.14.3) (2026-11-09)
+
+
+### 버그 수정
+
+* **repos:** 이름이 같은 등록이 여럿이면 이름으로 고르지 않는다 ([#61](https://github.com/Stjoo0925/grimoire/issues/61)) ([12d4679](https://github.com/Stjoo0925/grimoire/commit/12d4679358c28d4afd56e43dcf63724cabff5d24))
+
 ## [0.14.2](https://github.com/Stjoo0925/grimoire/compare/v0.14.1...v0.14.2) (2026-11-09)
 
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.2](https://github.com/Stjoo0925/grimoire/compare/v0.14.1...v0.14.2) (2026-11-09)
+
+
+### 버그 수정
+
+* **memory:** 이미 색인된 이력의 revert·Supersedes: 판단을 채운다 (마이그레이션 16) ([#59](https://github.com/Stjoo0925/grimoire/issues/59)) ([9d189f2](https://github.com/Stjoo0925/grimoire/commit/9d189f206544ca89b5cce4d2104f72e3ac85d70c))
+
 ## [0.14.1](https://github.com/Stjoo0925/grimoire/compare/v0.14.0...v0.14.1) (2026-11-08)
 
 

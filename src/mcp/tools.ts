@@ -25,7 +25,7 @@ import { isBusyError, type DB } from "../core/db";
 import { resolveAuthors } from "../core/identity";
 import { indexCommitCode } from "../core/diffs";
 import { CancelledError, worktreeRoots } from "../core/git";
-import { addRepo, discoverRepos, listRepos, matchRepos, relativeToRepo, resolveRepoFile, syncRepo } from "../core/indexer";
+import { addRepo, discoverRepos, listRepos, matchRepos, relativeToRepo, repoChoices, resolveRepoFile, syncRepo } from "../core/indexer";
 import { parseNotePaths } from "../core/note-doc";
 import { addNote, notesCiting, PATHS_MAX, TAG_CHARS, TAGS_MAX } from "../core/notes";
 import { inheritedNotePaths, recordVerdicts, refLabel, resolveRefs, supersededMark, type ResolvedRef } from "../core/supersede";
@@ -343,7 +343,7 @@ async function runTool(
     if (matches.length === 0) throw new ToolError(`레포를 찾지 못했습니다: ${query}. list_repos로 목록을 확인하세요.`);
     if (matches.length > 1) {
       // 조용히 첫 번째를 고르면 엉뚱한 레포를 보거나 노트를 남긴다 — 후보를 보여 주고 고르게 한다
-      throw new ToolError(`'${query}'와 맞는 레포가 여럿입니다: ${matches.map((repo) => repo.name).join(", ")}. 정확한 이름을 주세요.`);
+      throw new ToolError(`'${query}'와 맞는 레포가 여럿입니다: ${repoChoices(matches)}. 정확한 이름이나 경로를 주세요.`);
     }
     return matches[0];
   };

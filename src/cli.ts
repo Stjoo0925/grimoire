@@ -26,7 +26,7 @@ import { formatImpact, impactOf, workingChanges } from "./core/impact";
 import { openDb, type DB } from "./core/db";
 import { myEmails, resolveAuthors } from "./core/identity";
 import { indexCommitCode } from "./core/diffs";
-import { addRepo, discoverRepos, exportRepoMemory, listRepos, matchRepos, relativeToRepo, removeRepo, repoMemorySize, resolveRepoFile, syncRepo, type RepoRow } from "./core/indexer";
+import { addRepo, discoverRepos, exportRepoMemory, listRepos, matchRepos, relativeToRepo, removeRepo, repoArg, repoChoices, repoMemorySize, resolveRepoFile, syncRepo, type RepoRow } from "./core/indexer";
 import { parseNotePaths } from "./core/note-doc";
 import { AUTO_BIND_MAX, autoBindPaths } from "./core/note-autobind";
 import { addNote, deleteNote } from "./core/notes";
@@ -332,7 +332,7 @@ async function main(argv: string[]): Promise<number> {
         if ((memory.context > 0 || memory.notes > 0 || memory.verdicts > 0) && !values.yes) {
           console.error(
             `${repo.name}에는 git에 없는 기억이 있습니다 — 커밋에 묶인 세션 기록·트레일러 ${memory.context}건, 노트 ${memory.notes}개, 확인·뒤집기 기록 ${memory.verdicts}건.\n` +
-              `지우면 되살릴 수 없습니다. 먼저 \`grimoire export ${repo.name} --out <file>\`로 꺼내 두고, 정말 지우려면 --yes를 붙이세요.`,
+              `지우면 되살릴 수 없습니다. 먼저 \`grimoire export ${repoArg(repo, listRepos(db))} --out <file>\`로 꺼내 두고, 정말 지우려면 --yes를 붙이세요.`,
           );
           return 1;
         }
@@ -558,7 +558,11 @@ function requireRepo(db: DB, query: string): RepoRow {
   const matches = matchRepos(db, query);
   if (matches.length === 0) throw new UsageError(`레포를 찾지 못했습니다: ${query} (grimoire repos로 확인)`);
   if (matches.length > 1) {
-    throw new UsageError(`'${query}'와 맞는 레포가 여럿입니다: ${matches.map((repo) => repo.name).join(", ")} — 정확한 이름을 주세요`);
+    // 이름이 같은 등록이 여럿이면 이름으로는 고를 수 없다 — 경로를 보이고 경로로 다시 부르게 한다
+    const sameName = matches.every((repo) => repo.name.toLowerCase() === matches[0].name.toLowerCase());
+    throw new UsageError(
+      `'${query}'와 맞는 레포가 여럿입니다: ${repoChoices(matches)} — ${sameName ? "이름이 같으니 경로로 지정하세요" : "정확한 이름이나 경로를 주세요"}`,
+    );
   }
   return matches[0];
 }

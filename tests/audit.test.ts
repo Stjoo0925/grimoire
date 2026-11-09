@@ -194,3 +194,33 @@ test("F2·F18: 커밋에 묶이지 않은 이전 세션의 프롬프트를 Sessi
   assert.match(text, /^Grimoire: edited but left out of this commit: src\/b\.ts — if that was a dead end, record_note keeps the why/);
   assert.equal(out?.json?.hookSpecificOutput.hookEventName, "PostToolUse");
 });
+
+test("이름이 같은 레포 등록이 둘이면 이름으로 고르지 않는다 — 경로로만 하나를 고르고, doctor도 경로로 권한다", async () => {
+  const { matchRepos, findRepo, repoArg, listRepos } = await import("../src/core/indexer.js");
+  const { doctor } = await import("../src/setup/doctor.js");
+  const { openDb } = await import("../src/core/db.js");
+  const home = tempDir();
+  const env = { GRIMOIRE_HOME: path.join(home, ".grimoire"), GRIMOIRE_ME: "me@example.com" };
+  const live = makeRepo([{ message: "feat: 시작", files: { "src/a.ts": "export const a = 1;\n" } }], "twin");
+  const gone = makeRepo([{ message: "feat: 시작", files: { "src/a.ts": "export const a = 1;\n" } }], "twin");
+  const db = openDb(path.join(env.GRIMOIRE_HOME, "grimoire.db"));
+  try {
+    const a = await addRepo(db, live);
+    const b = await addRepo(db, gone);
+    assert.equal(a.name, b.name, "같은 이름으로 등록된다");
+    assert.equal(matchRepos(db, "twin").length, 2, "이름이 같으면 둘 다 돌려준다");
+    assert.equal(findRepo(db, "twin"), null);
+    assert.equal(findRepo(db, gone)?.id, b.id, "경로는 정확히 하나");
+    assert.equal(repoArg(b, listRepos(db)), `"${gone}"`);
+    await assert.rejects(callTool({ db, me: [], cwd: process.cwd() }, "get_repo_overview", { repo: "twin" }), (error: Error) => error.message.includes(`twin (${gone})`) && error.message.includes(`twin (${live})`));
+  } finally {
+    db.close();
+  }
+  fs.rmSync(gone, { recursive: true, force: true });
+  const offline = (async () => {
+    throw new Error("down");
+  }) as unknown as typeof fetch;
+  const checks = await doctor({ cliPath: path.join(home, "cli.js"), env, home, fetchImpl: offline, runCommand: () => Promise.reject(new Error("no")) });
+  const missing = checks.find((check) => check.title.includes("경로가 사라진 레포"));
+  assert.equal(missing?.fix, `grimoire remove "${gone}"`, "이름이 겹치면 경로로 지우라고 권한다");
+});

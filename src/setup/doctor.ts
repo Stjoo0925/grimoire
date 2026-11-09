@@ -11,7 +11,7 @@ import { needsCochangeBackfill } from "../core/context";
 import { loadSqlite, MIN_NODE, openDb, type DB } from "../core/db";
 import { runGit } from "../core/git";
 import { myEmails } from "../core/identity";
-import { listRepos, worktreeRegistrations } from "../core/indexer";
+import { listRepos, repoArg, worktreeRegistrations } from "../core/indexer";
 import { compareVersions, RELEASES_URL, refreshUpdateCache, updateCheckEnabled, VERSION } from "../core/update";
 import { hookCommandEnv, outdatedHooks, parseHookCommand, readInstalledHooks, settingsPath } from "./hooks";
 import { skillState } from "./skills";
@@ -102,7 +102,8 @@ export async function doctor(options: DoctorOptions): Promise<Check[]> {
               level: "warn",
               title: `경로가 사라진 레포 ${missing.length}개`,
               detail: missing.map((repo) => repo.path).join(", "),
-              fix: missing.map((repo) => `grimoire remove ${repo.name}`).join("  /  "),
+              // 이름이 같은 등록이 또 있으면 이름으로 지우면 살아 있는 쪽이 지워질 수 있다 — 그때는 경로로 권한다
+              fix: missing.map((repo) => `grimoire remove ${repoArg(repo, repos)}`).join("  /  "),
             });
           }
           // "나"의 메일이 그 레포의 주요 작성자와 하나도 안 겹치면 author: "me"가 빈 목록을 내고, 빈 목록은 "그런 일 없었다"로 읽힌다 (docs/feature-audit.md F13)
@@ -137,7 +138,7 @@ export async function doctor(options: DoctorOptions): Promise<Check[]> {
               title: `다른 레포의 git worktree가 따로 등록돼 있습니다 (${worktrees.length}개) — 같은 커밋이 검색에 겹쳐 나옵니다`,
               detail: worktrees.map((item) => `${item.repo.name} → 본 레포 ${item.main}${item.mainRegistered ? "" : " (미등록)"}`).join("\n    "),
               fix: worktrees
-                .map((item) => (item.mainRegistered ? `grimoire remove ${item.repo.name}` : `grimoire remove ${item.repo.name} && grimoire add "${item.main}"`))
+                .map((item) => (item.mainRegistered ? `grimoire remove ${repoArg(item.repo, repos)}` : `grimoire remove ${repoArg(item.repo, repos)} && grimoire add "${item.main}"`))
                 .join("  /  "),
             });
           }

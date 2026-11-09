@@ -159,17 +159,18 @@ export function listRepos(db: DB): RepoRow[] {
 }
 
 /**
- * 이름·경로·원격 URL 일부와 맞는 레포들. 정확한 이름·경로 일치가 있으면 그것 하나만.
- * 여럿이면 호출부가 후보를 보여 주고 고르게 한다 (findRepo는 모호하면 null).
+ * 이름·경로·원격 URL 일부와 맞는 레포들. 정확한 경로 일치가 있으면 그것 하나, 정확한 이름 일치가 있으면 그것들만.
+ * 이름이 같은 등록이 여럿일 수 있다(같은 원격을 두 폴더에 클론, 폴더를 옮긴 뒤 옛 등록이 남음) — 그때 하나를 고르면
+ * remove가 살아 있는 쪽을 지울 수 있다. 전부 돌려주고, 호출부가 경로와 함께 후보를 보여 고르게 한다 (findRepo는 모호하면 null).
  */
 export function matchRepos(db: DB, query: string): RepoRow[] {
   const repos = listRepos(db);
   const q = query.trim().toLowerCase();
   if (!q) return [];
-  const exact = repos.find(
-    (repo) => repo.name.toLowerCase() === q || repo.path.toLowerCase() === q,
-  );
-  if (exact) return [exact];
+  const byPath = repos.find((repo) => repo.path.toLowerCase() === q || path.resolve(repo.path).toLowerCase() === path.resolve(query.trim()).toLowerCase());
+  if (byPath) return [byPath];
+  const byName = repos.filter((repo) => repo.name.toLowerCase() === q);
+  if (byName.length > 0) return byName;
   return repos.filter(
     (repo) =>
       repo.name.toLowerCase().includes(q) ||
@@ -310,6 +311,19 @@ export async function worktreeRegistrations(db: DB): Promise<{ repo: RepoRow; ma
 export function findRepo(db: DB, query: string): RepoRow | null {
   const matches = matchRepos(db, query);
   return matches.length === 1 ? matches[0] : null;
+}
+
+/** 후보가 여럿일 때 보여 줄 이름 — 이름이 겹치는 후보는 경로를 붙인다 (이름만으로는 고를 수 없다) */
+export function repoChoices(repos: RepoRow[]): string {
+  const names = new Map<string, number>();
+  for (const repo of repos) names.set(repo.name.toLowerCase(), (names.get(repo.name.toLowerCase()) ?? 0) + 1);
+  return repos.map((repo) => ((names.get(repo.name.toLowerCase()) ?? 0) > 1 ? `${repo.name} (${repo.path})` : repo.name)).join(", ");
+}
+
+/** CLI·doctor가 이 레포를 가리킬 때 쓸 인자 — 이름이 하나뿐이면 이름, 같은 이름이 또 있으면 따옴표 친 경로 */
+export function repoArg(repo: RepoRow, all: RepoRow[]): string {
+  const same = all.filter((other) => other.name.toLowerCase() === repo.name.toLowerCase()).length;
+  return same > 1 ? `"${repo.path}"` : repo.name;
 }
 
 /**

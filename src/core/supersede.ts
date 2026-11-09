@@ -268,6 +268,29 @@ export function recordCommitVerdicts(db: DB, repoId: number, sha: string, body: 
   return recorded;
 }
 
+/**
+ * 이미 색인된 커밋의 판단을 한 번 채운다(마이그레이션 16) — revert 본문과 Supersedes: 트레일러가 있는 커밋만 읽는다.
+ * 이미 있는 판단은 INSERT OR IGNORE로 겹치지 않는다(같은 커밋·같은 대상이면 at만 다르다 — 그래서 있는 것은 건너뛴다). 더한 행 수.
+ */
+export function backfillCommitVerdicts(db: DB): number {
+  const rows = db
+    .prepare(
+      `SELECT c.repo_id, c.sha, c.body FROM commits c
+        WHERE c.body LIKE '%This reverts commit %'
+           OR EXISTS (SELECT 1 FROM commit_context x WHERE x.repo_id = c.repo_id AND x.sha = c.sha AND x.kind = 'trailer:supersedes')`,
+    )
+    .all() as { repo_id: number; sha: string; body: string }[];
+  const trailers = db.prepare("SELECT text FROM commit_context WHERE repo_id = ? AND sha = ? AND kind = 'trailer:supersedes' ORDER BY ord");
+  const done = db.prepare("SELECT 1 FROM supersessions WHERE by_kind = 'commit' AND by_ref = ? LIMIT 1");
+  let added = 0;
+  for (const row of rows) {
+    if (done.get(row.sha)) continue;
+    const values = (trailers.all(row.repo_id, row.sha) as { text: string }[]).map((item) => item.text);
+    added += recordCommitVerdicts(db, row.repo_id, row.sha, row.body, values);
+  }
+  return added;
+}
+
 /* ── 사람이 정리하는 자리 ───────────────────────────────── */
 
 export interface ReviewItem {

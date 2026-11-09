@@ -273,3 +273,32 @@ test("review: stale·추정 묶기·오래 확인 안 됨·근거 뒤집힘을 �
   assert.equal(deleteNote(db, 9999), false);
   assert.equal(search(db, `#${replacement.id}`).hits.some((hit) => hit.kind === "note" && hit.ref === String(replacement.id)), false);
 });
+
+
+test("마이그레이션 16: 0.14 전에 색인된 revert·Supersedes: 트레일러의 판단을 채운다 — 이미 있는 판단은 겹치지 않는다", async () => {
+  const { openDb } = await import("../src/core/db.js");
+  const { backfillCommitVerdicts } = await import("../src/core/supersede.js");
+  const { tempDir } = await import("./helpers.js");
+  const file = path.join(tempDir("grimoire-backfill-"), "grimoire.db");
+  const dir = makeRepo([{ message: "feat: 캐시\n\nWhy: 느려서", files: { "src/a.ts": "export const a = 1;\n" }, date: "2024-01-01T10:00:00+09:00" }], "backfill");
+  const first = (await headSha(dir))!;
+  addCommit(dir, { message: `Revert "feat: 캐시"\n\nThis reverts commit ${first}.`, files: { "src/a.ts": "export const a = 0;\n" }, date: "2024-02-01T10:00:00+09:00" });
+  const revert = (await headSha(dir))!;
+  addCommit(dir, { message: `feat: 다시\n\nSupersedes: ${revert.slice(0, 10)}`, files: { "src/a.ts": "export const a = 2;\n" }, date: "2024-03-01T10:00:00+09:00" });
+  let db = openDb(file);
+  const repo = await addRepo(db, dir);
+  await syncRepo(db, repo);
+  assert.equal(isSuperseded(db, "commit", first), true);
+  // 0.13 상태로 되돌린다 — 판단 기록이 없던 때, 마이그레이션 16 전
+  db.exec("DELETE FROM supersessions");
+  db.pragma("user_version = 16");
+  db.close();
+
+  db = openDb(file);
+  assert.equal(db.pragma("user_version"), 17);
+  assert.equal(isSuperseded(db, "commit", first), true, "revert가 채워진다");
+  assert.equal(isSuperseded(db, "commit", revert), true, "Supersedes: 트레일러가 채워진다");
+  assert.equal(fileContext(db, repo.id, "src/a.ts").why, null, "되돌려진 커밋의 Why는 고르지 않는다");
+  assert.equal(backfillCommitVerdicts(db), 0, "두 번째는 아무것도 더하지 않는다");
+  db.close();
+});

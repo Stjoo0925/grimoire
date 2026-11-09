@@ -10,6 +10,7 @@ import path from "node:path";
 import type * as NodeSqlite from "node:sqlite";
 
 import { backfillNotePaths, cleanReleaseContext, cleanStoredPrompts, reRedactStored } from "./capture";
+import { backfillCommitVerdicts } from "./supersede";
 
 /** node:sqlite가 들어간 첫 버전(플래그 없이) — package.json engines와 맞춘다 */
 export const MIN_NODE = "22.13.0";
@@ -397,6 +398,9 @@ const MIGRATIONS: (string | ((db: DB) => void))[] = [
   ALTER TABLE supersessions_v2 RENAME TO supersessions;
   CREATE INDEX supersessions_by ON supersessions (by_kind, by_ref);
   `,
+  // 16: 이미 색인된 이력의 판단을 채운다 — 판단은 커밋을 새로 넣을 때만 적혀서(indexer insertCommit), 0.14 전에 색인된 revert와
+  //     Supersedes: 트레일러는 기록되지 않았다. 원문은 건드리지 않고 판단 기록만 더한다 (supersede.ts backfillCommitVerdicts)
+  backfillCommitVerdicts,
 ];
 
 /**

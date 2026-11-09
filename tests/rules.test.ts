@@ -393,7 +393,7 @@ test("업그레이드: 스키마 12 DB가 열리고, 트리가 그대로여도 �
   db.close();
 
   db = openDb(file);
-  assert.equal(db.pragma("user_version"), 16);
+  assert.equal(db.pragma("user_version"), 17);
   assert.equal((db.prepare("SELECT COUNT(*) AS n FROM supersessions").get() as { n: number }).n, 0, "판단 표가 다시 생긴다");
   assert.equal((db.prepare("SELECT COUNT(*) AS n FROM rules").get() as { n: number }).n, 0);
   const result = await syncRepo(db, repo);

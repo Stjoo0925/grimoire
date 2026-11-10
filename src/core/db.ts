@@ -10,6 +10,7 @@ import path from "node:path";
 import type * as NodeSqlite from "node:sqlite";
 
 import { backfillNotePaths, cleanReleaseContext, cleanStoredPrompts, reRedactStored } from "./capture";
+import { backfillNoteRefs } from "./notes";
 import { backfillCommitVerdicts } from "./supersede";
 
 /** node:sqlite가 들어간 첫 버전(플래그 없이) — package.json engines와 맞춘다 */
@@ -174,7 +175,7 @@ const MIGRATIONS: (string | ((db: DB) => void))[] = [
     created_at  TEXT NOT NULL
   );
 
-  -- 검색 단위. kind='commit'이면 ref=sha, kind='note'면 ref=notes.id
+  -- 검색 단위. kind='commit'이면 ref=sha, kind='note'면 ref=notes.id (뒤에 file·rule, 커밋에 묶이지 않은 프롬프트 session(ref=세션 id)이 더해졌다)
   CREATE TABLE docs (
     id       INTEGER PRIMARY KEY,
     kind     TEXT NOT NULL,
@@ -401,6 +402,9 @@ const MIGRATIONS: (string | ((db: DB) => void))[] = [
   // 16: 이미 색인된 이력의 판단을 채운다 — 판단은 커밋을 새로 넣을 때만 적혀서(indexer insertCommit), 0.14 전에 색인된 revert와
   //     Supersedes: 트레일러는 기록되지 않았다. 원문은 건드리지 않고 판단 기록만 더한다 (supersede.ts backfillCommitVerdicts)
   backfillCommitVerdicts,
+  // 17: 이미 저장된 노트의 근거(refs)를 채운다 — refs는 노트를 넣을 때만 풀려서(notes.ts addNote) 0.14 전 노트는 본문에 sha를 적었어도
+  //     비어 있었다. 본문은 건드리지 않고 파생 칸 refs만 같은 규칙(resolveNoteRefs)으로 채운다 (notes.ts backfillNoteRefs)
+  backfillNoteRefs,
 ];
 
 /**
@@ -456,7 +460,7 @@ function migrate(db: DB): void {
 export function upsertDoc(
   db: DB,
   doc: {
-    kind: "commit" | "note" | "file" | "rule";
+    kind: "commit" | "note" | "file" | "rule" | "session";
     ref: string;
     repoId: number | null;
     at: string;

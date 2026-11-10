@@ -7,6 +7,8 @@
  * 질의는 동기화 중에도 받는다 — DB가 WAL이라 읽기와 쓰기가 서로 막지 않는다.
  *
  * 작업 폴더: cwd가 레포가 아니고 클라이언트가 roots를 지원하면, 시작 작업 때 roots에서 작업 레포를 찾는다(workspace.ts).
+ * 서로 다른 레포가 둘 이상이면 고르지 않고, notifications/roots/list_changed를 받으면 잊었다가 다음 도구 호출에 다시 묻는다.
+ * 그때 도구가 쓰는 작업 폴더(context.cwd — 커밋 안 된 변경·상대 경로)는 프로세스 cwd가 아니라 roots에서 고른 작업 트리다.
  * 진행: 클라이언트가 progressToken을 보낸 호출(add_repo)은 레포마다 notifications/progress를 보낸다.
  *
  * 취소: 요청의 취소 신호(notifications/cancelled, 연결 끊김)는 그 요청을 위해 부른 git까지 내려가 자식을 죽인다.
@@ -28,7 +30,7 @@ import { listRepos, syncRepo } from "../core/indexer";
 import { pendingUpdate, refreshUpdateCache, updateHint, VERSION } from "../core/update";
 import { refreshAgentsSkill } from "../setup/skills";
 import { callTool, describeError, ToolError, toolsWithDescriptions, type Progress, type ToolContext } from "./tools";
-import { resolveWorkspaceRoot, rootFromRoots, startWorkspace, type Background } from "./workspace";
+import { chooseRoot, resolveWorkspaceRoot, startWorkspace, type Background, type WorkspaceTarget } from "./workspace";
 
 const SERVER_NAME = "grimoire";
 /** 도구 호출이 없어도 이만큼 지나면 시작 작업을 한다 — 연결 확인은 보통 이보다 빨리 끝난다 */
@@ -64,7 +66,10 @@ export async function runMcpServer(env = process.env): Promise<void> {
   const context: ToolContext = {
     db,
     me: await myEmails(env),
-    cwd: process.cwd(),
+    // 데스크톱 앱이 띄운 서버는 cwd가 System32 같은 레포 밖이다 — 그때는 roots에서 고른 작업 트리(워크트리면 그 워크트리)
+    get cwd() {
+      return (!cwdRoot && workspace.folder) || process.cwd();
+    },
     workspace,
     background,
     updateHint: () => {
@@ -92,6 +97,13 @@ export async function runMcpServer(env = process.env): Promise<void> {
 
   // TOOLS는 as const(readonly)라 SDK의 변경 가능한 Tool[] 타입으로 맞춘다 — 내용은 그대로
   server.setRequestHandler("tools/list", async () => ({ tools: toolsWithDescriptions() as Tool[] }));
+  // 클라이언트의 작업 폴더가 바뀌면 roots로 정한 작업 레포를 잊는다 — 다음 도구 호출이 다시 묻는다(cwd로 정한 레포는 그대로).
+  // 클라이언트가 roots.listChanged를 알렸을 때만 보내는 알림이라 받는 쪽은 따로 확인하지 않는다
+  server.setNotificationHandler("notifications/roots/list_changed", () => {
+    if (cwdRoot || closing) return;
+    log("작업 폴더(roots)가 바뀌었습니다 — 다음 도구 호출에 작업 레포를 다시 찾습니다");
+    workspace.reset?.();
+  });
   let closing = false;
   let startup: Promise<void> | null = null;
   const kickoff = () => {
@@ -166,16 +178,24 @@ export async function runMcpServer(env = process.env): Promise<void> {
   void refreshUpdateCache({ env });
 }
 
-/** 클라이언트가 roots를 지원하면 작업 폴더를 물어 등록할 레포를 찾는다. 못 찾거나 실패하면 null */
-async function workspaceFromRoots(server: Server, env: Env, log: (line: string) => void): Promise<string | null> {
+/**
+ * 클라이언트가 roots를 지원하면 작업 폴더를 물어 등록할 레포를 찾는다. 못 찾거나 실패하면 null.
+ * 클라이언트 이름·버전과 받은 roots, 고른 것(또는 못 고른 이유)을 stderr에 남긴다 — 데스크톱 앱이 무엇을 보내는지 보려고.
+ */
+async function workspaceFromRoots(server: Server, env: Env, log: (line: string) => void): Promise<WorkspaceTarget | null> {
+  const client = server.getClientVersion();
+  const who = client ? `${client.name} ${client.version}` : "알 수 없는 클라이언트";
   if (!server.getClientCapabilities()?.roots) return null;
   try {
     const { roots } = await server.listRoots(undefined, { timeout: ROOTS_TIMEOUT_MS });
-    const root = await rootFromRoots(roots.map((item) => item.uri), env);
-    if (root) log(`클라이언트가 알려 준 작업 폴더를 씁니다: ${root}`);
-    return root;
+    const uris = roots.map((item) => item.uri);
+    const { target, reason } = await chooseRoot(uris, env);
+    log(`roots — ${who}: ${uris.length > 0 ? uris.join(", ") : "(없음)"}`);
+    if (target) log(`클라이언트가 알려 준 작업 폴더를 씁니다: ${target.root}${target.folder !== target.root ? ` (작업 트리 ${target.folder})` : ""} — ${reason}`);
+    else log(`roots에서 작업 레포를 고르지 않았습니다 — ${reason}`);
+    return target;
   } catch (error) {
-    log(`작업 폴더(roots)를 묻지 못했습니다 — ${error instanceof Error ? error.message : error}`);
+    log(`작업 폴더(roots)를 묻지 못했습니다 (${who}) — ${error instanceof Error ? error.message : error}`);
     return null;
   }
 }

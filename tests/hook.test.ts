@@ -3,6 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
 
+import { dbPath } from "../src/core/config";
+import { openDb } from "../src/core/db";
 import { addRepo, syncRepo } from "../src/core/indexer";
 import { handleHook, loadSession, pruneSessions, sessionsDir, type HookInput } from "../src/hook/runner";
 import { hookCommand, installHooks, mergeHooks, outdatedHooks, parseHookCommand, readInstalledHooks, settingsPath } from "../src/setup/hooks";
@@ -294,5 +296,44 @@ test("hook.js 시간 초과: 어느 훅의 어느 단계에서 멈췄는지와 �
   child.stdin.destroy();
   assert.equal(code, 0); // 작업을 막지 않는다
   const line = fs.readFileSync(path.join(home, "hook.log"), "utf8").trim();
-  assert.match(line, /timeout after 3000ms — \?, 단계 stdin, 시작 지연 \d+ms, 프로세스 \d+ms$/);
+  // 타이머 지연(동기 블록이면 큼)과 그때 살아 있던 핸들(여기서는 닫히지 않은 stdin 파이프)까지
+  assert.match(line, /timeout after 3000ms — \?, 단계 stdin, 시작 지연 \d+ms, 프로세스 \d+ms, 타이머 지연 -?\d+ms, 핸들 \S.*$/);
+});
+
+test("hook.js: 출력을 다 내보내고 DB를 닫으면 자체 타임아웃을 기다리지 않고 곧바로 exit 0 (파이프 stdout)", async () => {
+  const { spawn } = await import("node:child_process");
+  const home = tempDir("grimoire-hook-exit-");
+  const env = { GRIMOIRE_HOME: home, GRIMOIRE_ME: "me@example.com", GRIMOIRE_UPDATE_CHECK: "0" };
+  const repoPath = coupledRepo();
+  const db = openDb(dbPath(env));
+  try {
+    await syncRepo(db, await addRepo(db, repoPath));
+  } finally {
+    db.close();
+  }
+  const runHook = (input: HookInput) =>
+    new Promise<{ code: number | null; stdout: string; ms: number }>((resolve) => {
+      const started = Date.now();
+      // Claude Code처럼 stdin·stdout·stderr 모두 파이프 — Windows에서 파이프 쓰기는 비동기라 exit 전에 flush를 기다려야 한다
+      const child = spawn(process.execPath, [path.join(__dirname, "..", "src", "hook.js")], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...env } });
+      let stdout = "";
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => (stdout += chunk));
+      child.on("close", (code) => resolve({ code, stdout, ms: Date.now() - started }));
+      child.stdin.end(JSON.stringify(input));
+    });
+
+  const shown = await runHook(preToolUse(repoPath, "src/a.ts", "exit-1"));
+  assert.equal(shown.code, 0);
+  const parsed = JSON.parse(shown.stdout) as { hookSpecificOutput: { additionalContext: string } };
+  assert.match(parsed.hookSpecificOutput.additionalContext, /Co-changes: src\/b\.ts/);
+  assert.ok(shown.stdout.endsWith("}\n"), "출력이 잘렸습니다");
+  // 줄 것이 없는 호출(같은 세션 두 번째)도 곧바로 끝난다
+  const silent = await runHook(preToolUse(repoPath, "src/a.ts", "exit-1"));
+  assert.equal(silent.code, 0);
+  assert.equal(silent.stdout, "");
+  // 자체 타임아웃(3초)까지 가지 않았다 — 느린 CI 러너를 생각해 상한은 넉넉히
+  assert.ok(shown.ms < 2_500 && silent.ms < 2_500, `훅 ${shown.ms}ms / ${silent.ms}ms`);
+  const logFile = path.join(home, "hook.log");
+  assert.ok(!fs.existsSync(logFile) || !fs.readFileSync(logFile, "utf8").includes("timeout"), "자체 타임아웃으로 끝났습니다");
 });

@@ -4,6 +4,7 @@
  * 각 점검은 독립적이다. 앞의 점검이 실패해도(예: 오래된 Node라 SQLite를 못 엶) 나머지는 계속 돈다.
  */
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import { dbPath, grimoireHome, type Env } from "../core/config";
@@ -186,6 +187,7 @@ async function versionCheck(env: Env, fetchImpl?: typeof fetch): Promise<Check> 
 async function clientChecks(options: DoctorOptions, env: Env): Promise<Check[]> {
   const checks: Check[] = [];
   let anyInstalled = false;
+  let desktopFile: string | null = null;
 
   for (const client of CLIENTS) {
     const file = configPath(client, { home: options.home, env });
@@ -206,7 +208,21 @@ async function clientChecks(options: DoctorOptions, env: Env): Promise<Check[]> 
       continue;
     }
     anyInstalled = true;
+    if (client === "claude-desktop") desktopFile = file;
     checks.push(specCheck(client, file, spec, options.cliPath, env));
+  }
+
+  // 데스크톱 앱과 Claude Code 사용자 설정(~/.claude.json) 양쪽에 등록 — 데스크톱 앱의 Code 탭에서는 앱이 띄운 서버가 답하는데,
+  // 그 서버는 프로젝트 폴더 밖(Windows는 System32)에서 뜨고 모든 세션이 나눠 써 작업 레포를 roots로만 짐작한다(2026-11, server.ts)
+  const userConfig = path.join(options.home ?? os.homedir(), ".claude.json");
+  if (desktopFile && fs.existsSync(userConfig) && readInstalled(userConfig)) {
+    checks.push({
+      level: "warn",
+      title: "claude-desktop과 claude-code(사용자 설정) 양쪽에 등록돼 있습니다 — 데스크톱 앱의 Code 탭에서는 앱이 띄운 서버가 답합니다",
+      detail:
+        `그 서버는 프로젝트 폴더 밖에서 뜨고 여러 세션이 나눠 써, 작업 레포(검색 우선·record_note·impact 기본 레포)를 클라이언트의 roots로 짐작합니다 — ` +
+        `서로 다른 레포가 섞여 오면 고르지 않습니다.\n${desktopFile} / ${userConfig}`,
+    });
   }
 
   const exec = options.runCommand ?? run;

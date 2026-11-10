@@ -1,6 +1,6 @@
 # 기억의 철학 — "뇌는 꺼낼 때마다 다시 쓴다. grimoire는 꺼내도 그대로다" (2026-11-06)
 
-> 상태: **§3-A~E 구현됨 (2026-11-06, 미배포).** 확인(`confirms`)·뒤집기(`supersedes`)·근거 묶기(본문 sha → `refs`, `show_commit`의 `notes`)·`Revisit-when` 트레일러·`grimoire review`. 아직 안 한 것: §3-D의 커밋 전 스킬 한 줄 질문, §6의 측정. 뒤집기의 상세는 [supersede-design.md](./supersede-design.md).
+> 상태: **§3-A~E 구현됨 (2026-11-06, 미배포).** 확인(`confirms`)·뒤집기(`supersedes`)·근거 묶기(본문 sha → `refs`, `show_commit`의 `notes`)·`Revisit-when` 트레일러·`grimoire review`. §3-D의 커밋 전 스킬 한 줄 질문(`/grimoire-impact` 4단계: 다시 볼 조건을 한 번 묻고 답이 있을 때만 `Revisit-when:`, `Rejected`의 이유에 그때의 조건)과 옛 노트의 `refs` 채우기(마이그레이션 17)는 2026-11-10 구현(미배포). 아직 안 한 것: §6의 측정. `Revisit-when`은 카드·`file_context`의 Why 뒤에 나오지만 WHY_KEYS(검색 본문의 [why])에는 아직 없다. 뒤집기의 상세는 [supersede-design.md](./supersede-design.md).
 > 전제: signal-design §0의 정체성("커밋 뒤의 사람의 의도와 결정을 저장하고, 물으면 꺼내 준다")은 그대로다. 이 문서는 그 정체성을 **왜** 지켜야 하는지와, 거기서 **어떤 기능이 나오고 어떤 기능이 나와선 안 되는지**를 사람의 기억 모델로 다시 끌어낸다.
 
 ## 0. 한 줄

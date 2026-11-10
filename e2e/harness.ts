@@ -112,7 +112,8 @@ async function connect(
     stderr: "pipe",
   });
   transport.stderr?.on("data", (chunk) => (stderr += String(chunk)));
-  const client = new Client({ name: "grimoire-e2e", version: "1" }, roots ? { capabilities: { roots: {} } } : undefined);
+  // roots를 주면 목록이 바뀔 때 알리는(listChanged) 클라이언트로 붙는다 — 배열을 고친 뒤 sendRootsListChanged()
+  const client = new Client({ name: "grimoire-e2e", version: "1" }, roots ? { capabilities: { roots: { listChanged: true } } } : undefined);
   if (roots) client.setRequestHandler("roots/list", async () => ({ roots: roots.map((dir) => ({ uri: pathToFileURL(dir).href })) }));
   try {
     await client.connect(transport);
@@ -435,6 +436,43 @@ async function runScenario(spec: ServerSpec): Promise<StepResult[]> {
       }
     } finally {
       for (const dir of [fresh.data, bare.data]) fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await step("roots: 바뀌면(list_changed) 작업 레포를 다시 찾고, 워크트리 root의 변경을 읽음", async () => {
+    // 데스크톱 앱이 띄운 서버처럼 레포 밖 cwd에서 뜬다 — 첫 roots로 정한 레포를 프로세스 내내 붙잡으면 안 된다
+    const data = { home: sandbox.home, data: tempDir("grimoire-e2e-rootschange-") };
+    const outside = tempDir("grimoire-e2e-cwd-");
+    const worktree = path.join(tempDir("grimoire-e2e-wt-"), "session");
+    git(fixture.api, ["worktree", "add", "-q", "-b", "e2e-roots-session", worktree]);
+    fs.writeFileSync(path.join(worktree, "src", "auth", "refresh.ts"), "export function rotate() {\n  return 'rotated twice';\n}\n");
+    const roots = [fixture.web];
+    try {
+      const session = await connect(spec, data, { GRIMOIRE_AUTO_ADD: "1" }, outside, roots);
+      try {
+        const first = await call(session, "list_repos");
+        expect(first.json.current === "shop-web", `처음 current: ${first.text}`);
+        expect(/roots — grimoire-e2e 1: /.test(session.stderr()), `클라이언트·roots 로그가 없습니다: ${session.stderr()}`);
+        roots.splice(0, roots.length, worktree);
+        await session.client.sendRootsListChanged();
+        const second = await call(session, "list_repos");
+        expect(second.json.current === "shop-api", `바뀐 뒤 current: ${second.text}`);
+        // 작업 레포는 본 레포(shop-api)지만, 커밋 안 된 변경은 roots가 가리킨 워크트리에서 읽는다
+        const changed = await call(session, "impact", {});
+        expect(!changed.isError && JSON.stringify(changed.json?.changed) === JSON.stringify(["src/auth/refresh.ts"]), `impact: ${changed.text}`);
+        // 서로 다른 레포 둘이면 고르지 않는다
+        roots.splice(0, roots.length, fixture.web, fixture.api);
+        await session.client.sendRootsListChanged();
+        const third = await call(session, "list_repos");
+        expect(third.json.current === undefined, `두 레포면 current가 없어야 함: ${third.text}`);
+        expect(session.stderr().includes("서로 다른 레포 2개"), "고르지 않은 이유 로그가 없습니다");
+      } finally {
+        await session.close();
+      }
+    } finally {
+      git(fixture.api, ["worktree", "remove", "--force", worktree]);
+      git(fixture.api, ["branch", "-D", "e2e-roots-session"]);
+      for (const dir of [data.data, outside]) fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 

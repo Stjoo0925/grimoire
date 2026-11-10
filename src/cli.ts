@@ -60,7 +60,7 @@ const HELP = `grimoire — 로컬 git 이력을 AI 코딩 도구의 기억으로
   grimoire note confirm <id> [말]  노트를 다시 보았고 아직 맞다 (stale이 풀린다)
   grimoire note rm <id>           노트 삭제 — 비밀이 섞였거나 실수로 남긴 것
   grimoire review [repo]          다시 볼 노트 — stale·추정 묶기·오래 확인 안 됨·근거 커밋 뒤집힘  [--days n] [--json]
-  grimoire export <repo>          git에 없는 기억(노트·커밋에 묶인 세션 기록)을 JSON으로  [--out file]
+  grimoire export <repo>          git에 없는 기억(노트·세션 기록)을 JSON으로  [--out file]
   grimoire remove <repo>          레포와 색인 삭제  (노트·세션 기록이 있으면 --yes가 필요하다 — 먼저 export)
 
 MCP 연결:
@@ -320,7 +320,7 @@ async function main(argv: string[]): Promise<number> {
         const memory = exportRepoMemory(db, repo);
         if (values.out) {
           fs.writeFileSync(values.out, JSON.stringify(memory, null, 2));
-          print(`${repo.name}: 노트 ${memory.notes.length}개, 커밋 맥락 ${memory.commits.length}개 커밋 → ${values.out}`);
+          print(`${repo.name}: 노트 ${memory.notes.length}개, 커밋 맥락 ${memory.commits.length}개 커밋, 커밋에 묶이지 않은 세션 ${memory.sessions.length}개 → ${values.out}`);
           return 0;
         }
         return printJson(memory);
@@ -329,15 +329,15 @@ async function main(argv: string[]): Promise<number> {
         const repo = requireRepo(db, need(positionals[0], "repo"));
         // 색인은 다시 만들 수 있지만 커밋에 묶인 "왜"와 노트는 못 만든다 — 있으면 보이고 --yes를 요구한다 (docs/feature-audit.md F5)
         const memory = repoMemorySize(db, repo.id);
-        if ((memory.context > 0 || memory.notes > 0 || memory.verdicts > 0) && !values.yes) {
+        if ((memory.context > 0 || memory.notes > 0 || memory.verdicts > 0 || memory.prompts > 0) && !values.yes) {
           console.error(
-            `${repo.name}에는 git에 없는 기억이 있습니다 — 커밋에 묶인 세션 기록·트레일러 ${memory.context}건, 노트 ${memory.notes}개, 확인·뒤집기 기록 ${memory.verdicts}건.\n` +
+            `${repo.name}에는 git에 없는 기억이 있습니다 — 커밋에 묶인 세션 기록·트레일러 ${memory.context}건, 커밋에 묶이지 않은 프롬프트 ${memory.prompts}개, 노트 ${memory.notes}개, 확인·뒤집기 기록 ${memory.verdicts}건.\n` +
               `지우면 되살릴 수 없습니다. 먼저 \`grimoire export ${repoArg(repo, listRepos(db))} --out <file>\`로 꺼내 두고, 정말 지우려면 --yes를 붙이세요.`,
           );
           return 1;
         }
         removeRepo(db, repo);
-        print(`${repo.name} 삭제 (${repo.path})${memory.context + memory.notes > 0 ? ` — 세션 기록 ${memory.context}건, 노트 ${memory.notes}개도 함께 지웠습니다` : ""}`);
+        print(`${repo.name} 삭제 (${repo.path})${memory.context + memory.notes + memory.prompts > 0 ? ` — 세션 기록 ${memory.context}건, 커밋에 묶이지 않은 프롬프트 ${memory.prompts}개, 노트 ${memory.notes}개도 함께 지웠습니다` : ""}`);
         return 0;
       }
       default:
@@ -537,7 +537,9 @@ async function cmdSearch(
       if (hit.rule.changed) print(`    최근 변경: ${hit.rule.changed.sha.slice(0, 8)}${hit.rule.changed.date ? ` ${day(hit.rule.changed.date)}` : ""} ${hit.rule.changed.subject}`);
       continue;
     }
-    const where = hit.kind === "note" ? `note #${hit.ref}` : `${hit.repo} ${hit.ref.slice(0, 8)}`;
+    // 커밋에 묶이지 않은 세션의 프롬프트 — 커밋의 "왜"가 아니라는 표시를 붙인다
+    const where =
+      hit.kind === "note" ? `note #${hit.ref}` : hit.kind === "session" ? `${hit.repo ?? "(레포 밖)"} session ${hit.ref.slice(0, 8)} (커밋에 묶이지 않은 프롬프트)` : `${hit.repo} ${hit.ref.slice(0, 8)}`;
     print(`${day(hit.date)}  ${where}  ${hit.title}`);
     if (hit.files.length > 0) print(`    ${hit.files.slice(0, 4).join("  ")}${hit.files.length > 4 ? " …" : ""}`);
     // 번호로 찾은 노트("grimoire search '#65'")는 본문까지

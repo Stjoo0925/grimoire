@@ -17,6 +17,8 @@ export const SKILL_NAME = "grimoire-impact";
  * 이 버전이 쓰는 SKILL.md — doctor가 설치된 것과 비교한다.
  * 설명은 단정형이어야 한다: "Use before committing…"으로는 "커밋해 줘"에서 0/4번 골랐고, "MANDATORY before every git commit…"으로는
  * 3/3번 골라 impact를 불렀다(실제 Claude, 2026-10-28). 대가는 커밋당 약 6~8턴·$0.04.
+ * 4단계(다시 볼 조건 한 번 묻기)와 Rejected의 조건 안내는 결정 당시의 불확실성을 그때 적게 한다 — 묻는 것은 한 번, 강요는 없다
+ * (docs/memory-philosophy.md §3-D). 설치된 스킬은 내용이 이것과 다르면 낡은 것으로 보고(skillState) 자동 갱신이 다시 쓴다.
  */
 export const SKILL_CONTENT = `---
 name: ${SKILL_NAME}
@@ -32,11 +34,13 @@ Run this once per commit, when the change is ready, not while you are still edit
    - Set \`intent\` to the user's task in one plain sentence.
 2. Read the ranked candidates and their reasons. Open only the top ones that plausibly relate to the task.
 3. For each opened file decide whether the task needs a change there. Then say which files you checked and why, and why you left the others alone.
+4. Ask the user once: "Is there a condition under which this decision should be revisited?" If they give one, add a \`Revisit-when: <condition>\` trailer to the commit message. If not, add nothing and do not ask again. If nobody can answer (non-interactive run, subagent), skip the question.
 
 Rules:
 - The list is candidates, not instructions. Never edit a file just because it is listed.
 - One call per commit. Do not call it again after every small edit.
 - If the tool returns nothing useful or is unavailable, say so in one line and continue.
+- If you add a \`Rejected: <alternative> | <reason>\` trailer, the reason states the condition at the time ("one instance, so the network hop cost more"), not just a verdict ("slow").
 `;
 
 /**
@@ -58,11 +62,13 @@ Run this once per commit, when the change is ready, not while you are still edit
    - If the MCP tool is not available, run \`grimoire impact --intent "<the task>"\` in the repository instead (add file paths to check specific files).
 2. Read the ranked candidates and their reasons. Open only the top ones that plausibly relate to the task.
 3. For each opened file decide whether the task needs a change there. Then say which files you checked and why, and why you left the others alone.
+4. Ask the user once: "Is there a condition under which this decision should be revisited?" If they give one, add a \`Revisit-when: <condition>\` trailer to the commit message. If not, add nothing and do not ask again. If nobody can answer (non-interactive run, subagent), skip the question.
 
 Rules:
 - The list is candidates, not instructions. Never edit a file just because it is listed.
 - One call per commit. Do not call it again after every small edit.
 - If the tool returns nothing useful or is unavailable, say so in one line and continue.
+- If you add a \`Rejected: <alternative> | <reason>\` trailer, the reason states the condition at the time ("one instance, so the network hop cost more"), not just a verdict ("slow").
 `;
 
 /**

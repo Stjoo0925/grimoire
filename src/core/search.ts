@@ -176,7 +176,7 @@ export interface SearchFilters {
   since?: string;
   /** ISO 날짜 미만 */
   until?: string;
-  kind?: "commit" | "note" | "file" | "rule";
+  kind?: "commit" | "note" | "file" | "rule" | "session";
 }
 
 export interface SearchOptions extends SearchFilters {
@@ -198,7 +198,8 @@ export interface RuleCommit {
 }
 
 export interface SearchHit {
-  kind: "commit" | "note" | "file" | "rule";
+  /** session: 커밋에 끝내 묶이지 않은 세션의 프롬프트(capture.ts) — ref는 세션 id */
+  kind: "commit" | "note" | "file" | "rule" | "session";
   repo: string | null;
   repoPath: string | null;
   /** 커밋 sha 또는 note id */
@@ -344,8 +345,8 @@ function filterSql(filters: SearchFilters): { where: string; params: (string | n
     params.push(filters.until);
   }
   if (filters.authors && filters.authors.length > 0) {
-    // 노트는 내가 쓴 것이므로 작성자 필터를 통과시킨다
-    clauses.push(`(d.kind = 'note' OR c.author_email IN (${filters.authors.map(() => "?").join(", ")}))`);
+    // 노트는 내가 쓴 것이므로 작성자 필터를 통과시킨다. 세션 프롬프트도 사용자가 친 말이다
+    clauses.push(`(d.kind IN ('note', 'session') OR c.author_email IN (${filters.authors.map(() => "?").join(", ")}))`);
     params.push(...filters.authors);
   }
   return { where: clauses.map((clause) => `AND ${clause}`).join(" "), params };
@@ -462,7 +463,7 @@ function toHit(
     )
     .get(docId) as
     | {
-        kind: "commit" | "note" | "file" | "rule";
+        kind: "commit" | "note" | "file" | "rule" | "session";
         ref: string;
         at: string;
         repo_id: number | null;
@@ -535,6 +536,19 @@ function toHit(
       filesChanged: null,
       url: null,
       rule: { line, heading: rule.heading, scope: rule.scope ?? "", origin, changed },
+    };
+  }
+
+  if (doc.kind === "session") {
+    // 커밋에 묶이지 않은 프롬프트 — 출처는 세션 id·마지막 프롬프트 시각·레포(모르면 null). 본문은 원문 전부(요약 없음)
+    return {
+      ...base,
+      author: null,
+      snippet: snippet ?? doc.body.slice(0, 240),
+      body: doc.body,
+      files: [],
+      filesChanged: null,
+      url: null,
     };
   }
 

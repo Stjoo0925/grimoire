@@ -6,6 +6,8 @@
  *
  * cli.js와 따로 둔 이유: 훅은 편집마다 돌고 150ms 예산이라 MCP SDK·검색 모듈을 불러오면 안 된다.
  * 절대 작업을 막지 않는다 — 어떤 경우에도 exit 0, 오류는 <GRIMOIRE_HOME>/hook.log에만, 3초 지나면 스스로 끝난다.
+ * 끝나는 법: 출력이 OS로 넘어가고 DB를 닫으면 process.exit(0)으로 바로 끝낸다 — 저절로 끝나기를 기다리면 무엇인지 모를
+ * 핸들 하나가 프로세스를 3초 타임아웃까지 붙잡았다(2026-11 PreToolUse:Write, 일은 190ms 안에 끝났는데 프로세스 3186ms).
  */
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -127,19 +129,47 @@ function readStdin(): Promise<string> {
   });
 }
 
+/**
+ * stdout에 쓰고 OS로 넘어갈 때까지 기다린다 — Windows·macOS의 파이프 쓰기는 비동기라, 기다리지 않고 exit하면 큰 카드가 잘린다.
+ * 읽는 쪽이 닫혀 실패해도(EPIPE) 그냥 풀린다. 읽는 쪽이 안 읽어 영영 안 풀리면 자체 타임아웃이 끝낸다.
+ */
+function writeOut(text: string): Promise<void> {
+  return new Promise((resolve) => {
+    try {
+      process.stdout.write(text, () => resolve());
+    } catch {
+      resolve();
+    }
+  });
+}
+
+/** 살아 있는 핸들 이름을 개수와 함께 짧게 — "PipeWrap×2 TTYWrap Timeout" */
+function activeResources(): string {
+  const counts = new Map<string, number>();
+  for (const name of process.getActiveResourcesInfo()) counts.set(name, (counts.get(name) ?? 0) + 1);
+  return [...counts].map(([name, count]) => (count > 1 ? `${name}×${count}` : name)).join(" ") || "없음";
+}
+
+/** 지금 어느 훅의 어느 단계인가 — 시간 초과 줄에 남긴다 (stdin → identity → db → handle → output → close → flush → exit) */
+let event = "?";
+let phase = "stdin";
+
 async function main(): Promise<void> {
   const env = parseEnvArgs(process.argv.slice(2));
   // 시간 초과 줄에 어느 훅이 어느 단계에서 멈췄는지 남긴다 — "timeout after 3000ms"만으로는 원인을 가를 수 없었다
-  // (실사용 5~16초 정지 9건). 시작 지연(node 기동·모듈 로드)과 멈춘 시각(타이머가 늦게 불리면 동기 작업이 막은 것)도 같이 적는다.
+  // (실사용 5~16초 정지 9건). 시작 지연(node 기동·모듈 로드)과, 타이머 지연(예정보다 늦게 불린 만큼 — 크면 동기 작업이
+  // 이벤트 루프를 막은 것, 0에 가까우면 루프는 놀았는데 핸들이 프로세스를 붙잡은 것), 그때 살아 있던 핸들도 같이 적는다.
   const bootMs = Math.round(process.uptime() * 1000);
-  let event = "?";
-  let phase = "stdin";
+  const armedAt = performance.now();
   const watchdog = setTimeout(() => {
     const total = Math.round(process.uptime() * 1000);
-    log(env, `timeout after ${SELF_TIMEOUT_MS}ms — ${event}, 단계 ${phase}, 시작 지연 ${bootMs}ms, 프로세스 ${total}ms`);
+    const lag = Math.round(performance.now() - armedAt - SELF_TIMEOUT_MS);
+    log(env, `timeout after ${SELF_TIMEOUT_MS}ms — ${event}, 단계 ${phase}, 시작 지연 ${bootMs}ms, 프로세스 ${total}ms, 타이머 지연 ${lag}ms, 핸들 ${activeResources()}`);
     process.exit(0);
   }, SELF_TIMEOUT_MS);
   watchdog.unref();
+  // 읽는 쪽이 먼저 닫혀도(EPIPE) 잡히지 않은 예외로 exit 1이 되지 않게
+  process.stdout.on("error", () => undefined);
 
   let input: HookInput;
   try {
@@ -167,10 +197,12 @@ async function main(): Promise<void> {
     return;
   }
   phase = "handle";
+  let flushed: Promise<void> = Promise.resolve();
   try {
     const output = await handleHook({ db, env, me, settingsFile: settingsPath(), hookPath: path.join(__dirname, "hook.js") }, input);
-    if (output?.json) process.stdout.write(JSON.stringify(output.json) + "\n");
-    else if (output?.stdout) process.stdout.write(output.stdout + "\n");
+    phase = "output";
+    if (output?.json) flushed = writeOut(JSON.stringify(output.json) + "\n");
+    else if (output?.stdout) flushed = writeOut(output.stdout + "\n");
     trace(env, input, output?.json?.hookSpecificOutput.additionalContext ?? output?.stdout ?? "");
     if (output?.syncRepo) backgroundSync(env, output.syncRepo);
     if (output?.refreshSetup) background(env, ["setup-refresh"], "setup refresh");
@@ -178,15 +210,17 @@ async function main(): Promise<void> {
     log(env, `${input.hook_event_name ?? "?"}: ${error instanceof Error ? (error.stack ?? error.message) : error}`);
     trace(env, input, "", error instanceof Error ? error.message : String(error));
   } finally {
+    phase = "close";
     db.close();
   }
+  phase = "flush";
+  await flushed;
 }
 
-main().then(
-  () => {
-    process.exitCode = 0;
-  },
-  () => {
-    process.exitCode = 0;
-  },
-);
+// 저절로 끝나기를 기다리지 않는다 — 출력은 main 안에서 다 나갔고(flush) DB도 닫혔다.
+// 떼어 낸 자식(backgroundSync·setup-refresh)은 detached + unref라 여기서 끝나도 계속 돈다
+const exit = () => {
+  phase = "exit";
+  process.exit(0);
+};
+main().then(exit, exit);

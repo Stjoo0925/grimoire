@@ -18,13 +18,18 @@ import { fileURLToPath } from "node:url";
 
 import type { Env } from "../core/config";
 import type { DB } from "../core/db";
-import { mainRepoRoot } from "../core/git";
+import { worktreeRoots } from "../core/git";
 import { indexCommitCode } from "../core/diffs";
 import { addRepo, syncRepo, type RepoRow } from "../core/indexer";
 
 export interface Workspace {
   /** 작업 레포의 최상위 경로 (해당 없으면 null). roots로 정할 때는 begin()이 풀린 뒤에 채워진다 */
   readonly root: string | null;
+  /**
+   * 이 세션이 실제로 여는 작업 트리 — roots로 정했을 때만 채운다(워크트리면 그 워크트리, root는 본 레포로 올린 경로).
+   * cwd가 레포 밖(데스크톱 앱이 띄운 서버의 System32 등)일 때 커밋 안 된 변경·상대 경로를 이 폴더 기준으로 읽는다 (server.ts)
+   */
+  readonly folder?: string | null;
   /** 자동 등록이 꺼져 있는가 */
   disabled: boolean;
   /**
@@ -37,6 +42,11 @@ export interface Workspace {
    * 직전 동기화 뒤 REFRESH_INTERVAL_MS가 안 지났으면 건너뛰고, maxWaitMs 넘게 걸리면 기다리지 않는다(뒤에서 계속).
    */
   refresh?(repo: RepoRow, maxWaitMs: number): Promise<void>;
+  /**
+   * roots로 정한 작업 레포를 잊는다 — 다음 begin()이 roots를 다시 묻는다(notifications/roots/list_changed, server.ts).
+   * cwd로 정한 작업 레포는 바뀌지 않으므로 아무것도 하지 않는다. 진행 중인 옛 레포의 동기화는 그대로 끝까지 간다.
+   */
+  reset?(): void;
 }
 
 /** 작업 레포 재동기화 간격 — 검색마다 git을 부르지 않게 */
@@ -77,21 +87,42 @@ export function isTempPath(dir: string): boolean {
   return tempRoots().some((root) => resolved === root || resolved.startsWith(root + path.sep));
 }
 
-export async function resolveWorkspaceRoot(cwd: string, env: Env = process.env): Promise<string | null> {
+/** 폴더가 속한 작업 레포(본 레포 최상위)와 그 폴더의 작업 트리 최상위. 등록할 만하지 않으면 null */
+async function workspaceOf(dir: string, env: Env): Promise<WorkspaceTarget | null> {
   // Claude Code는 세션마다 git worktree(.claude/worktrees/<이름>)에서 서버를 띄운다 — 본 레포로 묶어 한 번만 등록한다
-  const root = await mainRepoRoot(cwd);
-  if (!root) return null;
-  const resolved = path.resolve(root);
+  const roots = await worktreeRoots(dir);
+  if (!roots) return null;
+  const resolved = path.resolve(roots.main);
   if (resolved === path.parse(resolved).root || resolved === path.resolve(os.homedir())) return null;
   if (env.GRIMOIRE_AUTO_ADD !== "1" && isTempPath(resolved)) return null;
-  return resolved;
+  return { root: resolved, folder: path.resolve(roots.top) };
 }
 
+export async function resolveWorkspaceRoot(cwd: string, env: Env = process.env): Promise<string | null> {
+  return (await workspaceOf(cwd, env))?.root ?? null;
+}
+
+/** 작업 레포(root, 본 레포)와 세션이 여는 작업 트리(folder, 워크트리일 수 있음) */
+export interface WorkspaceTarget {
+  root: string;
+  folder: string;
+}
+
+const samePath = (a: string, b: string) => (process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b);
+
 /**
- * 클라이언트가 알려 준 작업 폴더(roots의 file:// URI) 중 처음으로 등록할 만한 레포.
- * 레포가 아니거나 홈·루트·임시 폴더면 건너뛴다 — cwd와 같은 기준(resolveWorkspaceRoot)이다.
+ * 클라이언트가 알려 준 작업 폴더(roots의 file:// URI)에서 작업 레포를 고른다.
+ * 레포가 아니거나 홈·루트·임시 폴더면 건너뛴다 — cwd와 같은 기준(workspaceOf)이다.
+ * 서로 다른 레포가 둘 이상이면 고르지 않는다(null) — 데스크톱 앱처럼 여러 세션이 한 서버를 나눠 쓰면 "처음 것"이 이 세션의
+ * 레포라는 보장이 없다(2026-11 grimoire 세션의 current가 TerraLink-vite-V2). 한 레포의 워크트리 여럿은 한 레포다.
+ * folder: 작업 트리가 하나로 모이면 그것, 같은 레포의 다른 작업 트리가 섞여 있으면 본 레포(어느 쪽인지 고르지 않는다).
+ * reason: 고른 이유·못 고른 이유 (로그용)
  */
-export async function rootFromRoots(uris: readonly string[], env: Env = process.env): Promise<string | null> {
+export async function chooseRoot(
+  uris: readonly string[],
+  env: Env = process.env,
+): Promise<{ target: WorkspaceTarget | null; reason: string }> {
+  const found: WorkspaceTarget[] = [];
   for (const uri of uris) {
     if (!uri.startsWith("file:")) continue;
     let dir: string;
@@ -100,19 +131,31 @@ export async function rootFromRoots(uris: readonly string[], env: Env = process.
     } catch {
       continue;
     }
-    const root = await resolveWorkspaceRoot(dir, env);
-    if (root) return root;
+    const target = await workspaceOf(dir, env);
+    if (target) found.push(target);
   }
-  return null;
+  const repos = [...new Map(found.map((item) => [process.platform === "win32" ? item.root.toLowerCase() : item.root, item.root])).values()];
+  if (repos.length === 0) return { target: null, reason: "등록할 만한 레포 없음" };
+  if (repos.length > 1) return { target: null, reason: `서로 다른 레포 ${repos.length}개 — 어느 것인지 고르지 않음` };
+  const root = repos[0];
+  const folders = found.map((item) => item.folder).filter((folder, index, all) => all.findIndex((other) => samePath(other, folder)) === index);
+  const folder = folders.length === 1 ? folders[0] : root;
+  return { target: { root, folder }, reason: folders.length === 1 ? "레포 하나" : `레포 하나, 작업 트리 ${folders.length}개 — 본 레포` };
+}
+
+/** chooseRoot의 작업 레포만 */
+export async function rootFromRoots(uris: readonly string[], env: Env = process.env): Promise<string | null> {
+  return (await chooseRoot(uris, env)).target?.root ?? null;
 }
 
 /**
  * root는 정해진 경로, 또는 begin() 때 한 번 부를 찾기 함수(roots 조회처럼 연결 뒤에야 알 수 있는 것)다.
- * 자동 등록이 꺼져 있으면 찾기 함수도 부르지 않는다.
+ * 찾기 함수는 경로(본 레포)나 {root, folder}를 돌려준다. 자동 등록이 꺼져 있으면 찾기 함수도 부르지 않는다.
+ * 찾기 함수로 정한 레포는 reset()으로 잊고 다시 찾을 수 있다 — 정해진 경로는 프로세스 내내 그대로다.
  */
 export function startWorkspace(
   db: DB,
-  root: string | null | (() => Promise<string | null>),
+  root: string | null | (() => Promise<string | WorkspaceTarget | null>),
   env: Env,
   log: (line: string) => void,
   background: Background = {},
@@ -120,7 +163,10 @@ export function startWorkspace(
   const disabled = env.GRIMOIRE_AUTO_ADD === "0";
   const lookup = typeof root === "function" ? root : null;
   let current = typeof root === "function" ? null : root;
+  let folder: string | null = null;
   let started: Promise<RepoRow | null> | null = null;
+  // reset()마다 는다 — reset 전에 시작한 찾기가 늦게 끝나 새 상태를 덮지 않게
+  let generation = 0;
   let lastSync = 0;
   const { signal, track } = background;
 
@@ -149,7 +195,13 @@ export function startWorkspace(
 
   const run = async (): Promise<RepoRow | null> => {
     if (disabled) return null;
-    if (lookup) current = await lookup().catch(() => null);
+    if (lookup) {
+      const mine = generation;
+      const found = await lookup().catch(() => null);
+      if (mine !== generation) return null; // 그 사이 roots가 바뀌었다 — 다음 begin()이 다시 찾는다
+      current = typeof found === "string" ? found : (found?.root ?? null);
+      folder = typeof found === "string" ? null : (found?.folder ?? null);
+    }
     const dir = current;
     if (!dir) return null;
     const known = db.prepare("SELECT * FROM repos WHERE path = ?").get(dir) as RepoRow | undefined;
@@ -169,12 +221,24 @@ export function startWorkspace(
     );
   };
 
-  return {
+  const workspace: Workspace = {
     get root() {
       return current;
     },
+    get folder() {
+      return folder;
+    },
     disabled,
     begin: () => (started ??= run()),
+    reset() {
+      if (!lookup) return;
+      // 옛 begin()의 promise와 그 동기화 작업은 붙잡은 repo로 끝까지 돈다(track). 여기서는 다음 호출이 새로 찾게만 한다
+      generation++;
+      started = null;
+      current = null;
+      folder = null;
+      waits.delete(workspace);
+    },
     refresh: async (repo, maxWaitMs) => {
       if (disabled || repo.path !== current || Date.now() - lastSync < REFRESH_INTERVAL_MS) return;
       let timer: NodeJS.Timeout | undefined;
@@ -188,6 +252,7 @@ export function startWorkspace(
       }
     },
   };
+  return workspace;
 }
 
 /** 작업 레포별 기다림 상태 — 한 번 시간을 넘겼으면 첫 인덱싱이 끝날 때까지 다시 기다리지 않는다 */

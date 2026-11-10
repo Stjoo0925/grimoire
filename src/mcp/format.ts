@@ -95,6 +95,18 @@ export function slimSearch(result: SearchResult, me: string[], detail: Detail = 
         ...(hit.rule.changed?.why ? { changedWhy: hit.rule.changed.why } : {}),
       };
     }
+    if (hit.kind === "session") {
+      // 커밋에 묶이지 않은 세션의 프롬프트 — 사용자의 말이지만 커밋의 "왜"가 아니다. 그렇다고 결과에 적어 둔다 (capture.ts)
+      return {
+        session: hit.ref,
+        by: "me",
+        date: day(hit.date),
+        repo: hit.repo ?? undefined,
+        title: hit.title,
+        body: noteBody(hit, detail),
+        unbound: "prompts never bound to a commit",
+      };
+    }
     if (hit.kind === "note") {
       // AI가 남긴 노트는 사람이 내린 결정과 구분한다 — 결과에 섞인 지시가 노트로 굳어 돌아오는 경로를 드러내게
       return {

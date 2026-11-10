@@ -105,6 +105,23 @@ export function resolveNoteRefs(db: DB, repoId: number | null, text: string): st
 }
 
 /**
+ * 이미 저장된 노트의 근거를 채운다(마이그레이션 17) — refs가 빈 레포 노트만, 넣을 때와 같은 규칙(resolveNoteRefs: 그 레포 커밋과 하나로 맞는 sha)으로.
+ * 노트 본문·검색 문서는 건드리지 않는다(refs는 검색 본문에 들어가지 않는 파생 칸이다). 채운 노트 수.
+ */
+export function backfillNoteRefs(db: DB): number {
+  const notes = db.prepare("SELECT id, repo_id, text FROM notes WHERE repo_id IS NOT NULL AND (refs = '' OR refs = '[]')").all() as { id: number; repo_id: number; text: string }[];
+  const update = db.prepare("UPDATE notes SET refs = ? WHERE id = ?");
+  let filled = 0;
+  for (const note of notes) {
+    const refs = resolveNoteRefs(db, note.repo_id, note.text);
+    if (refs.length === 0) continue;
+    update.run(JSON.stringify(refs), note.id);
+    filled++;
+  }
+  return filled;
+}
+
+/**
  * redacted: 비밀로 보이는 값을 지우고 저장했는가 — 노트는 검색 결과로 다시 모델에게 건네지므로, 원인 분석에 섞여 든
  * 연결 문자열·토큰도 세션 캡처와 같은 규칙(redact.ts)으로 지운다.
  */

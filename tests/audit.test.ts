@@ -8,10 +8,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
 
-import { bindToCommit, commitContextOf, keepHeadAndTail, PROMPT_MAX, PROMPTS_HEAD, PROMPTS_PER_COMMIT, promptText, recordEvent } from "../src/core/capture";
+import { bindToCommit, commitContextOf, foldQuietSessions, keepHeadAndTail, pruneEvents, PROMPT_MAX, PROMPTS_HEAD, PROMPTS_PER_COMMIT, promptText, recordEvent, SESSION_TTL_DAYS } from "../src/core/capture";
 import { fileContext, formatFileContext } from "../src/core/context";
 import { headSha } from "../src/core/git";
-import { addRepo, exportRepoMemory, repoMemorySize, syncRepo } from "../src/core/indexer";
+import { addRepo, exportRepoMemory, removeRepo, repoMemorySize, syncRepo } from "../src/core/indexer";
 import { isMeaningfulSubject } from "../src/core/meaningful";
 import { addNote, NOTE_MAX, notesForFile, TAGS_MAX } from "../src/core/notes";
 import { search } from "../src/core/search";
@@ -179,7 +179,8 @@ test("F2·F18: 커밋에 묶이지 않은 이전 세션의 프롬프트를 Sessi
   recordEvent(db, { sessionId: "old-1", repoId: repo.id, kind: "prompt", text: "캐시를 Redis로 옮길지 조사했는데 하지 않기로 했다" }, twoDaysAgo);
   await handleHook(context, event(dir, "live-1", { hook_event_name: "UserPromptSubmit", prompt: "지금 작업 중인 다른 세션의 말" }));
   const start = await handleHook(context, { hook_event_name: "SessionStart", session_id: "new-1", cwd: dir, source: "startup" });
-  assert.match(start?.stdout ?? "", /1 prompt\(s\) from earlier sessions were never bound to a commit \(oldest expires in 12d\)/);
+  assert.match(start?.stdout ?? "", /1 prompt\(s\) from sessions in the last 14d never reached a commit — kept and searchable \(search_memory kind "session"\)/);
+  assert.doesNotMatch(start?.stdout ?? "", /expires/, "지우지 않으니 기한을 말하지 않는다");
 
   // 이번 세션: a·b를 고치고 a만 커밋 — b는 되돌렸다(작업 폴더에 변경이 없다)
   const session = "new-1";
@@ -223,4 +224,81 @@ test("이름이 같은 레포 등록이 둘이면 이름으로 고르지 않는�
   const checks = await doctor({ cliPath: path.join(home, "cli.js"), env, home, fetchImpl: offline, runCommand: () => Promise.reject(new Error("no")) });
   const missing = checks.find((check) => check.title.includes("경로가 사라진 레포"));
   assert.equal(missing?.fix, `grimoire remove "${gone}"`, "이름이 겹치면 경로로 지우라고 권한다");
+});
+
+test("F2: 커밋에 끝내 묶이지 않은 프롬프트는 TTL 뒤에도 남고, 묶인 프롬프트·편집·검증·표식은 지금처럼 지운다", async () => {
+  const db = memoryDb();
+  const dir = makeRepo([{ message: "feat: 시작", files: { "src/a.ts": "export const a = 1;\n" } }], "keep");
+  const repo = await addRepo(db, dir);
+  await syncRepo(db, repo);
+  const sha = (await headSha(dir))!;
+  const old = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString();
+  const texts = () => (db.prepare("SELECT kind, text FROM session_events ORDER BY at, id").all() as { kind: string; text: string }[]).map((row) => `${row.kind}:${row.text}`);
+
+  // 세션 a: 프롬프트 → 편집 → 커밋 → 프롬프트(커밋 없이 끝남), 모두 TTL보다 오래됐다
+  recordEvent(db, { sessionId: "a", repoId: repo.id, kind: "prompt", text: "묶일 프롬프트" }, old(30));
+  recordEvent(db, { sessionId: "a", repoId: repo.id, kind: "edit", text: "src/a.ts", path: "src/a.ts", lineHashes: ["x"] }, old(30));
+  recordEvent(db, { sessionId: "a", repoId: repo.id, kind: "verify", text: "npm test → pass" }, old(30));
+  recordEvent(db, { sessionId: "a", repoId: repo.id, kind: "commit", text: sha }, old(29));
+  recordEvent(db, { sessionId: "a", repoId: repo.id, kind: "prompt", text: "Redis로 옮기지 않기로 했다 — 인스턴스가 하나다" }, old(28));
+  // 세션 b: 레포 밖(repo_id NULL)에서 한 말, 커밋 없음
+  recordEvent(db, { sessionId: "b", repoId: null, kind: "prompt", text: "레포 밖에서 정한 것: 배포는 금요일에 하지 않는다" }, old(40));
+  // 세션 c: 레포 밖 프롬프트가 다른 레포 커밋에 묶였다(pendingEvents는 레포 밖 프롬프트를 같은 세션의 커밋에 묶는다)
+  recordEvent(db, { sessionId: "c", repoId: null, kind: "prompt", text: "레포 밖이지만 커밋에 묶인 말" }, old(40));
+  recordEvent(db, { sessionId: "c", repoId: repo.id, kind: "commit", text: sha }, old(39));
+
+  const removed = pruneEvents(db);
+  assert.equal(removed, 6);
+  assert.deepEqual(texts(), ["prompt:레포 밖에서 정한 것: 배포는 금요일에 하지 않는다", "prompt:Redis로 옮기지 않기로 했다 — 인스턴스가 하나다"]);
+  assert.equal(pruneEvents(db, Date.now() + 365 * 86_400_000), 0, "1년 뒤에도 지우지 않는다");
+  // 남은 프롬프트의 세션이 다시 이어져 커밋하면 그 커밋에 묶인다 — 앞선 표식이 지워졌어도
+  bindToCommit(db, { sessionId: "a", repoId: repo.id, sha, files: [], addedHashes: new Set() });
+  assert.deepEqual(commitContextOf(db, repo.id, sha)!.prompts, ["Redis로 옮기지 않기로 했다 — 인스턴스가 하나다"]);
+  assert.equal(pruneEvents(db, Date.now() + (SESSION_TTL_DAYS + 1) * 86_400_000), 2, "묶인 뒤에는 TTL대로 지운다 (프롬프트와 새 표식)");
+});
+
+test("F2: 조용해진 세션의 묶이지 않은 프롬프트는 kind=session 문서로 찾히고, 카드·file_context에는 안 나오며, 세션이 나중에 커밋하면 문서가 사라진다", async () => {
+  const db = memoryDb();
+  const dir = makeRepo([{ message: "feat: 캐시", files: { "src/cache.ts": "export const cache = 1;\n" } }], "unbound");
+  const repo = await addRepo(db, dir);
+  await syncRepo(db, repo);
+  const ago = (hours: number) => new Date(Date.now() - hours * 3_600_000).toISOString();
+  recordEvent(db, { sessionId: "quiet-1", repoId: repo.id, kind: "prompt", text: "src/cache.ts 캐시를 Redis로 옮길지 조사했는데 하지 않기로 했다" }, ago(30));
+  recordEvent(db, { sessionId: "quiet-1", repoId: repo.id, kind: "prompt", text: "이유는 인스턴스가 하나라 네트워크 왕복이 더 비싸서" }, ago(29));
+  recordEvent(db, { sessionId: "outside", repoId: null, kind: "prompt", text: "Redis 클러스터는 다음 분기에 다시 보자" }, ago(30));
+  recordEvent(db, { sessionId: "live", repoId: repo.id, kind: "prompt", text: "지금 Redis 얘기 중인 세션" }, ago(1));
+
+  assert.equal(foldQuietSessions(db), 2, "조용한 두 세션만 접는다 — 지금 도는 세션은 아니다");
+  assert.equal(foldQuietSessions(db), 0, "이미 같으면 다시 쓰지 않는다");
+  const hits = search(db, "Redis", { kind: "session" }).hits;
+  assert.deepEqual(hits.map((hit) => hit.ref).sort(), ["outside", "quiet-1"]);
+  const inRepo = hits.find((hit) => hit.ref === "quiet-1")!;
+  assert.equal(inRepo.repo, repo.name);
+  assert.equal(inRepo.title, "src/cache.ts 캐시를 Redis로 옮길지 조사했는데 하지 않기로 했다");
+  assert.match(inRepo.body ?? "", /네트워크 왕복/);
+  assert.equal(hits.find((hit) => hit.ref === "outside")!.repo, null);
+  const slim = slimSearch(search(db, "Redis"), []) as { hits: { session?: string; unbound?: string; by?: string; date?: string }[] };
+  const shown = slim.hits.find((hit) => hit.session === "quiet-1")!;
+  assert.equal(shown.unbound, "prompts never bound to a commit");
+  assert.equal(shown.by, "me");
+  assert.match(shown.date ?? "", /^\d{4}-\d\d-\d\d$/);
+  assert.ok(search(db, "Redis", { authors: ["me@example.com"] }).hits.some((hit) => hit.kind === "session"), "사용자가 친 말이라 author: me를 통과한다");
+  // 파일 카드·file_context의 "왜"는 커밋에 묶인 것만 — 본문에 경로가 있어도 세션 문서는 파일에 묶이지 않는다
+  const card = formatFileContext(fileContext(db, repo.id, "src/cache.ts"), { lean: true });
+  assert.doesNotMatch(card, /Redis/);
+  assert.doesNotMatch(JSON.stringify(slimFileContext(fileContext(db, repo.id, "src/cache.ts"), [])), /Redis/);
+
+  // remove 전 크기와 export에 들어간다
+  assert.equal(repoMemorySize(db, repo.id).prompts, 3, "조용한 세션 둘 + 아직 커밋 전인 세션 하나");
+  const exported = exportRepoMemory(db, repo);
+  assert.deepEqual(exported.sessions.find((item) => item.sessionId === "quiet-1")!.prompts.map((item) => item.text.slice(0, 12)), ["src/cache.ts", "이유는 인스턴스가 하나"]);
+
+  // 세션이 다시 이어져 커밋하면 프롬프트는 그 커밋에 묶이고 "커밋 없는" 문서는 사라진다
+  const sha = (await headSha(dir))!;
+  bindToCommit(db, { sessionId: "quiet-1", repoId: repo.id, sha, files: ["src/cache.ts"], addedHashes: new Set() });
+  assert.ok(commitContextOf(db, repo.id, sha)!.prompts.some((text) => text.includes("하지 않기로 했다")));
+  assert.deepEqual(search(db, "Redis", { kind: "session" }).hits.map((hit) => hit.ref), ["outside"]);
+
+  removeRepo(db, repo);
+  assert.deepEqual(search(db, "Redis", { kind: "session" }).hits.map((hit) => hit.ref), ["outside"], "레포 밖 세션 문서는 레포 삭제와 무관하다");
 });

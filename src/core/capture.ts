@@ -4,15 +4,17 @@
  * 훅(hook/runner.ts)이 세션 중에 모은 것 — 사용자 프롬프트, 검증 명령과 결과, 편집한 파일의 새 줄 해시 — 은
  * `session_events`에 임시로 쌓인다. `git commit`이 감지되면 **직전 커밋 이후**의 기록을 그 sha에 묶어
  * `commit_context`에 영구 저장하고, 커밋 doc 본문에 `[why]`를 덧붙여 그 말로 검색되게 한다.
- * 커밋 없이 끝난 세션의 기록은 SESSION_TTL_DAYS 뒤 지운다.
+ * 편집 해시·검증·커밋 표식과 이미 커밋에 묶인 프롬프트는 SESSION_TTL_DAYS 뒤 지운다. 커밋에 끝내 묶이지 않은 프롬프트는
+ * 지우지 않는다 — "하지 않기로 했다"는 커밋을 만들지 않으므로 그 이유는 여기에만 있다(docs/feature-audit.md F2). 조용해진 세션의
+ * 그런 프롬프트는 검색 문서(kind='session')로 접어 search_memory로 찾게 한다. 문서는 파생물이고 원본은 session_events다.
  *
  * 원문만, 요약 없음. 저장되는 것은 사용자의 말·명령 문자열·줄 해시뿐이다(도구 출력은 실패 stderr 끝 300자만).
  */
 import { createHash } from "node:crypto";
 import path from "node:path";
 
-import type { DB } from "./db";
-import { noteDocFields, notePathsField, pathsInText } from "./note-doc";
+import { deleteDoc, upsertDoc, type DB } from "./db";
+import { NOTE_TITLE_MAX, noteDocFields, notePathsField, pathsInText } from "./note-doc";
 import { redact } from "./redact";
 import { parseTrailers, whyLines, type Trailer } from "./trailers";
 
@@ -41,6 +43,16 @@ export const PROMPT_MAX = 1_000;
 const STDERR_TAIL = 300;
 const HASHES_PER_EDIT = 200;
 export const SESSION_TTL_DAYS = 14;
+/** 이보다 오래 기록이 없는 세션은 끝난 것으로 본다 — 묶이지 않은 프롬프트를 검색 문서로 접고, SessionStart가 셀 때 */
+export const SESSION_QUIET_MS = 6 * 3_600_000;
+
+/**
+ * 커밋에 묶이지 않은 프롬프트 `e` — 같은 세션에서 그 뒤 커밋 표식이 없다. 레포의 프롬프트는 같은 레포의 표식만 본다.
+ * 레포 밖(repo_id NULL) 프롬프트는 그 세션이 어느 레포에서 커밋하든 함께 묶이므로(pendingEvents) 아무 표식이나 본다.
+ * 표식과 같은 시각의 프롬프트는 그 커밋에 묶였다(pendingEvents는 표식보다 **뒤**만 다음 커밋으로 넘긴다).
+ */
+const UNBOUND_PROMPT = `e.kind = 'prompt' AND NOT EXISTS (
+  SELECT 1 FROM session_events c WHERE c.session_id = e.session_id AND c.kind = 'commit' AND c.at >= e.at AND (e.repo_id IS NULL OR c.repo_id = e.repo_id))`;
 
 /**
  * 검증 명령 — 테스트·린트·타입체크·빌드. 명령 조각(&&·;·| 로 나눈 것)의 **맨 앞**에서만 본다 —
@@ -318,14 +330,17 @@ export function recordPrompt(db: DB, sessionId: string, repoId: number | null, p
  */
 export function cleanStoredPrompts(db: DB): number {
   let changed = 0;
-  const events = db.prepare("SELECT id, text FROM session_events WHERE kind = 'prompt'").all() as { id: number; text: string }[];
+  const events = db.prepare("SELECT id, session_id, repo_id, text FROM session_events WHERE kind = 'prompt'").all() as SessionRef[];
+  const sessions: SessionRef[] = [];
   for (const row of events) {
     const clean = promptText(row.text);
     if (clean === row.text) continue;
     if (clean === null) db.prepare("DELETE FROM session_events WHERE id = ?").run(row.id);
     else db.prepare("UPDATE session_events SET text = ? WHERE id = ?").run(clean, row.id);
+    sessions.push(row);
     changed++;
   }
+  refreshSessionDocsOf(db, sessions);
   const rows = db.prepare("SELECT repo_id, sha, ord, text FROM commit_context WHERE kind = 'prompt'").all() as { repo_id: number; sha: string; ord: number; text: string }[];
   const touched = new Map<string, { repoId: number; sha: string }>();
   for (const row of rows) {
@@ -418,10 +433,99 @@ export function pendingEvents(db: DB, sessionId: string, repoId: number): Sessio
     .all(sessionId, repoId, ...(last ? [last.at] : [])) as SessionEvent[];
 }
 
-/** 오래된 세션 기록 삭제 */
+/**
+ * 오래된 세션 기록 삭제 — 편집(줄 해시)·검증·커밋 표식, 그리고 이미 커밋에 묶인 프롬프트(원문은 commit_context에 있다).
+ * 커밋에 묶이지 않은 프롬프트는 남긴다(소멸을 일부러 들여오지 않는다, docs/memory-philosophy.md §4).
+ * 한 문장으로 지운다 — 표식을 먼저 지우고 프롬프트를 나중에 보면 묶였던 프롬프트가 묶이지 않은 것처럼 보인다.
+ * 남긴 프롬프트보다 앞선 표식은 지워져도 된다: 그 프롬프트는 표식 뒤에 있었으니 원래 묶이지 않은 것이다.
+ */
 export function pruneEvents(db: DB, now = Date.now()): number {
   const cutoff = new Date(now - SESSION_TTL_DAYS * 86_400_000).toISOString();
-  return Number(db.prepare("DELETE FROM session_events WHERE at < ?").run(cutoff).changes);
+  return Number(
+    db.prepare(`DELETE FROM session_events WHERE id IN (SELECT e.id FROM session_events e WHERE e.at < ? AND NOT (${UNBOUND_PROMPT}))`).run(cutoff).changes,
+  );
+}
+
+/** 묶이지 않은 프롬프트 수 — 이 레포의, `since` 뒤의, 조용해진 다른 세션의 것만 (SessionStart 한 줄) */
+export function unboundPromptCount(db: DB, repoId: number, options: { exceptSession: string; since: string; now?: number }): number {
+  const quietBefore = new Date((options.now ?? Date.now()) - SESSION_QUIET_MS).toISOString();
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM session_events e WHERE e.repo_id = ? AND e.session_id <> ? AND e.at >= ? AND ${UNBOUND_PROMPT}
+          AND NOT EXISTS (SELECT 1 FROM session_events l WHERE l.session_id = e.session_id AND l.at > ?)`,
+    )
+    .get(repoId, options.exceptSession, options.since, quietBefore) as { n: number };
+  return row.n;
+}
+
+/* ── 커밋에 묶이지 않은 프롬프트 → 검색 문서 ─────────────── */
+
+/**
+ * 한 세션·레포의 묶이지 않은 프롬프트를 검색 문서(kind='session', ref=세션 id) 하나로 맞춘다 — 없으면 문서를 지운다.
+ * 제목은 의도로 볼 만한 첫 프롬프트의 첫 줄, 본문은 프롬프트 원문 전부(시간 순), 시각은 마지막 프롬프트.
+ * 요약하지 않는다. create=false면 이미 있는 문서만 고치거나 지운다(커밋으로 묶인 뒤 — 아직 도는 세션의 문서를 새로 만들지 않게).
+ */
+export function refreshSessionDoc(db: DB, sessionId: string, repoId: number | null, create = true): void {
+  const prompts = db
+    .prepare(`SELECT e.at, e.text FROM session_events e WHERE e.session_id = ? AND e.repo_id IS ? AND ${UNBOUND_PROMPT} ORDER BY e.at, e.id`)
+    .all(sessionId, repoId) as { at: string; text: string }[];
+  const existing = db
+    .prepare("SELECT d.id, d.at, f.title, f.body FROM docs d JOIN docs_fts f ON f.rowid = d.id WHERE d.kind = 'session' AND d.ref = ? AND d.repo_id IS ?")
+    .get(sessionId, repoId) as { id: number; at: string; title: string; body: string } | undefined;
+  if (prompts.length === 0) {
+    if (existing) deleteDoc(db, "session", sessionId, repoId);
+    return;
+  }
+  if (!existing && !create) return;
+  const intent = prompts.find((prompt) => !isSymptomOnly(prompt.text)) ?? prompts[0];
+  const title = intent.text.split("\n")[0].trim().slice(0, NOTE_TITLE_MAX);
+  const body = prompts.map((prompt) => prompt.text).join("\n");
+  const at = prompts[prompts.length - 1].at;
+  if (existing && existing.title === title && existing.body === body && existing.at === at) return;
+  upsertDoc(db, { kind: "session", ref: sessionId, repoId, at, title, body, paths: "" });
+}
+
+interface SessionRef {
+  id: number;
+  session_id: string;
+  repo_id: number | null;
+  text: string;
+}
+
+/** 프롬프트 원문을 고친 세션들의 "커밋 없는 프롬프트" 문서를 다시 쓴다 — 이미 있는 문서만 (마이그레이션의 비밀 지우기·자동 블록 걸러 내기) */
+function refreshSessionDocsOf(db: DB, rows: SessionRef[]): void {
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const key = `${row.session_id}\0${row.repo_id ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    refreshSessionDoc(db, row.session_id, row.repo_id, false);
+  }
+}
+
+/**
+ * 조용해진(SESSION_QUIET_MS 동안 기록이 없는) 세션의 묶이지 않은 프롬프트를 검색 문서로 접는다 (SessionStart 때, 이미 같으면 쓰지 않는다).
+ * 지금 도는 세션은 곧 커밋할 수 있어 접지 않는다 — 대화 중인 자기 말이 검색에 섞이지도 않는다. 접은 세션 수.
+ * 남는 프롬프트는 쌓이기만 하므로 문서가 없거나 문서 시각이 마지막 프롬프트와 다른 세션만 다시 쓴다(매 SessionStart에 전부 읽지 않게).
+ * 묶여서 줄어드는 쪽은 bindToCommit이 맞춘다.
+ */
+export function foldQuietSessions(db: DB, now = Date.now()): number {
+  const quietBefore = new Date(now - SESSION_QUIET_MS).toISOString();
+  const groups = db
+    .prepare(
+      `SELECT g.sessionId, g.repoId FROM (
+          SELECT e.session_id AS sessionId, e.repo_id AS repoId, MAX(e.at) AS last FROM session_events e WHERE ${UNBOUND_PROMPT}
+             AND NOT EXISTS (SELECT 1 FROM session_events l WHERE l.session_id = e.session_id AND l.at > ?)
+           GROUP BY e.session_id, e.repo_id) g
+        LEFT JOIN docs d ON d.kind = 'session' AND d.ref = g.sessionId AND d.repo_id IS g.repoId
+        WHERE d.id IS NULL OR d.at <> g.last`,
+    )
+    .all(quietBefore) as { sessionId: string; repoId: number | null }[];
+  if (groups.length === 0) return 0;
+  db.transaction(() => {
+    for (const group of groups) refreshSessionDoc(db, group.sessionId, group.repoId);
+  })();
+  return groups.length;
 }
 
 /* ── 커밋에 묶기 ────────────────────────────────────────── */
@@ -490,6 +594,9 @@ export function bindToCommit(db: DB, input: BindInput): BindResult {
       recordEvent(db, { sessionId: input.sessionId, repoId: input.repoId, kind: "edit", text: edit.text, path: edit.path, lineHashes }, new Date(committedAt + 1).toISOString());
     }
     refreshWhy(db, input.repoId, input.sha);
+    // 조용했다가 다시 이어진 세션이면 그 프롬프트는 이제 커밋에 묶였다 — "커밋 없는 기억" 문서에 겹쳐 남기지 않는다
+    refreshSessionDoc(db, input.sessionId, input.repoId, false);
+    refreshSessionDoc(db, input.sessionId, null, false);
   })();
   return { prompts: prompts.length, verifies: verifies.length, dropped: [...dropped] };
 }
@@ -560,14 +667,18 @@ export function refreshWhy(db: DB, repoId: number, sha: string): void {
  */
 export function reRedactStored(db: DB): number {
   let changed = 0;
-  const events = db.prepare("SELECT id, text FROM session_events WHERE kind IN ('prompt', 'verify')").all() as { id: number; text: string }[];
+  const events = db.prepare("SELECT id, session_id, repo_id, text FROM session_events WHERE kind IN ('prompt', 'verify')").all() as SessionRef[];
   const setEvent = db.prepare("UPDATE session_events SET text = ? WHERE id = ?");
+  const sessions: SessionRef[] = [];
   for (const row of events) {
     const clean = redact(row.text);
     if (clean === row.text) continue;
     setEvent.run(clean, row.id);
+    sessions.push(row);
     changed++;
   }
+  // 이미 접힌 "커밋 없는 프롬프트" 문서도 지운 글로 다시 쓴다 — 원문만 고치면 비밀이 검색 색인에 남는다
+  refreshSessionDocsOf(db, sessions);
   const rows = db.prepare("SELECT repo_id, sha, kind, ord, text FROM commit_context WHERE kind IN ('prompt', 'verify')").all() as {
     repo_id: number;
     sha: string;

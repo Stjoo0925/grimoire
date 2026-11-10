@@ -295,10 +295,41 @@ test("마이그레이션 16: 0.14 전에 색인된 revert·Supersedes: 트레일
   db.close();
 
   db = openDb(file);
-  assert.equal(db.pragma("user_version"), 17);
+  assert.equal(db.pragma("user_version"), 18);
   assert.equal(isSuperseded(db, "commit", first), true, "revert가 채워진다");
   assert.equal(isSuperseded(db, "commit", revert), true, "Supersedes: 트레일러가 채워진다");
   assert.equal(fileContext(db, repo.id, "src/a.ts").why, null, "되돌려진 커밋의 Why는 고르지 않는다");
   assert.equal(backfillCommitVerdicts(db), 0, "두 번째는 아무것도 더하지 않는다");
+  db.close();
+});
+
+test("마이그레이션 17: refs가 빈 옛 노트의 근거를 같은 규칙으로 채운다 — 본문은 그대로, 레포 없는 노트·맞는 커밋 없는 sha는 묶지 않는다", async () => {
+  const { openDb } = await import("../src/core/db.js");
+  const { backfillNoteRefs } = await import("../src/core/notes.js");
+  const { tempDir } = await import("./helpers.js");
+  const file = path.join(tempDir("grimoire-refs-"), "grimoire.db");
+  const dir = makeRepo([{ message: "feat: 캐시", files: { "src/a.ts": "export const a = 1;\n" } }], "refs-backfill");
+  const sha = (await headSha(dir))!;
+  let db = openDb(file);
+  const repo = await addRepo(db, dir);
+  await syncRepo(db, repo);
+  const text = `교훈: ${sha.slice(0, 8)}에서 캐시를 넣었다`;
+  const cited = addNote(db, { text, repoId: repo.id, source: "mcp" });
+  const loose = addNote(db, { text: `레포 없는 노트 ${sha.slice(0, 8)}`, source: "mcp" });
+  const unknown = addNote(db, { text: "없는 커밋 deadbeef12", repoId: repo.id, source: "mcp" });
+  // 0.14 전 상태로 — refs를 채운 적이 없던 때, 마이그레이션 17 전
+  db.exec("UPDATE notes SET refs = '[]'");
+  db.pragma("user_version = 17");
+  db.close();
+
+  db = openDb(file);
+  assert.equal(db.pragma("user_version"), 18);
+  const refsOf = (id: number) => JSON.parse((db.prepare("SELECT refs FROM notes WHERE id = ?").get(id) as { refs: string }).refs) as string[];
+  assert.deepEqual(refsOf(cited.id), [sha]);
+  assert.deepEqual(refsOf(loose.id), []);
+  assert.deepEqual(refsOf(unknown.id), []);
+  assert.equal((db.prepare("SELECT text FROM notes WHERE id = ?").get(cited.id) as { text: string }).text, text, "본문은 건드리지 않는다");
+  assert.deepEqual(notesCiting(db, repo.id, sha).map((item) => item.id), [cited.id]);
+  assert.equal(backfillNoteRefs(db), 0, "두 번째는 아무것도 채우지 않는다");
   db.close();
 });

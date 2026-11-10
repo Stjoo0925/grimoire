@@ -21,6 +21,7 @@ import {
   commitDir,
   committedShas,
   commitSucceeded,
+  foldQuietSessions,
   isGitCommit,
   isSymptomOnly,
   isVerifyCommand,
@@ -29,7 +30,8 @@ import {
   pruneEvents,
   recordEvent,
   recordPrompt,
-  SESSION_TTL_DAYS as EVENT_TTL_DAYS,
+  SESSION_QUIET_MS,
+  unboundPromptCount,
   verifyOutcome,
   verifyRecord,
   whyLine,
@@ -86,8 +88,10 @@ export interface SessionState {
 const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 /** 세션 파일 보존 기간 */
 export const SESSION_TTL_DAYS = 14;
-/** 이보다 오래 기록이 없는 세션은 끝난 것으로 본다 (SessionStart의 "묶이지 않은 프롬프트" 집계용) */
-export const SESSION_QUIET_MS = 6 * 3_600_000;
+/** 이보다 오래 기록이 없는 세션은 끝난 것으로 본다 (capture.ts — 묶이지 않은 프롬프트를 접고 셀 때) */
+export { SESSION_QUIET_MS };
+/** SessionStart가 "커밋에 닿지 않은 프롬프트"를 세는 기간 — 지우는 기한이 아니다(그런 프롬프트는 지우지 않는다) */
+export const UNBOUND_NOTICE_DAYS = 14;
 
 export function sessionsDir(env: Env): string {
   return path.join(grimoireHome(env), "sessions");
@@ -371,6 +375,8 @@ export function needsBackgroundSync(db: DB, env: Env, repo: RepoRow, now = Date.
 async function sessionStart(context: HookContext, input: HookInput): Promise<HookOutput | null> {
   pruneSessions(context.env);
   pruneEvents(context.db);
+  // 조용해진 세션의 묶이지 않은 프롬프트를 검색 문서로 — 레포 밖 세션의 것도 (등록 레포 밖에서 시작해도 돈다)
+  foldQuietSessions(context.db);
   // 업데이트는 옛 코드가 돌아 훅 설정·스킬을 새로 쓰지 못한다 — 새 버전의 이 훅이 알아보고 뒤에서 맞춘다(다음 세션부터).
   // 등록 레포 밖의 세션에서도 맞춘다
   const setup = context.settingsFile ? setupNeeded(context.env, path.dirname(path.dirname(context.settingsFile)), context.hookPath) : { hooks: false, skill: false };
@@ -405,19 +411,13 @@ async function sessionStart(context: HookContext, input: HookInput): Promise<Hoo
     )
     .all(repo.id) as { path: string }[];
   if (uncommitted.length > 0) lines.push(`Edited but not committed in earlier sessions: ${uncommitted.map((row) => row.path).join(", ")}`);
-  // 커밋에 묶이지 않은 채 지워질 날을 기다리는 이전 세션의 프롬프트 — "하지 않기로 한 이유"는 커밋을 만들지 않아 여기서만 보인다 (docs/feature-audit.md F2)
-  // 지금 돌고 있을 수 있는 세션(최근 SESSION_QUIET_MS 안에 기록이 있는 것)은 세지 않는다 — 곧 커밋할지 모른다
-  const quietBefore = new Date(Date.now() - SESSION_QUIET_MS).toISOString();
-  const orphan = context.db
-    .prepare(
-      `SELECT COUNT(*) AS n, MIN(at) AS oldest FROM session_events e WHERE repo_id = ? AND kind = 'prompt' AND session_id <> ?
-          AND NOT EXISTS (SELECT 1 FROM session_events c WHERE c.session_id = e.session_id AND c.repo_id = e.repo_id AND c.kind = 'commit' AND c.at > e.at)
-          AND NOT EXISTS (SELECT 1 FROM session_events l WHERE l.session_id = e.session_id AND l.at > ?)`,
-    )
-    .get(repo.id, input.session_id ?? "", quietBefore) as { n: number; oldest: string | null };
-  if (orphan.n > 0 && orphan.oldest) {
-    const daysLeft = Math.max(0, EVENT_TTL_DAYS - Math.floor((Date.now() - Date.parse(orphan.oldest)) / 86_400_000));
-    lines.push(`${orphan.n} prompt(s) from earlier sessions were never bound to a commit (oldest expires in ${daysLeft}d) — a decision made without a commit survives only as a record_note.`);
+  // 커밋에 묶이지 않은 이전 세션의 프롬프트 — "하지 않기로 한 이유"는 커밋을 만들지 않는다 (docs/feature-audit.md F2). 지우지 않고
+  // 검색 문서(kind 'session')로 남지만, 파일에 묶인 결정이 되려면 사람이 record_note로 건져야 한다. 최근 UNBOUND_NOTICE_DAYS 것만 센다 —
+  // 남는 것은 쌓이기만 하니 전부 세면 매 세션 같은 숫자가 되풀이된다(기본은 침묵). 지금 돌고 있을 수 있는 세션(SESSION_QUIET_MS)은 세지 않는다
+  const since = new Date(Date.now() - UNBOUND_NOTICE_DAYS * 86_400_000).toISOString();
+  const unbound = unboundPromptCount(context.db, repo.id, { exceptSession: input.session_id ?? "", since });
+  if (unbound > 0) {
+    lines.push(`${unbound} prompt(s) from sessions in the last ${UNBOUND_NOTICE_DAYS}d never reached a commit — kept and searchable (search_memory kind "session"); record_note pins a decision to its files.`);
   }
   let text = lines.join("\n");
   while (text.length > START_BUDGET && lines.length > 2) {

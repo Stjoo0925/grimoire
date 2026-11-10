@@ -313,6 +313,27 @@ test("doctor: README식 'node' 설정과 빈 DB를 짚어 낸다", async () => {
   assert.ok(fixed.some((c) => c.level === "ok" && c.title === "claude-desktop: 등록됨"));
 });
 
+test("doctor: Claude Desktop과 Claude Code 사용자 설정 양쪽에 등록돼 있으면 Code 탭의 서버를 짚는다", async () => {
+  const home = tempDir();
+  const cliPath = fakeCli();
+  const offline = (async () => {
+    throw new Error("down");
+  }) as unknown as typeof fetch;
+  const env = { GRIMOIRE_HOME: path.join(home, ".grimoire"), GRIMOIRE_ME: "me@example.com" };
+  const both = (checks: Awaited<ReturnType<typeof doctor>>) => checks.find((c) => c.title.includes("양쪽에 등록돼 있습니다"));
+
+  await install("claude-desktop", { cliPath, env, home });
+  assert.equal(both(await doctor({ cliPath, env, home, fetchImpl: offline, runCommand: noClaude })), undefined);
+  // ~/.claude.json의 사용자 범위 mcpServers (프로젝트 범위는 projects 아래라 세지 않는다)
+  const spec = { command: process.execPath, args: [cliPath, "mcp"] };
+  fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({ projects: { "/x": { mcpServers: { grimoire: spec } } } }));
+  assert.equal(both(await doctor({ cliPath, env, home, fetchImpl: offline, runCommand: noClaude })), undefined);
+  fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({ mcpServers: { grimoire: spec } }));
+  const warned = both(await doctor({ cliPath, env, home, fetchImpl: offline, runCommand: noClaude }));
+  assert.equal(warned?.level, "warn");
+  assert.match(warned?.detail ?? "", /claude_desktop_config\.json/);
+});
+
 test("빈 DB 안내와 add_repo: 안내를 보고 대화 중에 등록할 수 있다", async () => {
   const db = memoryDb();
   const repoDir = makeRepo([{ message: "feat: 결제 웹훅 서명 검증", files: { "src/pay.ts": "x" } }], "pay");
@@ -458,7 +479,7 @@ test("doctor: 훅이 CLI와 다른 데이터 폴더를 보면 알리고, hook.lo
 });
 
 test("스킬: 설치는 올바른 frontmatter로 쓰고, 두 번째는 그대로이며, 제거는 그 폴더만 지운다", async () => {
-  const { installSkill, skillFile, SKILL_CONTENT } = await import("../src/setup/skills.js");
+  const { installSkill, skillFile, skillState, SKILL_CONTENT, AGENTS_SKILL_CONTENT } = await import("../src/setup/skills.js");
   const home = tempDir();
   const other = path.join(home, ".claude", "settings.json");
   fs.mkdirSync(path.dirname(other), { recursive: true });
@@ -479,6 +500,17 @@ test("스킬: 설치는 올바른 frontmatter로 쓰고, 두 번째는 그대로
   assert.ok(/^---\nname: grimoire-impact\ndescription: .+\n---\n/.test(text), "frontmatter에 name과 description");
   assert.ok(text.includes("mcp__grimoire__impact"));
   assert.ok(text.split("\n").length < 60);
+  // 다시 볼 조건을 한 번 묻고, 답이 있을 때만 트레일러로 (docs/memory-philosophy.md §3-D)
+  for (const content of [SKILL_CONTENT, AGENTS_SKILL_CONTENT]) {
+    assert.match(content, /Ask the user once: "Is there a condition under which this decision should be revisited\?"/);
+    assert.match(content, /`Revisit-when: <condition>` trailer to the commit message\. If not, add nothing/);
+    assert.match(content, /`Rejected: <alternative> \| <reason>` trailer, the reason states the condition at the time/);
+  }
+  // 이미 설치된 옛 스킬은 내용이 달라 낡은 것으로 보인다 — 자동 갱신(setup-refresh)이 새 문구를 쓴다
+  fs.writeFileSync(skillFile(home), SKILL_CONTENT.replace(/^4\. .*\n/m, ""));
+  assert.equal(skillState(home), "stale");
+  installSkill({ home, auto: true });
+  assert.equal(skillState(home), "current");
   assert.ok(!fs.readdirSync(path.dirname(skillFile(home))).some((name) => name.endsWith(".tmp")));
 
   assert.equal(installSkill({ home }).unchanged, true);

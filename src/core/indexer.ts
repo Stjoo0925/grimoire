@@ -113,10 +113,24 @@ export function removeRepo(db: DB, repo: RepoRow): void {
  * 레포를 지우면 함께 사라지는, git에는 없는 기억의 크기 — 커밋에 묶인 세션 기록·트레일러(commit_context)와 노트.
  * 색인(커밋·코드·규칙·공변경)은 다시 만들 수 있지만 이 둘은 못 만든다. remove가 지우기 전에 보이고 확인을 받는다 (docs/feature-audit.md F5).
  */
-export function repoMemorySize(db: DB, repoId: number): { context: number; notes: number; verdicts: number } {
+export function repoMemorySize(db: DB, repoId: number): { context: number; notes: number; verdicts: number; prompts: number } {
   const context = (db.prepare("SELECT COUNT(*) AS n FROM commit_context WHERE repo_id = ?").get(repoId) as { n: number }).n;
   const notes = (db.prepare("SELECT COUNT(*) AS n FROM notes WHERE repo_id = ?").get(repoId) as { n: number }).n;
-  return { context, notes, verdicts: verdictsOfRepo(db, repoId).length };
+  return { context, notes, verdicts: verdictsOfRepo(db, repoId).length, prompts: unboundPromptsOfRepo(db, repoId).length };
+}
+
+/**
+ * 이 레포에서 커밋에 끝내 묶이지 않은 세션 프롬프트(capture.ts가 지우지 않고 남긴 것). session_events는 레포와 함께 지워지므로(CASCADE)
+ * commit_context처럼 remove 전에 세고 export로 꺼낸다. 아직 커밋 전인 지금 세션의 프롬프트도 함께 — 지우면 같이 사라진다.
+ */
+function unboundPromptsOfRepo(db: DB, repoId: number): { session_id: string; at: string; text: string }[] {
+  return db
+    .prepare(
+      `SELECT e.session_id, e.at, e.text FROM session_events e WHERE e.repo_id = ? AND e.kind = 'prompt'
+          AND NOT EXISTS (SELECT 1 FROM session_events c WHERE c.session_id = e.session_id AND c.repo_id = e.repo_id AND c.kind = 'commit' AND c.at >= e.at)
+        ORDER BY e.at, e.id`,
+    )
+    .all(repoId) as { session_id: string; at: string; text: string }[];
 }
 
 export interface RepoMemoryExport {
@@ -126,6 +140,8 @@ export interface RepoMemoryExport {
   commits: { sha: string; subject: string; authoredAt: string; context: { kind: string; text: string }[] }[];
   /** 확인·뒤집기 기록 (supersede.ts) — 노트는 레포를 지워도 남지만 이 기록은 꺼내 두어야 되살릴 수 있다 */
   verdicts: Verdict[];
+  /** 커밋에 묶이지 않은 세션 프롬프트 — 세션별, 원문 그대로 (capture.ts) */
+  sessions: { sessionId: string; prompts: { at: string; text: string }[] }[];
 }
 
 /** git에 없는 기억을 JSON으로 꺼낸다 — remove 전에, 또는 백업으로. 색인은 넣지 않는다(다시 만들 수 있다). */
@@ -151,7 +167,20 @@ export function exportRepoMemory(db: DB, repo: RepoRow): RepoMemoryExport {
     entry.context.push({ kind: row.kind, text: row.text });
     commits.set(row.sha, entry);
   }
-  return { repo: { name: repo.name, path: repo.path, remote: repo.remote_url }, exportedAt: new Date().toISOString(), notes, commits: [...commits.values()], verdicts: verdictsOfRepo(db, repo.id) };
+  const sessions = new Map<string, RepoMemoryExport["sessions"][number]>();
+  for (const row of unboundPromptsOfRepo(db, repo.id)) {
+    const entry = sessions.get(row.session_id) ?? { sessionId: row.session_id, prompts: [] };
+    entry.prompts.push({ at: row.at, text: row.text });
+    sessions.set(row.session_id, entry);
+  }
+  return {
+    repo: { name: repo.name, path: repo.path, remote: repo.remote_url },
+    exportedAt: new Date().toISOString(),
+    notes,
+    commits: [...commits.values()],
+    verdicts: verdictsOfRepo(db, repo.id),
+    sessions: [...sessions.values()],
+  };
 }
 
 export function listRepos(db: DB): RepoRow[] {

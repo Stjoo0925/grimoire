@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.0](https://github.com/Stjoo0925/grimoire/compare/v0.14.3...v0.15.0) (2026-11-10)
+
+
+### 기능
+
+* **memory:** 커밋에 묶이지 않은 프롬프트를 지우지 않고, roots 작업 레포·훅 종료를 바로잡는다 ([#63](https://github.com/Stjoo0925/grimoire/issues/63)) ([eb1c550](https://github.com/Stjoo0925/grimoire/commit/eb1c550a60906ec89f8cb0d009271662bb869e1b))
+
 ## [0.14.3](https://github.com/Stjoo0925/grimoire/compare/v0.14.2...v0.14.3) (2026-11-09)
 
 

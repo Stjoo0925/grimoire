@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.1](https://github.com/Stjoo0925/grimoire/compare/v0.15.0...v0.15.1) (2026-11-11)
+
+
+### 버그 수정
+
+* **usage:** impact를 커밋마다 부르면 비교군이 사라지던 것 — 직전 커밋 뒤 호출로 나눠 비교한다 ([#65](https://github.com/Stjoo0925/grimoire/issues/65)) ([64eadc8](https://github.com/Stjoo0925/grimoire/commit/64eadc81fcce951dc224edd9ea616c0a897abd14))
+
 ## [0.15.0](https://github.com/Stjoo0925/grimoire/compare/v0.14.3...v0.15.0) (2026-11-10)
 
 

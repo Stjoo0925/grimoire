@@ -23,6 +23,9 @@
  * 같은 변경(브랜치 원본↔squash)은 한 번만, 되돌리기·큰 fix는 빼고, fix 하나는 그 파일을 직전에 건드린 커밋 하나에만 매긴다.
  * 실전 recall: impact MCP를 부른 세션에서, 커밋 직전 마지막 impact 결과(제안 목록)에 놓친 파일이 들어 있었던 비율.
  * 스킬이 CLI로 부른 impact는 결과 형식이 달라 recall에 넣지 않는다.
+ *
+ * 이 커밋을 앞두고 불렀나(5번): "세션이 그 전에 한 번이라도 불렀나"는 스킬이 커밋마다 강제된 뒤로 모든 커밋이 "부름"이라
+ * 비교군이 없다(노트 #104). 같은 세션의 직전 커밋 뒤 ~ 이 커밋 사이에 부른 것만 "부름"으로 다시 나눠 크기별로 낸다.
  */
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -402,6 +405,15 @@ export function usedImpactBefore(s: Session, t: number): boolean {
   return s.calls.some((k) => isImpactCall(k) && k.ts <= t);
 }
 
+/**
+ * 세션이 (after, t] 사이에 impact(MCP/스킬)를 불렀나 — after는 같은 세션의 직전 커밋 시각.
+ * usedImpactBefore는 세션 초반에 한 번만 불러도 뒤 커밋 전부를 "부름"으로 센다. 스킬이 커밋마다 강제된 뒤로는
+ * 모든 커밋이 "부름"이 되어 비교군이 사라졌다(노트 #104) — 이 커밋을 앞두고 불렀는지는 이쪽으로 본다.
+ */
+export function usedImpactBetween(s: Session, after: number, t: number): boolean {
+  return s.calls.some((k) => isImpactCall(k) && k.ts > after && k.ts <= t);
+}
+
 export function usedGrimoireBefore(s: Session, t: number): boolean {
   return s.calls.some((k) => grimoireTool(k.name) !== null && k.ts <= t);
 }
@@ -466,6 +478,20 @@ export interface RetouchReport {
   overall: Rate;
   missed: MissedReport;
   recall: RecallReport;
+  perCommit: PerCommitReport;
+}
+
+/** "이 커밋을 앞두고"(같은 세션의 직전 커밋 뒤에) impact를 불렀는지로 나눈 비교. with = 부름, without = 안 부름. */
+export interface PerCommitReport {
+  retouch: { withImpact: Rate; withoutImpact: Rate };
+  /** retouched = 놓친 파일이 하나라도 있는 커밋 */
+  missed: { withImpact: Rate; withoutImpact: Rate };
+  avgFiles: { withImpact: number | null; withoutImpact: number | null };
+  bySize: Array<{
+    label: string;
+    retouch: { withImpact: Rate; withoutImpact: Rate };
+    missed: { withImpact: Rate; withoutImpact: Rate };
+  }>;
 }
 
 export function retouchReport(
@@ -484,6 +510,9 @@ export function retouchReport(
   const files = { imp: 0, noImp: 0 };
   const sized = SIZE_BUCKETS.map(() => ({ imp: [0, 0], noImp: [0, 0] }));
   const recall = { commits: 0, commitsHit: 0, missed: 0, suggested: 0 };
+  // 직전 커밋 뒤에 impact를 불렀는지로 나눈 쪽: [n, 재손질, 놓친 파일 있음, 파일 수 합]
+  const fresh = { imp: [0, 0, 0, 0], noImp: [0, 0, 0, 0] };
+  const freshSized = SIZE_BUCKETS.map(() => ({ imp: [0, 0, 0, 0], noImp: [0, 0, 0, 0] }));
   const bump = (a: number[], hit: boolean) => {
     a[0]++;
     if (hit) a[1]++;
@@ -491,9 +520,14 @@ export function retouchReport(
   for (const [repo, sessions] of sessionsByRepo) {
     // 브랜치 원본과 squash 커밋을 둘 다 세면 같은 작업이 두 번 표본이 되고, fixTarget도 엉뚱한 쪽을 고른다
     const commits = dedupeChanges(commitsByRepo.get(repo) ?? []);
+    // 세션별 직전 커밋 시각 — 기간 밖·48시간 미경과 커밋도 "직전 커밋"이므로 걸러 내기 전에 적는다 (commits는 시각순)
+    const prevCommitAt = new Map<Session, number>();
     for (const c of commits) {
-      if (c.at < since || c.at >= until) continue;
+      if (c.at >= until) continue;
       const { session, ambiguous: amb } = attributeCommit(c, sessions);
+      const prevAt = session ? (prevCommitAt.get(session) ?? -Infinity) : -Infinity;
+      if (session) prevCommitAt.set(session, c.at);
+      if (c.at < since) continue;
       if (amb) ambiguous++;
       if (!session) continue;
       inSessions++;
@@ -513,6 +547,13 @@ export function retouchReport(
       files[impact ? "imp" : "noImp"] += c.files.length;
       const bucket = SIZE_BUCKETS.findIndex((b) => c.files.length >= b.min && c.files.length <= b.max);
       if (bucket >= 0) bump(impact ? sized[bucket].imp : sized[bucket].noImp, missed.length > 0);
+      const key = usedImpactBetween(session, prevAt, c.at) ? "imp" : "noImp";
+      for (const a of bucket >= 0 ? [fresh[key], freshSized[bucket][key]] : [fresh[key]]) {
+        a[0]++;
+        if (hit) a[1]++;
+        if (missed.length > 0) a[2]++;
+        a[3] += c.files.length;
+      }
       const last = missed.length > 0 ? lastImpactBefore(session, c.at) : null;
       if (last) {
         const suggested = new Set(last.suggested);
@@ -547,6 +588,18 @@ export function retouchReport(
       })),
     },
     recall: { ...recall, rate: recall.missed ? recall.suggested / recall.missed : null },
+    perCommit: {
+      ...freshRates(fresh),
+      avgFiles: { withImpact: avg(fresh.imp[3], fresh.imp[0]), withoutImpact: avg(fresh.noImp[3], fresh.noImp[0]) },
+      bySize: SIZE_BUCKETS.map((b, i) => ({ label: b.label, ...freshRates(freshSized[i]) })),
+    },
+  };
+}
+
+function freshRates(g: { imp: number[]; noImp: number[] }) {
+  return {
+    retouch: { withImpact: rate(g.imp[0], g.imp[1]), withoutImpact: rate(g.noImp[0], g.noImp[1]) },
+    missed: { withImpact: rate(g.imp[0], g.imp[2]), withoutImpact: rate(g.noImp[0], g.noImp[2]) },
   };
 }
 
@@ -670,6 +723,18 @@ export function formatReport(r: UsageReport): string {
   out.push(`4. 실전 recall — 놓친 파일이 커밋 직전 impact 제안 목록(최대 10개)에 있었던 비율`);
   out.push(`  파일 기준 ${pctOf(rc.rate)}  (놓친 파일 ${rc.missed}개 중 ${rc.suggested}개)`);
   out.push(`  커밋 기준 ${pctOf(rc.commits ? rc.commitsHit / rc.commits : null)}  (커밋 ${rc.commits}개 중 ${rc.commitsHit}개에서 하나 이상 맞힘)`);
+  out.push("");
+  const p = t.perCommit;
+  const cell = (r: Rate) => `${pct(r).padStart(4)} (${r.retouched}/${r.n})`;
+  const pair = (g: { withImpact: Rate; withoutImpact: Rate }) => `${cell(g.withImpact)} | ${cell(g.withoutImpact)}`;
+  out.push("5. 이 커밋을 앞두고 impact를 불렀나 — 같은 세션의 직전 커밋 뒤에 부른 것만 '부름' (부름 | 안 부름)");
+  out.push(`  재손질률       ${pair(p.retouch)}`);
+  out.push(`  놓친 파일률    ${pair(p.missed)}`);
+  out.push(`  커밋당 평균 파일 수: 부름 ${avg(p.avgFiles.withImpact)}, 안 부름 ${avg(p.avgFiles.withoutImpact)}`);
+  out.push("  크기별 재손질률 / 놓친 파일률:");
+  for (const b of p.bySize) out.push(`    ${b.label.padEnd(8)} ${pair(b.retouch)}  /  ${pair(b.missed)}`);
+  const smallP = Math.min(p.retouch.withImpact.n, p.retouch.withoutImpact.n);
+  if (smallP < 30) out.push(`  주의: 작은 쪽 표본이 ${smallP}개라 차이를 해석하기 어렵다.`);
   return out.join("\n");
 }
 

@@ -212,6 +212,12 @@ test("buildReport: 실제 git 레포·합성 대화 기록으로 세션→커밋
   assert.deepEqual([rep.retouch.withImpact.n, rep.retouch.withImpact.retouched], [2, 1]); // feat: a(재손질)·fix: a(뒤따르는 fix 없음)
   assert.deepEqual([rep.retouch.withoutImpact.n, rep.retouch.withoutImpact.retouched], [1, 0]);
   assert.equal(rep.retouch.immature, 0);
+  // 직전 커밋 뒤에 불렀나: feat: a만 부름(재손질). fix: a는 같은 세션이지만 feat: a 뒤로 impact가 없어 안 부름
+  const pc = rep.retouch.perCommit;
+  assert.deepEqual([pc.retouch.withImpact.n, pc.retouch.withImpact.retouched], [1, 1]);
+  assert.deepEqual([pc.retouch.withoutImpact.n, pc.retouch.withoutImpact.retouched], [2, 0]);
+  assert.deepEqual([pc.avgFiles.withImpact, pc.avgFiles.withoutImpact], [1, 1]);
+  assert.deepEqual([pc.bySize[0].retouch.withImpact.n, pc.bySize[0].missed.withoutImpact.n], [1, 2]);
 
   // 최근 커밋은 48시간이 안 지나 비율에서 빠진다
   const recent = await buildReport({
